@@ -36,7 +36,7 @@ For technical details, please refer to our paper on NeurIPS 2024:
 </p>
 
 ## 🔥 News
-- [2025-07-21] [Bug] Please refer to [generate_4d_polar_doppler.py](generate_4d_polar_doppler.py) rather than [generate_4d_polar_percentil.py](generate_4d_polar_percentil.py) for sparse radar tensor generation. See [#10].
+- [2025-07-21] [Bug] Please refer to [generate_4d_polar_doppler.py](generate_4d_polar_doppler.py) rather than [generate_4d_polar_percentil.py](generate_4d_polar_percentil.py) for sparse radar tensor generation. See [#10](https://github.com/Toytiny/RadarOcc/issues/10).
 - [2024-05-22] Our preprint paper is available on 👉[arXiv](https://arxiv.org/abs/2405.14014).
 - [2024-09-26] Our paper is accepted by [NeurIPS 2024](https://neurips.cc/) 🎉.
 - [2024-11-04] Our network and training code is uploaded. Stay tuned for update👀!
