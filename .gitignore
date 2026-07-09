@@ -143,3 +143,21 @@ dmypy.json
 .vscode/
 third_party/VoxFormer_backup/
 mmdetection3d/
+
+# local data / outputs
+data/
+work_dirs/
+checkpoints/
+*.pth
+*.pkl
+*.npz
+*.npy
+*.mat
+
+# build artifacts
+build/
+dist/
+*.egg-info/
+*.so
+__pycache__/
+*.pyc
