@@ -368,7 +368,9 @@ model = dict(
                         type='DeformCrossAttention3DCustom',
                         embed_dims=144,
                         num_levels=1,
-                        num_points=4)
+                        num_points=4,
+                        im2col_step=1,
+                        num_heads=9)
                 ],
                 ffn_cfgs=dict(
                     type='FFN',
@@ -400,7 +402,9 @@ model = dict(
                         fp16_enabled=False,
                         embed_dims=144,
                         num_levels=1,
-                        num_points=4)
+                        num_points=4,
+                        im2col_step=1,
+                        num_heads=9)
                 ],
                 ffn_cfgs=dict(
                     type='FFN',
@@ -529,7 +533,4 @@ lr_config = dict(
     warmup_ratio=0.3333333333333333,
     min_lr_ratio=0.001)
 runner = dict(type='EpochBasedRunner', max_epochs=1)
-custom_hooks = [dict(type='OccEfficiencyHook')]
-
-# Smoke test不运行推理效率Hook
 custom_hooks = []
