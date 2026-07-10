@@ -161,3 +161,30 @@ dist/
 *.so
 __pycache__/
 *.pyc
+
+# Local datasets and generated annotations
+data/
+*.pkl
+*.npz
+*.npy
+
+# Training outputs
+work_dirs/
+checkpoints/
+*.pth
+*.log
+
+# Compiled and temporary files
+*.so
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.pyc
+*.bak
+*.bak_*
+*.bak*
+
+# Local IDE/system files
+.vscode/
+.idea/
