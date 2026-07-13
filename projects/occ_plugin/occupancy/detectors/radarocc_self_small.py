@@ -81,10 +81,12 @@ class RadarOcc_small(BEVDepth):
         return azimuth_idx.cuda(),elevation_idx.cuda(),range_idx.cuda()
     
 
-    def cartesian_to_spherical(self,x, y, z):
-        r = torch.sqrt(x**2 + y**2 + z**2)
-        theta = torch.atan2(y, x)  # azimuth
-        phi = torch.asin(z / r)    # elevation
+    def cartesian_to_spherical(self, x, y, z):
+        # 避免 r=0，以及浮点误差使 z/r 超出 [-1, 1]
+        r = torch.sqrt(x**2 + y**2 + z**2).clamp_min(1e-6)
+        theta = torch.atan2(y, x)
+        ratio = (z / r).clamp(min=-1.0, max=1.0)
+        phi = torch.asin(ratio)
         return r, theta, phi
 
     def get_reference_points_spherical(self,H=128, W=128, Z=14, bs=1, device='cpu',scale=4, dtype=torch.float,spherical_shape=[64,64,10]):
@@ -177,7 +179,6 @@ class RadarOcc_small(BEVDepth):
         return {'x': x,
                 'img_feats': [x.clone()]}
     
-    @auto_fp16()
     def occ_encoder(self, x):
         x = self.occ_encoder_backbone(x)
         x = self.occ_encoder_neck(x)
@@ -296,9 +297,9 @@ class RadarOcc_small(BEVDepth):
             sp_indices = torch.cat((batch_indices, final_elevation_inds.unsqueeze(-1),final_range_inds.unsqueeze(-1),final_azimuth_inds.unsqueeze(-1)), dim=-1)
             list_sp_indices.append(sp_indices)
 
-        sparse_rdr_cube_all_batches = torch.cat(list_sparse_rdr_cubes, dim=0)
+        sparse_rdr_cube_all_batches = torch.cat(list_sparse_rdr_cubes, dim=0).float()
         sp_indices_all_batches = torch.cat(list_sp_indices, dim=0).cuda()
-        with torch.cuda.amp.autocast():
+        with torch.autocast(device_type="cuda", enabled=False):
             pts_enc_feats = self.pts_middle_encoder(sparse_rdr_cube_all_batches, sp_indices_all_batches, batch_size)
 
         if self.record_time:
@@ -392,7 +393,7 @@ class RadarOcc_small(BEVDepth):
             t1 = time.time()
             self.time_stats['sph_to_cart'].append(t1 - t0)
 
-        return voxel_feat.half(), pts_feats
+        return voxel_feat.float(), pts_feats
 
     def extract_feat(self, rdr_cube):
         """Extract features from images and points."""
@@ -418,8 +419,8 @@ class RadarOcc_small(BEVDepth):
             self.time_stats['occ_fuser'].append(t1 - t0)
 
         
-        with torch.cuda.amp.autocast():
-            voxel_feats_enc = self.occ_encoder(voxel_feats)
+        with torch.autocast(device_type="cuda", enabled=False):
+            voxel_feats_enc = self.occ_encoder(voxel_feats.float())
         if type(voxel_feats_enc) is not list:
             voxel_feats_enc = [voxel_feats_enc]
 
@@ -430,7 +431,6 @@ class RadarOcc_small(BEVDepth):
 
         return (voxel_feats_enc, img_feats, pts_feats, depth)
     
-    @auto_fp16()
     def forward_pts_train(
             self,
             voxel_feats,
@@ -446,8 +446,15 @@ class RadarOcc_small(BEVDepth):
         if self.record_time:
             torch.cuda.synchronize()
             t0 = time.time()
+        # Occupancy head 使用 FP16 时才转换为 half；
+        # 稳定配置中关闭 FP16，使用 FP32 避免数值溢出。
+        use_fp16_head = getattr(self.pts_bbox_head, 'fp16', False)
+
         for i in range(len(voxel_feats)):
-            voxel_feats[i] = voxel_feats[i].half()
+            if use_fp16_head:
+                voxel_feats[i] = voxel_feats[i].float()
+            else:
+                voxel_feats[i] = voxel_feats[i].float()
 
         outs = self.pts_bbox_head(
             voxel_feats=voxel_feats,
@@ -516,12 +523,25 @@ class RadarOcc_small(BEVDepth):
                         visible_mask=visible_mask)
         losses.update(losses_occupancy)
         if self.loss_norm:
-            pass
-            l1_deatch = 0
-            for loss_key in losses.keys():
+            # 保留归一化前的 loss，仅用于日志显示。
+            # raw_* 不含字符串 "loss"，因此不会计入总训练损失。
+            raw_log_vars = {}
 
+            for loss_key, loss_value in list(losses.items()):
                 if loss_key.startswith('loss'):
-                    losses[loss_key] = losses[loss_key] / (losses[loss_key].detach() + 1e-9)
+                    if loss_key.startswith('loss_'):
+                        raw_name = loss_key[len('loss_'):]
+                    else:
+                        raw_name = loss_key[len('loss'):]
+
+                    raw_log_vars[f'raw_{raw_name}'] = loss_value.detach()
+
+                    # 保持项目原有的动态 loss 归一化逻辑
+                    losses[loss_key] = (
+                        loss_value / loss_value.detach().abs().clamp_min(1e-3)
+                    )
+
+            losses.update(raw_log_vars)
             # for loss_key in losses.keys():
             #     if loss_key.startswith('loss_voxel_sem') is False:
             #         losses[loss_key] = losses[loss_key] / (losses[loss_key].detach() + 1e-9) * l1_deatch

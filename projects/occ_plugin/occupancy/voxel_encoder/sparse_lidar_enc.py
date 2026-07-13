@@ -540,8 +540,8 @@ class RadarEncV8small(nn.Module):
         sparse_rdr_cube = torch.cat((ele_ind.float().unsqueeze(-1),
                                 range_ind.float().unsqueeze(-1),
                                 azi_ind.float().unsqueeze(-1),
-                                voxel_features), dim=-1).to(torch.float16).cuda()
-        input_sp_tensor = spconv.SparseConvTensor(sparse_rdr_cube.to(torch.half), coors_padded, self.sparse_shape_xyz[::-1], batch_size)
+                                voxel_features), dim=-1).to(torch.float32).cuda()
+        input_sp_tensor = spconv.SparseConvTensor(sparse_rdr_cube.to(torch.float32), coors_padded, self.sparse_shape_xyz[::-1], batch_size)
 
         x = self.conv_input(input_sp_tensor)
         x_conv1 = self.conv1(x)
