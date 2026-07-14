@@ -12,8 +12,8 @@ plugin = True
 plugin_dir = "projects/occ_plugin/"
 img_norm_cfg = None
 occ_path = "/mnt/data/DataSet/K-RadarOOC/train"
-train_ann_file = "/home/xiangyu/SurroundOcc/kradar_dict_train_doppler8.pkl"
-val_ann_file = "/home/xiangyu/SurroundOcc/kradar_dict_test_doppler8.pkl"
+train_ann_file = "/home/user1/projects/RadarOcc/data/annotations/kradar_dict_train_doppler8.pkl"
+val_ann_file = "/home/user1/projects/RadarOcc/data/annotations/kradar_dict_test_doppler8.pkl"
 # For nuScenes we usually do 10-class detection
 class_names = LIST_CLS_NAME = [
     'Static',

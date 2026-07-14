@@ -31,7 +31,7 @@ from projects.occ_plugin.occupancy.apis.train import custom_train_model
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a detector')
-    parser.add_argument('config', help='train config file path')
+    parser.add_argument('--config', default='./projects/configs/baselines/RadarOcc_Small_5060_full.py', help='train config file path')
     parser.add_argument('--work-dir', help='the dir to save logs and models')
     parser.add_argument(
         '--resume-from', help='the checkpoint file to resume from')
@@ -190,6 +190,7 @@ def main():
     datasets = [build_dataset(cfg.data.train)]
         
     # add an attribute for visualization convenience
+
     model.CLASSES = datasets[0].CLASSES
     
     custom_train_model(

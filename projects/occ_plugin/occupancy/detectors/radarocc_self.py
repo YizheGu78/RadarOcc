@@ -55,7 +55,8 @@ class RadarDopplerAttnEASelf(BEVDepth):
         self.time_stats = collections.defaultdict(list)
         self.positional_encoding = build_positional_encoding(positional_encoding)
         self.transformer = build_transformer(cross_transformer)
-        self.cart_voxel_emb = nn.Embedding(128*128*14,192)
+        self.cart_voxel_emb = nn.Embedding(128*128*14,self.embed_dims)
+        # self.cart_voxel_emb = nn.Embedding(128*128*14,192)
         self.top_k = top_k
         self.self_transformer = build_transformer(self_transformer)
 

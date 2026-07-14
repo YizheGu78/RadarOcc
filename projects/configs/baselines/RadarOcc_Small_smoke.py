@@ -137,7 +137,7 @@ data = dict(
     }, ),
     val=dict(
         type='NuscOCCDataset',
-        ann_file='/home/xiangyu/SurroundOcc/kradar_dict_test_doppler8.pkl',
+        ann_file='/home/user1/projects/RadarOcc/data/annotations/kradar_dict_test_doppler8.pkl',
         pipeline=[
             dict(type='LoadSparseRadar', to_float32=True),
             dict(
@@ -184,7 +184,7 @@ data = dict(
     test=dict(
         type='NuscOCCDataset',
         data_root='data/nuscenes/',
-        ann_file='/home/xiangyu/SurroundOcc/kradar_dict_test_doppler8.pkl',
+        ann_file='/home/user1/projects/RadarOcc/data/annotations/kradar_dict_test_doppler8.pkl',
         pipeline=[
             dict(type='LoadSparseRadar', to_float32=True),
             dict(
@@ -275,8 +275,8 @@ plugin = True
 plugin_dir = 'projects/occ_plugin/'
 img_norm_cfg = None
 occ_path = '/mnt/data/DataSet/K-RadarOOC/train'
-train_ann_file = '/home/xiangyu/SurroundOcc/kradar_dict_train_doppler8.pkl'
-val_ann_file = '/home/xiangyu/SurroundOcc/kradar_dict_test_doppler8.pkl'
+train_ann_file = '/home/user1/projects/RadarOcc/data/annotations/kradar_dict_train_doppler8.pkl'
+val_ann_file = '/home/user1/projects/RadarOcc/data/annotations/kradar_dict_test_doppler8.pkl'
 LIST_CLS_NAME = [
     'Static', 'Sedan', 'Bus or Truck', 'Motorcycle', 'Bicycle', 'Pedestrian',
     'Pedestrian Group', 'Bicycle Group', 'Unknow'
@@ -427,7 +427,7 @@ test_config = dict(
     type='NuscOCCDataset',
     occ_root='/mnt/data/DataSet/K-RadarOOC/train',
     data_root='data/nuscenes/',
-    ann_file='/home/xiangyu/SurroundOcc/kradar_dict_test_doppler8.pkl',
+    ann_file='/home/user1/projects/RadarOcc/data/annotations/kradar_dict_test_doppler8.pkl',
     pipeline=[
         dict(type='LoadSparseRadar', to_float32=True),
         dict(
@@ -475,7 +475,7 @@ train_config = ({
     'occ_root':
     '/mnt/data/DataSet/K-RadarOOC/train',
     'ann_file':
-    '/home/xiangyu/SurroundOcc/kradar_dict_train_doppler8.pkl',
+    '/home/user1/projects/RadarOcc/data/annotations/kradar_dict_train_doppler8.pkl',
     'pipeline': [{
         'type': 'LoadSparseRadar',
         'to_float32': True

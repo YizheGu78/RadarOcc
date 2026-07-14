@@ -268,7 +268,7 @@ log_config = dict(
 dist_params = dict(backend='nccl')
 log_level = 'INFO'
 work_dir = 'work_dirs/radarocc_small_5060_true_fp32'
-load_from = 'work_dirs/radarocc_small_5060_full/epoch_3.pth'
+load_from = None
 resume_from = None
 workflow = [('train', 1)]
 plugin = True

@@ -1,0 +1,1 @@
+python -u train.py --config projects/configs/baselines/RadarOcc_Small_5060_full.py   --work-dir work_dirs/radarocc_small_5060_strict_resume   --gpu-ids 0   --no-validate   --resume-from work_dirs/radarocc_small_5060_full/epoch_3.pth   2>&1 | tee -a work_dirs/radarocc_small_5060_strict_resume/train_console.log

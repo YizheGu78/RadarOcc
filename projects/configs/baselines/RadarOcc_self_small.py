@@ -28,7 +28,7 @@ class_names = LIST_CLS_NAME = [
 ] 
 point_cloud_range = [0, -25.6, -2.6, 51.2, 25.6, 3.0]
 occ_size = [128, 128, 14]
-voxel_channels = [80, 160, 320, 640]
+voxel_channels = [32, 64, 128, 256]
 empty_idx = 0  # noise 0-->255
 num_cls = 3 # 
 visible_mask = False
@@ -42,15 +42,15 @@ data_root = 'data/nuscenes/'
 file_client_args = dict(backend='disk')
 
 
-numC_Trans = _dim_= 192
-voxel_out_channel = 256
+numC_Trans = _dim_ = 96
+voxel_out_channel = 64
 voxel_out_indices = (0, 1, 2, 3)
 _pos_dim_ = _dim_//3
 _ffn_dim_ = _dim_*2
 _num_cams_ = 5
-_num_layers_self_ = 2
-_num_layers_cross_ = 2
-_num_points_self_ = 8
+_num_layers_self_ = 1
+_num_layers_cross_ = 1
+_num_points_self_ = 2
 top_k = 50
 model = dict(
     type='RadarDopplerAttnEASelf',
@@ -60,7 +60,7 @@ model = dict(
     pts_middle_encoder=dict(
         type='RadarEncV8',
         input_channel=11,
-        base_channel=32,
+        base_channel=16,
         out_channel=numC_Trans,
         top_k = top_k,
         norm_cfg=dict(type='SyncBN', requires_grad=True),
@@ -114,7 +114,7 @@ model = dict(
            num_cams = _num_cams_,
            encoder=dict(
                type='VoxFormerEncoder3D',
-               num_layers=2,
+               num_layers=_num_layers_cross_,
                pc_range=point_cloud_range,
                num_points_in_pillar=10,
                return_intermediate=False,
@@ -125,12 +125,12 @@ model = dict(
                            type='DeformCrossAttention3DCustom',
                            embed_dims=_dim_,
                            num_levels=1,
-                           num_points=8)
+                           num_points=2)
                    ],
                    ffn_cfgs=dict(
                        type='FFN',
                        embed_dims=_dim_,
-                       feedforward_channels=1024,
+                       feedforward_channels=256,
                        num_fcs=2,
                        ffn_drop=0.,
                        act_cfg=dict(type='ReLU', inplace=True),
@@ -165,7 +165,7 @@ model = dict(
                    ffn_cfgs=dict(
                        type='FFN',
                        embed_dims=_dim_,
-                       feedforward_channels=1024,
+                       feedforward_channels=256,
                        num_fcs=2,
                        ffn_drop=0.,
                        act_cfg=dict(type='ReLU', inplace=True),
