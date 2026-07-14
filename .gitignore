@@ -188,3 +188,17 @@ __pycache__/
 # Local IDE/system files
 .vscode/
 .idea/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Training outputs
+work_dirs/
+*.pth
+*.log
+
+# Local generated annotation files
+data/annotations/*.pkl
