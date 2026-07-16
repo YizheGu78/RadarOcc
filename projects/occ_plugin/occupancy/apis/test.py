@@ -93,9 +93,9 @@ def custom_single_gpu_test(model, data_loader, show=False, out_dir=None, show_sc
 
 
     res = {
-        'SC_metric': SC_metric,
-        'SSC_metric': SSC_metric,
-        'SSC_metric_fine': SSC_metric_fine,
+        'SC_metric': [SC_metric],
+        'SSC_metric': [SSC_metric],
+        'SSC_metric_fine': [SSC_metric_fine],
     }
 
     return res
