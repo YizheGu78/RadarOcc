@@ -673,7 +673,7 @@ class RadarOcc_small(BEVDepth):
         # pred = F.interpolate(pred, size=[H, W, D], mode='trilinear', align_corners=False).contiguous()
         pred = torch.argmax(pred[0], dim=0).cpu().numpy()
         gt = gt[0].cpu().numpy()
-        gt = gt.astype(np.int)
+        gt = gt.astype(np.int64)
         
 
         # ignore noise

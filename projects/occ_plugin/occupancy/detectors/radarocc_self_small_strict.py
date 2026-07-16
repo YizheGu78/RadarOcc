@@ -49,7 +49,7 @@ class RadarOcc_small_strict(RadarOcc_small):
 
         for batch_idx in range(B):
             # Official RadarOcc-S flow: 800 candidates -> top 250 per range.
-            original_k = 800
+            original_k = 250
             n_ranges = 175
 
             power_val = power_values[batch_idx][:, :original_k * n_ranges]
