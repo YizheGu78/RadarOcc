@@ -48,80 +48,118 @@ def custom_encode_mask_results(mask_results):
                         dtype='uint8'))[0])  # encoded with RLE
     return [encoded_mask_results]
 
-def custom_single_gpu_test(model, data_loader, show=False, out_dir=None, show_score_thr=0.3):
+
+def custom_single_gpu_test(
+        model,
+        data_loader,
+        show=False,
+        out_dir=None,
+        show_score_thr=0.3):
+
     model.eval()
-    
+
+    # Full-range metrics.
     SC_metric = 0
     SSC_metric = 0
-    SSC_metric_fine = 0
+
+    # Range-specific metrics required by NuscOCCDataset.evaluate().
+    SC_metric_1 = 0
+    SC_metric_2 = 0
+    SSC_metric_1 = 0
+    SSC_metric_2 = 0
+
+    # The fine branch is optional.
+    SSC_metric_fine = None
+
     dataset = data_loader.dataset
     prog_bar = mmcv.ProgressBar(len(dataset))
     logger = get_root_logger()
-    
+
     logger.info(parameter_count_table(model))
-    
+
     for i, data in enumerate(data_loader):
         with torch.no_grad():
-            result = model(return_loss=False, rescale=True, **data)
+            result = model(
+                return_loss=False,
+                rescale=True,
+                **data
+            )
 
             if show:
-                save_occ(result['pred_c'], result['pred_f'], data['img_metas'], out_dir, None, data['gt_occ'])
-            
-            # only support semantic voxel segmentation
-            if 'SC_metric' in result.keys():
-                SC_metric += result['SC_metric']
-            if 'SSC_metric' in result.keys():
-                SSC_metric += result['SSC_metric']
-            if 'SSC_metric_fine' in result.keys():
-                SSC_metric_fine += result['SSC_metric_fine']
-            batch_size = 1
+                save_occ(
+                    result['pred_c'],
+                    result['pred_f'],
+                    data['img_metas'],
+                    out_dir,
+                    None,
+                    data['gt_occ']
+                )
 
-        
-        # logging evaluation_semantic
-        if 'SC_metric' in result.keys():
+            if 'SC_metric' in result:
+                SC_metric += result['SC_metric']
+            if 'SC_metric_1' in result:
+                SC_metric_1 += result['SC_metric_1']
+            if 'SC_metric_2' in result:
+                SC_metric_2 += result['SC_metric_2']
+
+            if 'SSC_metric' in result:
+                SSC_metric += result['SSC_metric']
+            if 'SSC_metric_1' in result:
+                SSC_metric_1 += result['SSC_metric_1']
+            if 'SSC_metric_2' in result:
+                SSC_metric_2 += result['SSC_metric_2']
+
+            if 'SSC_metric_fine' in result:
+                if SSC_metric_fine is None:
+                    SSC_metric_fine = result['SSC_metric_fine'].copy()
+                else:
+                    SSC_metric_fine += result['SSC_metric_fine']
+
+        # Print the current cumulative full-range metrics.
+        if 'SC_metric' in result:
             mean_ious = cm_to_ious(SC_metric)
             print(format_SC_results(mean_ious[1:]))
-        if 'SSC_metric' in result.keys():
+
+        if 'SSC_metric' in result:
             mean_ious = cm_to_ious(SSC_metric)
             print(format_SSC_results(mean_ious))
-        if 'SSC_metric_fine' in result.keys():
+
+        if SSC_metric_fine is not None:
             mean_ious = cm_to_ious(SSC_metric_fine)
             print(format_SSC_results(mean_ious))
-        
 
         prog_bar.update()
 
-
+    # NuscOCCDataset.evaluate() reads all six coarse metric keys.
     res = {
         'SC_metric': [SC_metric],
+        'SC_metric_1': [SC_metric_1],
+        'SC_metric_2': [SC_metric_2],
         'SSC_metric': [SSC_metric],
-        'SSC_metric_fine': [SSC_metric_fine],
+        'SSC_metric_1': [SSC_metric_1],
+        'SSC_metric_2': [SSC_metric_2],
     }
 
+    if SSC_metric_fine is not None:
+        res['SSC_metric_fine'] = [SSC_metric_fine]
+
     return res
+
 
 def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False, show=False, out_dir=None):
     """Test model with multiple gpus.
     This method tests model with multiple gpus and collects the results
     under two different modes: gpu and cpu modes. By setting 'gpu_collect=True'
     it encodes results to gpu tensors and use gpu communication for results
-    collection. On cpu mode it saves the results on different gpus to 'tmpdir'
-    and collects them by the rank 0 worker.
-    Args:
-        model (nn.Module): Model to be tested.
-        data_loader (nn.Dataloader): Pytorch data loader.
-        tmpdir (str): Path of directory to save the temporary results from
-            different gpus under cpu mode.
-        gpu_collect (bool): Option to use either gpu or cpu to collect results.
-    Returns:
-        list: The prediction results.
+    collection. On cpu mode it saves the results from different gpus to 'tmpdir'
+    and collects them by rank 0.
     """
 
     model.eval()
-    
+
     # init predictions
     SC_metric = []
-    SC_metric_1 =[]
+    SC_metric_1 = []
     SC_metric_2 = []
     SSC_metric = []
     SSC_metric_1 = []
@@ -131,9 +169,9 @@ def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False, sh
     rank, world_size = get_dist_info()
     if rank == 0:
         prog_bar = mmcv.ProgressBar(len(dataset))
-    
+
     time.sleep(2)  # This line can prevent deadlock problem in some cases.
-    
+
     logger = get_root_logger()
     logger.info(parameter_count_table(model))
 
@@ -144,7 +182,7 @@ def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False, sh
 
             if show:
                 save_occ(result['pred_c'], result['pred_f'], data['img_metas'], out_dir, None, data['gt_occ'])
-            
+
             if 'SC_metric' in result.keys():
                 SC_metric.append(result['SC_metric'])
             if 'SC_metric_1' in result.keys():
@@ -162,7 +200,6 @@ def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False, sh
                 SSC_metric_fine.append(result['SSC_metric_fine'])
             batch_size = 1
 
-                
         if rank == 0:
             for _ in range(batch_size * world_size):
                 prog_bar.update()
@@ -174,40 +211,38 @@ def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False, sh
         SC_metric = collect_results_cpu(SC_metric, len(dataset), tmpdir)
         res['SC_metric'] = SC_metric
     if 'SC_metric_1' in result.keys():
-        SC_metric = [sum(SC_metric_1)]
-        SC_metric = collect_results_cpu(SC_metric_1, len(dataset), tmpdir)
-        res['SC_metric_1'] = SC_metric
+        SC_metric_1 = [sum(SC_metric_1)]
+        SC_metric_1 = collect_results_cpu(SC_metric_1, len(dataset), tmpdir)
+        res['SC_metric_1'] = SC_metric_1
     if 'SC_metric_2' in result.keys():
-        SC_metric = [sum(SC_metric_2)]
-        SC_metric = collect_results_cpu(SC_metric_2, len(dataset), tmpdir)
-        res['SC_metric_2'] = SC_metric
+        SC_metric_2 = [sum(SC_metric_2)]
+        SC_metric_2 = collect_results_cpu(SC_metric_2, len(dataset), tmpdir)
+        res['SC_metric_2'] = SC_metric_2
     if 'SSC_metric' in result.keys():
         SSC_metric = [sum(SSC_metric)]
         SSC_metric = collect_results_cpu(SSC_metric, len(dataset), tmpdir)
         res['SSC_metric'] = SSC_metric
     if 'SSC_metric_1' in result.keys():
-        SSC_metric = [sum(SSC_metric_1)]
-        SSC_metric = collect_results_cpu(SSC_metric, len(dataset), tmpdir)
-        res['SSC_metric_1'] = SSC_metric
+        SSC_metric_1 = [sum(SSC_metric_1)]
+        SSC_metric_1 = collect_results_cpu(SSC_metric_1, len(dataset), tmpdir)
+        res['SSC_metric_1'] = SSC_metric_1
     if 'SSC_metric_2' in result.keys():
-        SSC_metric = [sum(SSC_metric_2)]
-        SSC_metric = collect_results_cpu(SSC_metric, len(dataset), tmpdir)
-        res['SSC_metric_2'] = SSC_metric
-
+        SSC_metric_2 = [sum(SSC_metric_2)]
+        SSC_metric_2 = collect_results_cpu(SSC_metric_2, len(dataset), tmpdir)
+        res['SSC_metric_2'] = SSC_metric_2
 
     if 'SSC_metric_fine' in result.keys():
         SSC_metric_fine = [sum(SSC_metric_fine)]
         SSC_metric_fine = collect_results_cpu(SSC_metric_fine, len(dataset), tmpdir)
         res['SSC_metric_fine'] = SSC_metric_fine
 
-    
     return res
 
 
 def collect_results_cpu(result_part, size, tmpdir=None, type='list'):
     rank, world_size = get_dist_info()
     # create a tmp dir if it is not specified
-    
+
     if tmpdir is None:
         MAX_LEN = 512
         # 32 is whitespace
@@ -222,14 +257,14 @@ def collect_results_cpu(result_part, size, tmpdir=None, type='list'):
         tmpdir = dir_tensor.cpu().numpy().tobytes().decode().rstrip()
     else:
         mmcv.mkdir_or_exist(tmpdir)
-    
+
     # dump the part result to the dir
     mmcv.dump(result_part, osp.join(tmpdir, f'part_{rank}.pkl'))
     dist.barrier()
 
     # collect all parts
     if rank == 0:
-    
+
         # load results of all parts from tmp dir
         part_list = []
         for i in range(world_size):
@@ -239,23 +274,22 @@ def collect_results_cpu(result_part, size, tmpdir=None, type='list'):
         # sort the results
         if type == 'list':
             ordered_results = []
-            for res in part_list:  
+            for res in part_list:
                 ordered_results.extend(list(res))
             # the dataloader may pad some samples
             ordered_results = ordered_results[:size]
-        
+
         else:
             raise NotImplementedError
-        
+
         # remove tmp dir
         shutil.rmtree(tmpdir)
-    
-    # 因为我们是分别eval SC和SSC,如果其他rank提前return,开始评测SSC
-    # 而rank0的shutil.rmtree可能会删除其他rank正在写入SSC metric的文件
+
+    # Because SC and SSC are evaluated separately, other ranks may return early
+    # while rank 0 is still removing temporary files. Keep all ranks in sync.
     dist.barrier()
 
     if rank != 0:
         return None
-    
-    return ordered_results
 
+    return ordered_results
