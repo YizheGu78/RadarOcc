@@ -239,6 +239,11 @@ def main():
             model.cuda(),
             device_ids=[torch.cuda.current_device()],
             broadcast_buffers=False)
+
+        # Compatibility between legacy MMCV and recent PyTorch DDP.
+        # Old MMCV expects this removed private PyTorch attribute.
+        if not hasattr(model, '_use_replicated_tensor_module'):
+            model._use_replicated_tensor_module = False
         outputs = custom_multi_gpu_test(model, data_loader, args.tmpdir,
                                         args.gpu_collect, args.show, args.show_dir)
 

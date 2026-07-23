@@ -260,17 +260,17 @@ class RadarOcc_small(BEVDepth):
             # Get the corresponding indices for top k values
             top_k_indices = indices[:, :k]
 
-            # # top_k_indices 是每个 range 内的局部索引。
-            # # 加上每个 range 的偏移，得到 flattened power_val 的全局索引。
-            # range_offsets = (
-            #     torch.arange(
-            #         n_ranges,
-            #         device=top_k_indices.device
-            #     ).unsqueeze(1) * original_k
-            # )
-            # flat_top_k_indices = (
-            #     top_k_indices + range_offsets
-            # ).flatten()
+            # top_k_indices 是每个 range 内的局部索引。
+            # 加上每个 range 的偏移，得到 flattened power_val 的全局索引。
+            range_offsets = (
+                torch.arange(
+                    n_ranges,
+                    device=top_k_indices.device
+                ).unsqueeze(1) * original_k
+            )
+            flat_top_k_indices = (
+                top_k_indices + range_offsets
+            ).flatten()
 
             top_k_range_inds = torch.arange(
                 n_ranges,
@@ -286,13 +286,13 @@ class RadarOcc_small(BEVDepth):
             #37,107,256
             power_val = rdr_cube['power_val'][batch_idx]
             # 原来的id混用
-            sparse_rdr_cube = torch.swapaxes(
-                power_val, 0, 1
-            )[top_k_indices.flatten(), :]
-
             # sparse_rdr_cube = torch.swapaxes(
             #     power_val, 0, 1
-            # )[flat_top_k_indices, :]
+            # )[top_k_indices.flatten(), :]
+
+            sparse_rdr_cube = torch.swapaxes( 
+                power_val, 0, 1
+            )[flat_top_k_indices, :]
 
 
             list_sparse_rdr_cubes.append(sparse_rdr_cube)
