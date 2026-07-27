@@ -311,3 +311,23 @@ evaluation = dict(
 custom_hooks = [
     dict(type='OccEfficiencyHook'),
 ]
+
+
+# === OFFICIAL_SPLIT_OVERRIDE ===
+# Official train / validation / test split
+data['train']['ann_file'] = (
+    'data/annotations/'
+    'kradar_dict_train_official_doppler8.pkl'
+)
+
+data['val']['ann_file'] = (
+    'data/annotations/'
+    'kradar_dict_val_official_doppler8.pkl'
+)
+data['val']['test_mode'] = True
+
+data['test']['ann_file'] = (
+    'data/annotations/'
+    'kradar_dict_test_official_doppler8.pkl'
+)
+data['test']['test_mode'] = True
