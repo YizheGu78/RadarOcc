@@ -248,7 +248,8 @@ def main():
                                         args.gpu_collect, args.show, args.show_dir)
 
     rank, _ = get_dist_info()
-    if rank == 0 and distributed:
+    # if rank == 0 and distributed:
+    if rank == 0 :
         
         kwargs = {} if args.eval_options is None else args.eval_options
         kwargs['jsonfile_prefix'] = osp.join('test', args.config.split(

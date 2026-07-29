@@ -91,6 +91,12 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="show the top K epochs according to --best-metric",
     )
+    parser.add_argument(
+        "--epoch",
+        type=int,
+        default=None,
+        help="show all metrics for a specified epoch, e.g. --epoch 4",
+    )
     return parser.parse_args()
 
 
@@ -396,14 +402,26 @@ def main() -> int:
             f"{checkpoint if checkpoint else 'not found'}"
         )
 
-    best_epoch, best_value = ranking[0]
-    print("\nAll metrics for the best epoch:")
-    print(f"epoch: {best_epoch}")
-    print(f"{args.best_metric}: {best_value:.4f}")
+    selected_epoch = args.epoch if args.epoch is not None else ranking[0][0]
 
-    for key in sorted(epochs[best_epoch]):
-        if key != args.best_metric:
-            print(f"{key}: {epochs[best_epoch][key]:.4f}")
+    if selected_epoch not in epochs:
+        available_epochs = ", ".join(str(epoch) for epoch in sorted(epochs))
+        print(
+            f"error: epoch {selected_epoch} was not found; "
+            f"available epochs: {available_epochs}",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.epoch is None:
+        print("\nAll metrics for the best epoch:")
+    else:
+        print(f"\nAll metrics for epoch {selected_epoch}:")
+
+    print(f"epoch: {selected_epoch}")
+
+    for key in sorted(epochs[selected_epoch]):
+        print(f"{key}: {epochs[selected_epoch][key]:.4f}")
 
     if args.save_csv is not None:
         csv_path = (
