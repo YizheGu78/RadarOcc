@@ -286,13 +286,13 @@ class RadarOcc_small(BEVDepth):
             #37,107,256
             power_val = rdr_cube['power_val'][batch_idx]
             # 原来的id混用
-            # sparse_rdr_cube = torch.swapaxes(
-            #     power_val, 0, 1
-            # )[top_k_indices.flatten(), :]
-
-            sparse_rdr_cube = torch.swapaxes( 
+            sparse_rdr_cube = torch.swapaxes(
                 power_val, 0, 1
-            )[flat_top_k_indices, :]
+            )[top_k_indices.flatten(), :]
+
+            # sparse_rdr_cube = torch.swapaxes( 
+            #     power_val, 0, 1
+            # )[flat_top_k_indices, :]
 
 
             list_sparse_rdr_cubes.append(sparse_rdr_cube)
