@@ -1,131 +1,129 @@
 # Traditional Radar Occupancy Baseline
 
-This folder adds a **non-learning automotive-radar baseline** that produces the same 3-class 3D occupancy layout used by the current RadarOcc reproduction branch. It is isolated under `tradition/`; no RadarOcc neural-network module is modified.
+This folder contains the non-learning CFAR + Doppler + 3D occupancy-grid baseline for the K-Radar/RadarOcc experiment.
 
-## 1. Pipeline
+## Important: normal experiments do NOT save prediction NPY files
 
-RadarOcc avoids the conventional radar point-cloud/target-list bottleneck because CFAR discards weak returns that can be useful for full-scene occupancy. That makes a traditional target-list + occupancy-grid method a useful scientific baseline.
+RadarOcc needs persistent `pred_c.npy`/dense tensors because a learned model has a separate train/inference/evaluation workflow. The traditional pipeline does not need that separation. Its occupancy grid can be evaluated and rendered immediately in memory.
 
-```text
-K-Radar arrDREA [D,R,E,A]
-        |
-        v
-Range-Doppler power map (max over E,A)
-        |
-        v
-CA-CFAR in range AND Doppler
-        |
-        v
-Local-maximum grouping / peak selection
-        |
-        v
-Angle estimation from the E-A peak
-        |
-        v
-Target list: range, Doppler, azimuth, elevation, power
-        |
-        v
-Ego-speed compensation + Doppler static/dynamic split
-        |
-        v
-3D inverse sensor model
-  - free-space ray carving
-  - occupied endpoint evidence
-  - finite-resolution hit neighborhood
-        |
-        v
-RadarOcc grid [128,128,14]
-  0 = free
-  1 = static/background occupied
-  2 = dynamic/foreground occupied
-        |
-        v
-<output>/<token>/pred_c.npy
-rows = [z, y, x, class]
-```
-
-The user's `OGM_radar` fork is used as a design reference for inverse-sensor-model ideas (ray-based free cells and measurement uncertainty), generalized here to a 3D RadarOcc grid. The user's `OpenRadar` fork is supported through an adapter: `OpenRadarCACFAR` calls `mmwave.dsp.cfar.ca_` if that fork is installed. No source file from either external fork is vendored here.
-
-## 2. SOLID structure
+The recommended flow is now:
 
 ```text
-tradition/
-├── core/        # config, data types, interfaces, geometry
-├── io/          # K-Radar reader and RadarOcc-format writer
-├── detection/   # CFAR Strategy + target-list extraction
-├── motion/      # Doppler/ego-motion static-dynamic classifier
-├── mapping/     # 3D log-odds inverse sensor model
-├── pipeline/    # dependency-injected orchestration
-├── evaluation/  # RadarOcc-style IoU/mIoU helpers
-├── cli/         # prediction/evaluation entry points
-└── tests/       # focused unit tests
+raw K-Radar arrDREA
+        |
+        v
+CFAR + peak extraction
+        |
+        v
+Doppler static/dynamic classification
+        |
+        v
+3D occupancy grid (RAM only)
+        |----------------------|
+        v                      v
+RadarOcc metrics          overlay frame
+        |                      |
+        v                      v
+CSV / MD / PNG            camera + occupancy
+                               |
+                               v
+                            MP4 / GIF
 ```
 
-- **SRP:** reading, detection, motion classification, mapping, and serialization are separate.
-- **OCP:** another CFAR detector, tracker, or mapper can be added behind interfaces.
-- **LSP:** NumPy and OpenRadar CFAR backends satisfy the same `CFARBackend`.
-- **ISP:** interfaces are small and task-specific.
-- **DIP:** `TraditionalRadarPipeline` depends on abstractions; concrete objects are assembled in `build_default_pipeline()`.
+No per-frame traditional prediction file is written by `tradition.cli.run`.
+Temporary PNG video frames are removed after ffmpeg finishes unless `--keep-frames` is given.
 
-## 3. Coordinate/output contract
+The older `tradition/io/radarocc_writer.py` remains only as an optional compatibility/debug adapter. It is not used by the direct experiment runner.
 
-Aligned to the RadarOcc K-Radar experiment:
+## Output
 
-- ROI: x `[0, 51.2)`, y `[-25.6, 25.6)`, z `[-2.6, 3.0)` m
-- voxel size: `0.4 m`
-- dense shape: `[X,Y,Z] = [128,128,14]`
-- raw tensor: `arrDREA = [Doppler,Range,Elevation,Azimuth]`
-- radar -> LiDAR translation: `[+2.54,-0.30,-0.70]` m, inverse of the transform used in `tools/filter_kradar_fov.py`
-- sparse prediction: `[z,y,x,class]`, matching `tools/render_scene3_camera_prediction_gt.py`
+A normal run creates only human-facing experiment artifacts:
 
-Default angular bins are azimuth `-53..+53 deg` and elevation `-18..+18 deg` in 1-degree steps. If calibration differs, change `KRadarConfig`; the reader rejects unexpected tensor shapes rather than silently reinterpret bins.
+```text
+<output-dir>/
+├── traditional_metrics.csv
+├── traditional_metrics.md
+├── traditional_metrics.png
+├── scene_camera_simple_overlay.mp4   # when --video-scene is used
+└── scene_camera_simple_overlay.gif   # when --video-scene is used
+```
 
-## 4. Run
+The table contains the same four metric rows used in the RadarOcc comparison:
+
+- SC IoU
+- SSC mIoU
+- Background IoU
+- Foreground IoU
+
+at 12.8 m, 25.6 m and 51.2 m. Metrics are accumulated over the selected dataset before IoU is computed; they are not naive averages of per-frame IoUs.
+
+## Recommended test command
 
 From the RadarOcc repository root:
 
 ```bash
-PYTHONPATH=$PWD python -m tradition.cli.predict \
-  --input /path/to/K-Radar/3/radar_tesseract \
-  --output work_dirs/traditional_occ \
+PYTHONPATH=$PWD python -m tradition.cli.run \
+  --annotation data/annotations/kradar_dict_test_official_doppler8.pkl \
+  --radar-root /path/to/K-Radar \
+  --output-dir work_dirs/traditional_direct \
   --cfar-backend numpy \
   --ego-speed-mps 0.0
 ```
 
-Use the OpenRadar fork directly:
+To additionally create the same camera + Prediction/GT overlay style already used by `tools/render_scene3_camera_prediction_gt.py`:
+
+```bash
+PYTHONPATH=$PWD python -m tradition.cli.run \
+  --annotation data/annotations/kradar_dict_test_official_doppler8.pkl \
+  --radar-root /path/to/K-Radar \
+  --output-dir work_dirs/traditional_direct \
+  --cfar-backend numpy \
+  --video-scene 3 \
+  --camera-dir /path/to/K-Radar/3/cam-front \
+  --max-video-frames 100 \
+  --fps 10
+```
+
+For the OpenRadar backend:
 
 ```bash
 pip install -e /path/to/OpenRadar
-PYTHONPATH=$PWD python -m tradition.cli.predict \
-  --input /path/to/K-Radar/3/radar_tesseract \
-  --output work_dirs/traditional_occ \
-  --cfar-backend openradar \
-  --ego-speed-mps 0.0
 ```
 
-Evaluate one prediction/GT pair:
+then change `--cfar-backend numpy` to `--cfar-backend openradar`.
 
-```bash
-PYTHONPATH=$PWD python -m tradition.cli.evaluate \
-  --prediction work_dirs/traditional_occ/<lidar_token>/pred_c.npy \
-  --ground-truth /path/to/occupancy_gt_with_semantic_fov.npy \
-  --gt-order xyz
+## Architecture / SOLID
+
+```text
+tradition/
+├── core/           # config, types, interfaces, geometry
+├── io/             # raw reader; optional compatibility writer
+├── detection/      # CFAR strategy + target extraction
+├── motion/         # ego-compensated Doppler classifier
+├── mapping/        # 3D log-odds inverse sensor model
+├── pipeline/       # dependency-injected per-frame orchestration
+├── evaluation/     # dataset-level RadarOcc metrics
+├── reporting/      # CSV/Markdown/PNG result table
+├── visualization/  # adapter to existing RadarOcc video style
+├── experiment/     # direct dataset runner
+├── cli/            # command-line entry points
+└── tests/
 ```
 
-## 5. Experimental cautions
+The direct runner consumes `FramePrediction` in memory. Detection, motion classification, mapping, metrics, reporting and visualization remain separate modules.
 
-### Tune CFAR on validation, not test
+## Coordinate/output contract
 
-Guard/noise lengths and the +6 dB threshold offset in `CFARConfig` are starting values, not constants claimed by RadarOcc or the survey paper. Tune them on the validation split before reporting the traditional baseline.
+- ROI: x `[0, 51.2)`, y `[-25.6, 25.6)`, z `[-2.6, 3.0)` m
+- voxel size: 0.4 m
+- in-memory dense grid: `[X,Y,Z] = [128,128,14]`
+- classes: 0 free, 1 static/background, 2 dynamic/foreground
+- GT default coordinate order: `xyz`; override with `--gt-order zyx` if required by a specific generated GT set
 
-### Supply synchronized ego speed
+## Experimental cautions
 
-For moving ego vehicles, stationary targets normally have non-zero radial velocity. The classifier compares measured Doppler with
+CFAR guard/noise/threshold parameters are validation parameters and must be frozen before final test reporting.
 
-`v_static ~= sign * v_ego * cos(elevation) * cos(azimuth)`
+For a moving ego vehicle, `--ego-speed-mps 0` is not a valid static/dynamic compensation. A synchronized ego-speed source should be supplied for the final experiment.
 
-and wraps the residual with K-Radar's 3.84 m/s Doppler period. `--ego-speed-mps 0` on a moving sequence will over-label dynamic cells. For a full dataset run, pass frame-synchronized CAN/pose speed from a small caller around `TraditionalRadarPipeline.predict_file()`.
-
-### Classical dynamic != RadarOcc semantic foreground
-
-This baseline defines class 2 by residual Doppler. RadarOcc's class 2 represents semantic foreground, so a parked car can be foreground for RadarOcc but static here. For thesis reporting, binary occupied/free IoU is therefore the cleanest traditional-vs-RadarOcc comparison; BG/FG should be reported with this semantic mismatch explicitly stated.
+Traditional dynamic/static partition is motion-derived, whereas RadarOcc foreground/background is semantic. Therefore SC IoU is the cleanest primary traditional-vs-RadarOcc comparison; SSC Background/Foreground results should be interpreted with this mismatch stated explicitly.
