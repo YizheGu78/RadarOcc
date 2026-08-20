@@ -15,10 +15,19 @@ from tradition.visualization.radarocc_video import RadarOccStyleVideoRenderer
 
 
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
+_RAW_RADAR_EXTENSIONS = {".mat", ".npy"}
+_RAW_RADAR_DIRS = (
+    "radar_tesseract",
+    "radar_tensor_8doppler",
+    "radar_polar_cube",
+)
 
 
 def _natural_key(path: Path) -> list[object]:
-    return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", path.name)]
+    return [
+        int(part) if part.isdigit() else part.lower()
+        for part in re.split(r"(\d+)", path.name)
+    ]
 
 
 def _load_infos(annotation: Path) -> list[dict[str, Any]]:
@@ -43,53 +52,222 @@ def _first_existing(candidates: list[Path]) -> Path | None:
     return None
 
 
-def _resolve_gt(info: dict[str, Any], repo_root: Path, gt_root: Path | None) -> Path:
+def _first_raw_radar(candidates: list[Path]) -> Path | None:
+    """Return the first existing raw tensor candidate, never a sparse NPZ."""
+    for candidate in candidates:
+        candidate = candidate.expanduser()
+        if (
+            candidate.suffix.lower() in _RAW_RADAR_EXTENSIONS
+            and candidate.is_file()
+        ):
+            return candidate.resolve()
+    return None
+
+
+def _resolve_gt(
+    info: dict[str, Any],
+    repo_root: Path,
+    gt_root: Path | None,
+) -> Path:
     raw = Path(str(info["occ_path"]))
     candidates = [raw, repo_root / raw]
     if gt_root is not None:
-        candidates.extend([gt_root / raw.name, gt_root / str(info.get("scene_token", "")) / raw.name])
+        candidates.extend(
+            [
+                gt_root / raw.name,
+                gt_root / str(info.get("scene_token", "")) / raw.name,
+            ]
+        )
     resolved = _first_existing(candidates)
     if resolved is None:
-        raise FileNotFoundError(f"Cannot resolve GT occ_path={raw}; tried {candidates}")
+        raise FileNotFoundError(
+            f"Cannot resolve GT occ_path={raw}; tried {candidates}"
+        )
     return resolved
 
 
 def _radar_value(info: dict[str, Any]) -> str | None:
-    for key in ("radar_tensor_path", "rdr_tensor_path", "radar_path"):
+    """Return the radar-related path stored in the RadarOcc annotation.
+
+    Important: the current official Doppler-8 annotation can point to the
+    already-sparsified EAsparse_*.npz used by RadarOcc. That value is useful
+    for frame synchronization, but it is NOT the raw tensor consumed by the
+    traditional baseline.
+    """
+    for key in (
+        "radar_tensor_path",
+        "rdr_tensor_path",
+        "radar_path",
+        "sparse_radar_path",
+    ):
         value = info.get(key)
         if value:
             return str(value)
     curr = info.get("curr")
     if isinstance(curr, dict):
-        for key in ("radar_tensor_path", "rdr_tensor_path", "radar_path"):
+        for key in (
+            "radar_tensor_path",
+            "rdr_tensor_path",
+            "radar_path",
+            "sparse_radar_path",
+        ):
             value = curr.get(key)
             if value:
                 return str(value)
     return None
 
 
-def _resolve_radar(info: dict[str, Any], repo_root: Path, radar_root: Path | None) -> Path:
+def _frame_tokens(info: dict[str, Any], radar_value: str) -> list[str]:
+    """Get candidate frame ids while preserving zero padding when available."""
+    raw = Path(radar_value)
+    sources = [raw.stem, str(info.get("lidar_token", ""))]
+    tokens: list[str] = []
+
+    for source in sources:
+        groups = re.findall(r"\d+", source)
+        if not groups:
+            continue
+        token = groups[-1]
+        variants = [token]
+        try:
+            number = int(token)
+        except ValueError:
+            number = None
+        if number is not None:
+            variants.extend(
+                [
+                    f"{number:05d}",
+                    f"{number:06d}",
+                    str(number),
+                ]
+            )
+        for variant in variants:
+            if variant not in tokens:
+                tokens.append(variant)
+
+    return tokens
+
+
+def _raw_names(frame_tokens: list[str]) -> list[str]:
+    names: list[str] = []
+    for frame in frame_tokens:
+        for name in (
+            f"tesseract_{frame}.mat",
+            f"tesseract_{frame}.npy",
+            f"DREA_{frame}.npy",
+            f"radar_{frame}.mat",
+            f"radar_{frame}.npy",
+            f"{frame}.mat",
+            f"{frame}.npy",
+        ):
+            if name not in names:
+                names.append(name)
+    return names
+
+
+def _resolve_radar(
+    info: dict[str, Any],
+    repo_root: Path,
+    radar_root: Path | None,
+) -> Path:
+    """Resolve the synchronized raw K-Radar tensor for one annotation entry.
+
+    RadarOcc's official Doppler-8 PKL normally references EAsparse_*.npz.
+    The traditional method must instead consume the corresponding original
+    4-D arrDREA tensor. Therefore NPZ paths are treated only as synchronization
+    hints: scene + frame id are used to locate tesseract_*.mat/.npy under the
+    supplied K-Radar root.
+    """
     value = _radar_value(info)
     if value is None:
         raise KeyError(
-            "Annotation entry has no raw radar tensor path. Expected radar_tensor_path/rdr_tensor_path/radar_path."
+            "Annotation entry has no radar-related path. Expected one of "
+            "radar_tensor_path/rdr_tensor_path/radar_path/sparse_radar_path."
         )
+
     raw = Path(value)
     scene = str(info.get("scene_token", ""))
-    candidates = [raw, repo_root / raw]
+    frame_tokens = _frame_tokens(info, value)
+
+    # 1. If the annotation itself already contains a genuine raw .mat/.npy,
+    #    accept it. Explicitly do not return EAsparse_*.npz here.
+    direct_candidates = [raw, repo_root / raw]
+    resolved = _first_raw_radar(direct_candidates)
+    if resolved is not None:
+        return resolved
+
+    # 2. Resolve the raw tensor from the K-Radar root using scene + frame id.
+    #    radar_tensor_8doppler is included because some local K-Radar layouts
+    #    keep the original tesseract_*.mat files there.
+    candidates: list[Path] = []
     if radar_root is not None:
-        candidates.extend(
-            [
-                radar_root / raw,
-                radar_root / scene / "radar_tesseract" / raw.name,
-                radar_root / scene / "radar_polar_cube" / raw.name,
-                radar_root / scene / raw.name,
-            ]
+        scene_root = radar_root / scene
+
+        # Preserve an annotation raw filename when it is already .mat/.npy.
+        if raw.suffix.lower() in _RAW_RADAR_EXTENSIONS:
+            candidates.append(radar_root / raw)
+            for folder in _RAW_RADAR_DIRS:
+                candidates.append(scene_root / folder / raw.name)
+            candidates.append(scene_root / raw.name)
+
+        for name in _raw_names(frame_tokens):
+            for folder in _RAW_RADAR_DIRS:
+                candidates.append(scene_root / folder / name)
+            candidates.append(scene_root / name)
+
+        resolved = _first_raw_radar(candidates)
+        if resolved is not None:
+            return resolved
+
+        # 3. Last-resort discovery. Only use a recursive match when it is
+        #    unambiguous; otherwise fail loudly instead of pairing the wrong
+        #    radar frame with the GT.
+        fallback_matches: list[Path] = []
+        if scene_root.is_dir():
+            for frame in frame_tokens:
+                for extension in (".mat", ".npy"):
+                    fallback_matches.extend(
+                        path.resolve()
+                        for path in scene_root.rglob(f"*{frame}*{extension}")
+                        if path.is_file()
+                    )
+
+        # De-duplicate while preserving natural ordering.
+        fallback_matches = sorted(
+            set(fallback_matches),
+            key=_natural_key,
         )
-    resolved = _first_existing(candidates)
-    if resolved is None:
-        raise FileNotFoundError(f"Cannot resolve raw radar tensor {raw}; tried {candidates}")
-    return resolved
+        if len(fallback_matches) == 1:
+            return fallback_matches[0]
+        if len(fallback_matches) > 1:
+            preferred = [
+                path
+                for path in fallback_matches
+                if path.parent.name in _RAW_RADAR_DIRS
+                and path.name.startswith(("tesseract_", "DREA_"))
+            ]
+            if len(preferred) == 1:
+                return preferred[0]
+            preview = "\n  ".join(str(path) for path in fallback_matches[:20])
+            raise RuntimeError(
+                "Ambiguous raw radar frame resolution. The annotation points "
+                f"to {raw}, scene={scene}, frame candidates={frame_tokens}, but "
+                "multiple .mat/.npy files matched under the K-Radar root:\n  "
+                f"{preview}\nPass the actual K-Radar dataset root via --radar-root "
+                "or make the raw tensor layout unambiguous."
+            )
+
+    tried_preview = "\n  ".join(str(path) for path in candidates[:30])
+    raise FileNotFoundError(
+        "Cannot resolve the original 4-D K-Radar tensor for this annotation.\n"
+        f"Annotation radar path: {raw}\n"
+        f"Scene: {scene}\n"
+        f"Frame candidates: {frame_tokens}\n"
+        f"Radar root: {radar_root}\n"
+        "The .npz used by RadarOcc is sparse preprocessed input and cannot be "
+        "fed to the traditional CFAR pipeline. Tried raw candidates:\n  "
+        f"{tried_preview}"
+    )
 
 
 def _camera_map(
@@ -98,9 +276,17 @@ def _camera_map(
     camera_dir: Path,
     offset: int = 0,
 ) -> dict[str, Path]:
-    scene_infos = [info for info in infos if str(info.get("scene_token")) == str(scene)]
+    scene_infos = [
+        info
+        for info in infos
+        if str(info.get("scene_token")) == str(scene)
+    ]
     cameras = sorted(
-        [p.resolve() for p in camera_dir.iterdir() if p.is_file() and p.suffix.lower() in _IMAGE_EXTENSIONS],
+        [
+            p.resolve()
+            for p in camera_dir.iterdir()
+            if p.is_file() and p.suffix.lower() in _IMAGE_EXTENSIONS
+        ],
         key=_natural_key,
     )
     if not cameras:
@@ -111,7 +297,8 @@ def _camera_map(
         camera_index = ordinal + offset
         if camera_index < 0 or camera_index >= len(cameras):
             raise IndexError(
-                f"Camera index {camera_index} outside 0..{len(cameras)-1}; adjust --camera-offset."
+                f"Camera index {camera_index} outside 0..{len(cameras)-1}; "
+                "adjust --camera-offset."
             )
         mapping[str(info["lidar_token"])] = cameras[camera_index]
     return mapping
@@ -144,11 +331,17 @@ class TraditionalDatasetRunner:
         annotation = Path(annotation).expanduser().resolve()
         output_dir = Path(output_dir).expanduser().resolve()
         repo_root = Path(repo_root).expanduser().resolve()
-        radar_root_p = Path(radar_root).expanduser().resolve() if radar_root else None
+        radar_root_p = (
+            Path(radar_root).expanduser().resolve() if radar_root else None
+        )
         gt_root_p = Path(gt_root).expanduser().resolve() if gt_root else None
         infos = _load_infos(annotation)
         if scene is not None:
-            infos = [info for info in infos if str(info.get("scene_token")) == str(scene)]
+            infos = [
+                info
+                for info in infos
+                if str(info.get("scene_token")) == str(scene)
+            ]
         if max_frames is not None:
             infos = infos[:max_frames]
         if not infos:
@@ -158,9 +351,14 @@ class TraditionalDatasetRunner:
         renderer: RadarOccStyleVideoRenderer | None = None
         if video_scene is not None:
             if camera_dir is None:
-                raise ValueError("--camera-dir is required when --video-scene is used.")
+                raise ValueError(
+                    "--camera-dir is required when --video-scene is used."
+                )
             camera_by_token = _camera_map(
-                _load_infos(annotation), str(video_scene), Path(camera_dir).expanduser().resolve(), camera_offset
+                _load_infos(annotation),
+                str(video_scene),
+                Path(camera_dir).expanduser().resolve(),
+                camera_offset,
             )
             renderer = RadarOccStyleVideoRenderer(
                 output_dir=output_dir,
@@ -175,7 +373,10 @@ class TraditionalDatasetRunner:
             token = str(info["lidar_token"])
             radar_path = _resolve_radar(info, repo_root, radar_root_p)
             gt_path = _resolve_gt(info, repo_root, gt_root_p)
-            prediction = self.pipeline.predict_file(radar_path, ego_speed_mps=ego_speed_mps)
+            prediction = self.pipeline.predict_file(
+                radar_path,
+                ego_speed_mps=ego_speed_mps,
+            )
             gt = load_gt_sparse_xyz(gt_path, coordinate_order=gt_order)
             accumulator.update(prediction.dense_labels_xyz, gt)
 
@@ -194,11 +395,15 @@ class TraditionalDatasetRunner:
                 rendered += 1
 
             print(
-                f"[{index}/{len(infos)}] scene={info.get('scene_token')} token={token} "
+                f"[{index}/{len(infos)}] scene={info.get('scene_token')} "
+                f"token={token} raw={radar_path.name} "
                 f"detections={len(prediction.detections)}"
             )
 
-        outputs = MetricsReportWriter().write(accumulator.results(), output_dir)
+        outputs = MetricsReportWriter().write(
+            accumulator.results(),
+            output_dir,
+        )
         if renderer is not None:
             video = renderer.finish()
             if video is not None:
