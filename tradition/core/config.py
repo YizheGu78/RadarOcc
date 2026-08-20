@@ -29,8 +29,6 @@ class KRadarConfig:
     """K-Radar tensor geometry used by RadarOcc.
 
     Raw arrDREA layout is [Doppler, Range, Elevation, Azimuth].
-    Angle defaults follow the public K-Radar/RadarOcc tensor dimensions.
-    Change them if a different tensor calibration is used.
     """
 
     range_resolution_m: float = 0.4
@@ -53,7 +51,7 @@ class KRadarConfig:
 
 @dataclass(frozen=True)
 class CFARConfig:
-    """Tunable classical CFAR/peak-extraction settings."""
+    """Tunable classical CFAR/peak-extraction settings for raw 4DRT."""
 
     guard_range: int = 2
     noise_range: int = 8
@@ -63,6 +61,24 @@ class CFARConfig:
     min_power_db: float | None = None
     local_max_radius: int = 1
     max_detections: int = 4096
+
+
+@dataclass(frozen=True)
+class SparseDetectionConfig:
+    """Candidate thinning after RadarOcc mean-power Top-K sparsification.
+
+    This is deliberately not called CFAR: EAsparse no longer contains the
+    complete neighboring noise/reference cells required for true CFAR.
+    """
+
+    max_per_range: int = 16
+    max_detections: int = 4096
+
+    def __post_init__(self) -> None:
+        if self.max_per_range <= 0:
+            raise ValueError("max_per_range must be positive.")
+        if self.max_detections <= 0:
+            raise ValueError("max_detections must be positive.")
 
 
 @dataclass(frozen=True)

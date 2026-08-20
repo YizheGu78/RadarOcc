@@ -53,7 +53,6 @@ def _first_existing(candidates: list[Path]) -> Path | None:
 
 
 def _first_raw_radar(candidates: list[Path]) -> Path | None:
-    """Return the first existing raw tensor candidate, never a sparse NPZ."""
     for candidate in candidates:
         candidate = candidate.expanduser()
         if (
@@ -87,18 +86,11 @@ def _resolve_gt(
 
 
 def _radar_value(info: dict[str, Any]) -> str | None:
-    """Return the radar-related path stored in the RadarOcc annotation.
-
-    Important: the current official Doppler-8 annotation can point to the
-    already-sparsified EAsparse_*.npz used by RadarOcc. That value is useful
-    for frame synchronization, but it is NOT the raw tensor consumed by the
-    traditional baseline.
-    """
     for key in (
+        "sparse_radar_path",
         "radar_tensor_path",
         "rdr_tensor_path",
         "radar_path",
-        "sparse_radar_path",
     ):
         value = info.get(key)
         if value:
@@ -106,10 +98,10 @@ def _radar_value(info: dict[str, Any]) -> str | None:
     curr = info.get("curr")
     if isinstance(curr, dict):
         for key in (
+            "sparse_radar_path",
             "radar_tensor_path",
             "rdr_tensor_path",
             "radar_path",
-            "sparse_radar_path",
         ):
             value = curr.get(key)
             if value:
@@ -117,12 +109,45 @@ def _radar_value(info: dict[str, Any]) -> str | None:
     return None
 
 
+def _resolve_sparse_radar(
+    info: dict[str, Any],
+    repo_root: Path,
+    radar_root: Path | None,
+) -> Path:
+    value = _radar_value(info)
+    if value is None:
+        raise KeyError("Annotation entry has no radar-related path.")
+
+    raw = Path(value)
+    scene = str(info.get("scene_token", ""))
+    candidates = [raw, repo_root / raw]
+    if radar_root is not None:
+        candidates.extend(
+            [
+                radar_root / scene / "radar_tensor_8doppler" / raw.name,
+                radar_root / scene / raw.name,
+                radar_root / raw.name,
+            ]
+        )
+
+    for candidate in candidates:
+        candidate = candidate.expanduser()
+        if candidate.suffix.lower() == ".npz" and candidate.is_file():
+            return candidate.resolve()
+
+    raise FileNotFoundError(
+        "Cannot resolve RadarOcc sparse input. Expected an EAsparse_*.npz file.\n"
+        f"Annotation radar path: {raw}\n"
+        f"Scene: {scene}\n"
+        f"Input root: {radar_root}\n"
+        f"Tried: {candidates}"
+    )
+
+
 def _frame_tokens(info: dict[str, Any], radar_value: str) -> list[str]:
-    """Get candidate frame ids while preserving zero padding when available."""
     raw = Path(radar_value)
     sources = [raw.stem, str(info.get("lidar_token", ""))]
     tokens: list[str] = []
-
     for source in sources:
         groups = re.findall(r"\d+", source)
         if not groups:
@@ -134,17 +159,10 @@ def _frame_tokens(info: dict[str, Any], radar_value: str) -> list[str]:
         except ValueError:
             number = None
         if number is not None:
-            variants.extend(
-                [
-                    f"{number:05d}",
-                    f"{number:06d}",
-                    str(number),
-                ]
-            )
+            variants.extend([f"{number:05d}", f"{number:06d}", str(number)])
         for variant in variants:
             if variant not in tokens:
                 tokens.append(variant)
-
     return tokens
 
 
@@ -165,45 +183,26 @@ def _raw_names(frame_tokens: list[str]) -> list[str]:
     return names
 
 
-def _resolve_radar(
+def _resolve_raw_radar(
     info: dict[str, Any],
     repo_root: Path,
     radar_root: Path | None,
 ) -> Path:
-    """Resolve the synchronized raw K-Radar tensor for one annotation entry.
-
-    RadarOcc's official Doppler-8 PKL normally references EAsparse_*.npz.
-    The traditional method must instead consume the corresponding original
-    4-D arrDREA tensor. Therefore NPZ paths are treated only as synchronization
-    hints: scene + frame id are used to locate tesseract_*.mat/.npy under the
-    supplied K-Radar root.
-    """
     value = _radar_value(info)
     if value is None:
-        raise KeyError(
-            "Annotation entry has no radar-related path. Expected one of "
-            "radar_tensor_path/rdr_tensor_path/radar_path/sparse_radar_path."
-        )
+        raise KeyError("Annotation entry has no radar-related path.")
 
     raw = Path(value)
     scene = str(info.get("scene_token", ""))
     frame_tokens = _frame_tokens(info, value)
 
-    # 1. If the annotation itself already contains a genuine raw .mat/.npy,
-    #    accept it. Explicitly do not return EAsparse_*.npz here.
-    direct_candidates = [raw, repo_root / raw]
-    resolved = _first_raw_radar(direct_candidates)
+    resolved = _first_raw_radar([raw, repo_root / raw])
     if resolved is not None:
         return resolved
 
-    # 2. Resolve the raw tensor from the K-Radar root using scene + frame id.
-    #    radar_tensor_8doppler is included because some local K-Radar layouts
-    #    keep the original tesseract_*.mat files there.
     candidates: list[Path] = []
     if radar_root is not None:
         scene_root = radar_root / scene
-
-        # Preserve an annotation raw filename when it is already .mat/.npy.
         if raw.suffix.lower() in _RAW_RADAR_EXTENSIONS:
             candidates.append(radar_root / raw)
             for folder in _RAW_RADAR_DIRS:
@@ -219,54 +218,9 @@ def _resolve_radar(
         if resolved is not None:
             return resolved
 
-        # 3. Last-resort discovery. Only use a recursive match when it is
-        #    unambiguous; otherwise fail loudly instead of pairing the wrong
-        #    radar frame with the GT.
-        fallback_matches: list[Path] = []
-        if scene_root.is_dir():
-            for frame in frame_tokens:
-                for extension in (".mat", ".npy"):
-                    fallback_matches.extend(
-                        path.resolve()
-                        for path in scene_root.rglob(f"*{frame}*{extension}")
-                        if path.is_file()
-                    )
-
-        # De-duplicate while preserving natural ordering.
-        fallback_matches = sorted(
-            set(fallback_matches),
-            key=_natural_key,
-        )
-        if len(fallback_matches) == 1:
-            return fallback_matches[0]
-        if len(fallback_matches) > 1:
-            preferred = [
-                path
-                for path in fallback_matches
-                if path.parent.name in _RAW_RADAR_DIRS
-                and path.name.startswith(("tesseract_", "DREA_"))
-            ]
-            if len(preferred) == 1:
-                return preferred[0]
-            preview = "\n  ".join(str(path) for path in fallback_matches[:20])
-            raise RuntimeError(
-                "Ambiguous raw radar frame resolution. The annotation points "
-                f"to {raw}, scene={scene}, frame candidates={frame_tokens}, but "
-                "multiple .mat/.npy files matched under the K-Radar root:\n  "
-                f"{preview}\nPass the actual K-Radar dataset root via --radar-root "
-                "or make the raw tensor layout unambiguous."
-            )
-
-    tried_preview = "\n  ".join(str(path) for path in candidates[:30])
     raise FileNotFoundError(
-        "Cannot resolve the original 4-D K-Radar tensor for this annotation.\n"
-        f"Annotation radar path: {raw}\n"
-        f"Scene: {scene}\n"
-        f"Frame candidates: {frame_tokens}\n"
-        f"Radar root: {radar_root}\n"
-        "The .npz used by RadarOcc is sparse preprocessed input and cannot be "
-        "fed to the traditional CFAR pipeline. Tried raw candidates:\n  "
-        f"{tried_preview}"
+        "Cannot resolve the original 4-D K-Radar tensor. "
+        f"annotation={raw}, scene={scene}, root={radar_root}"
     )
 
 
@@ -305,7 +259,7 @@ def _camera_map(
 
 
 class TraditionalDatasetRunner:
-    """Direct raw-radar -> metrics/video runner; predictions remain in memory."""
+    """Direct radar -> metrics/video runner; predictions stay in memory."""
 
     def __init__(self, pipeline: TraditionalRadarPipeline) -> None:
         self.pipeline = pipeline
@@ -327,7 +281,11 @@ class TraditionalDatasetRunner:
         max_video_frames: int = 100,
         fps: int = 10,
         keep_frames: bool = False,
+        input_mode: str = "sparse",
     ) -> dict[str, Path]:
+        if input_mode not in {"sparse", "raw"}:
+            raise ValueError("input_mode must be 'sparse' or 'raw'.")
+
         annotation = Path(annotation).expanduser().resolve()
         output_dir = Path(output_dir).expanduser().resolve()
         repo_root = Path(repo_root).expanduser().resolve()
@@ -335,6 +293,7 @@ class TraditionalDatasetRunner:
             Path(radar_root).expanduser().resolve() if radar_root else None
         )
         gt_root_p = Path(gt_root).expanduser().resolve() if gt_root else None
+
         infos = _load_infos(annotation)
         if scene is not None:
             infos = [
@@ -371,7 +330,11 @@ class TraditionalDatasetRunner:
         rendered = 0
         for index, info in enumerate(infos, start=1):
             token = str(info["lidar_token"])
-            radar_path = _resolve_radar(info, repo_root, radar_root_p)
+            if input_mode == "sparse":
+                radar_path = _resolve_sparse_radar(info, repo_root, radar_root_p)
+            else:
+                radar_path = _resolve_raw_radar(info, repo_root, radar_root_p)
+
             gt_path = _resolve_gt(info, repo_root, gt_root_p)
             prediction = self.pipeline.predict_file(
                 radar_path,
@@ -395,9 +358,9 @@ class TraditionalDatasetRunner:
                 rendered += 1
 
             print(
-                f"[{index}/{len(infos)}] scene={info.get('scene_token')} "
-                f"token={token} raw={radar_path.name} "
-                f"detections={len(prediction.detections)}"
+                f"[{index}/{len(infos)}] mode={input_mode} "
+                f"scene={info.get('scene_token')} token={token} "
+                f"input={radar_path.name} detections={len(prediction.detections)}"
             )
 
         outputs = MetricsReportWriter().write(
