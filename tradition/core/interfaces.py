@@ -1,0 +1,71 @@
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from pathlib import Path
+from typing import Sequence
+
+import numpy as np
+
+from .types import FramePrediction, MotionLabel, RadarDetection
+
+
+class RadarTensorReader(ABC):
+    @abstractmethod
+    def read(self, path: str | Path) -> np.ndarray:
+        """Return a [D,R,E,A] power tensor."""
+
+
+class CFARBackend(ABC):
+    @abstractmethod
+    def threshold(
+        self,
+        signal_db: np.ndarray,
+        guard_len: int,
+        noise_len: int,
+    ) -> np.ndarray:
+        """Return a threshold array with the same shape as signal_db."""
+
+
+class TargetDetector(ABC):
+    @abstractmethod
+    def detect(self, radar_tensor_drea: np.ndarray) -> list[RadarDetection]:
+        """Create a classical radar target list from a 4D radar tensor."""
+
+
+class MotionClassifier(ABC):
+    @abstractmethod
+    def classify(
+        self,
+        detections: Sequence[RadarDetection],
+        ego_speed_mps: float,
+    ) -> list[MotionLabel]:
+        """Split target-list evidence into static and dynamic."""
+
+
+class OccupancyMapper(ABC):
+    @abstractmethod
+    def reset(self) -> None:
+        """Reset the map for independent single-frame evaluation."""
+
+    @abstractmethod
+    def update(
+        self,
+        detections: Sequence[RadarDetection],
+        motion_labels: Sequence[MotionLabel],
+    ) -> None:
+        """Update inverse sensor-model evidence."""
+
+    @abstractmethod
+    def labels(self) -> np.ndarray:
+        """Return a dense RadarOcc-style class grid [X,Y,Z]."""
+
+
+class PredictionWriter(ABC):
+    @abstractmethod
+    def write(
+        self,
+        prediction: FramePrediction,
+        output_root: str | Path,
+        token: str,
+    ) -> Path:
+        """Write one prediction and return the sparse pred_c.npy path."""
