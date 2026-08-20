@@ -371,31 +371,20 @@ def make_frame(
         )
         y += 24
 
-    raw = resize_to_width(raw, panel_width)
     overlay = resize_to_width(overlay, panel_width)
 
     image_name = os.path.basename(image_path)
-    raw = add_header(
-        raw,
-        "Raw camera",
-        f"processed frame={processed_frame} | camera index={camera_index} | {image_name}",
-    )
     overlay = add_header(
         overlay,
-        "Motion-GT overlay",
+        f"Motion GT | Seq {processed_frame}",
         (
+            f"frame={processed_frame}  camera={camera_index}  "
             f"static={counts.get(STATIC,0)}  moving={counts.get(MOVING,0)}  "
             f"uncertain={counts.get(IGNORE,0)}  projected={projected}"
         ),
     )
 
-    if raw.shape[0] != overlay.shape[0]:
-        target_h = min(raw.shape[0], overlay.shape[0])
-        raw = raw[:target_h]
-        overlay = overlay[:target_h]
-
-    comparison = np.concatenate([raw, overlay], axis=1)
-    return cv2.cvtColor(comparison, cv2.COLOR_BGR2RGB)
+    return cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
 
 
 def main() -> None:

@@ -389,13 +389,45 @@ def boxes_to_dense_membership(
     grid_centers: np.ndarray,
     boxes: np.ndarray,
 ) -> np.ndarray:
-    """Return [N_voxels, N_boxes] bool membership using current mmcv convention."""
-    if len(boxes) == 0:
-        return np.zeros((len(grid_centers), 0), dtype=bool)
+    """Return [N_voxels, N_boxes] bool membership without MMCV compiled ops.
 
-    points = torch.from_numpy(grid_centers[None].astype(np.float32))
-    boxes_t = torch.from_numpy(boxes[None].astype(np.float32))
-    membership = points_in_boxes_cpu(points, boxes_t)[0].cpu().numpy().astype(bool)
+    Box convention follows mmcv points_in_boxes_cpu:
+        [x, y, z, dx, dy, dz, yaw]
+    where (x, y, z) is the bottom centre.
+    """
+    points = np.asarray(grid_centers, dtype=np.float64)
+    boxes = np.asarray(boxes, dtype=np.float64).reshape(-1, 7)
+
+    if len(boxes) == 0:
+        return np.zeros((len(points), 0), dtype=bool)
+
+    membership = np.zeros((len(points), len(boxes)), dtype=bool)
+    eps = 1e-6
+
+    for box_idx, box in enumerate(boxes):
+        cx, cy, z_bottom, dx, dy, dz, yaw = box
+
+        rel_x = points[:, 0] - cx
+        rel_y = points[:, 1] - cy
+
+        # Rotate points by -yaw into the local box coordinate system.
+        c = np.cos(yaw)
+        s = np.sin(yaw)
+
+        local_x = c * rel_x + s * rel_y
+        local_y = -s * rel_x + c * rel_y
+
+        inside_x = np.abs(local_x) <= dx / 2.0 + eps
+        inside_y = np.abs(local_y) <= dy / 2.0 + eps
+
+        # MMCV uses z as the bottom centre of the box.
+        inside_z = (
+            (points[:, 2] >= z_bottom - eps)
+            & (points[:, 2] <= z_bottom + dz + eps)
+        )
+
+        membership[:, box_idx] = inside_x & inside_y & inside_z
+
     return membership
 
 
