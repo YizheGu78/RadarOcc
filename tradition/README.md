@@ -1,129 +1,136 @@
-# Traditional Radar Occupancy Baseline
+# Non-learning Radar Occupancy Baseline
 
-This folder contains the non-learning CFAR + Doppler + 3D occupancy-grid baseline for the K-Radar/RadarOcc experiment.
+This folder provides two non-learning radar occupancy modes for the K-Radar/RadarOcc experiment.
 
-## Important: normal experiments do NOT save prediction NPY files
+## Recommended mode for the current local dataset: `sparse`
 
-RadarOcc needs persistent `pred_c.npy`/dense tensors because a learned model has a separate train/inference/evaluation workflow. The traditional pipeline does not need that separation. Its occupancy grid can be evaluated and rendered immediately in memory.
-
-The recommended flow is now:
+The current local data already contains RadarOcc `EAsparse_*.npz` files produced by Doppler-mean, range-wise Top-K sparsification. The direct runner can now use those files without the original ~500 MB/frame 4DRT.
 
 ```text
-raw K-Radar arrDREA
+EAsparse_*.npz
+  [range, elevation, azimuth]
+  + top-3 Doppler powers/indices
+  + mean/variance
         |
         v
-CFAR + peak extraction
+sparse candidate target-list extraction
+(no CFAR claim)
         |
         v
-Doppler static/dynamic classification
+strongest stored Doppler component
         |
         v
-3D occupancy grid (RAM only)
+static / dynamic split
+        |
+        v
+3D inverse-sensor-model occupancy grid
         |----------------------|
         v                      v
-RadarOcc metrics          overlay frame
-        |                      |
-        v                      v
-CSV / MD / PNG            camera + occupancy
-                               |
-                               v
-                            MP4 / GIF
+RadarOcc metrics          overlay/video
 ```
 
-No per-frame traditional prediction file is written by `tradition.cli.run`.
-Temporary PNG video frames are removed after ffmpeg finishes unless `--keep-frames` is given.
+Important terminology: **EAsparse is not a CFAR output.** True CFAR compares a cell under test with locally estimated noise/reference cells. Those discarded cells are no longer present in EAsparse, so CA-CFAR/OS-CFAR cannot be reconstructed from the NPZ. The sparse mode should be described as a **RadarOcc Top-K sparse non-learning OGM baseline**, not as `CFAR + OGM`.
 
-The older `tradition/io/radarocc_writer.py` remains only as an optional compatibility/debug adapter. It is not used by the direct experiment runner.
+This mode is nevertheless useful because it starts from exactly the reduced radar representation already used by RadarOcc, avoids storing the original 4DRT, and isolates the effect of a non-learning target-list/Doppler/OGM pipeline from the neural occupancy model.
+
+The stored `power_val` descriptor follows the existing generator:
+
+- rows 0-2: top-3 Doppler powers;
+- rows 3-5: matching Doppler-bin indices;
+- row 6: mean Doppler power;
+- row 7: Doppler variance.
+
+Because the original Top-250 still contains many candidates, sparse mode has a configurable range-wise thinning parameter. Default is 16 candidates per range for a practical first baseline. `--sparse-max-per-range 250` uses every stored Top-250 candidate but is slower and normally much noisier. This parameter must be tuned on validation data and frozen before final test reporting.
+
+## Sparse smoke test
+
+```bash
+cd /home/user1/projects/RadarOcc
+export PYTHONPATH=$PWD
+
+ANN=$PWD/data/annotations/kradar_dict_test_official_doppler8.pkl
+SPARSE_ROOT=$PWD/data/RadarOcc_8doppler
+
+python -m tradition.cli.run \
+  --annotation "$ANN" \
+  --radar-root "$SPARSE_ROOT" \
+  --output-dir work_dirs/tradition_smoke_seq3 \
+  --input-mode sparse \
+  --scene 3 \
+  --max-frames 1 \
+  --sparse-max-per-range 16 \
+  --ego-speed-mps 0.0
+```
+
+## Five requested sequences
+
+```bash
+for SEQ in 3 15 22 23 55
+do
+  python -m tradition.cli.run \
+    --annotation "$ANN" \
+    --radar-root "$SPARSE_ROOT" \
+    --output-dir "work_dirs/tradition_test_seq${SEQ}" \
+    --input-mode sparse \
+    --scene "$SEQ" \
+    --sparse-max-per-range 16 \
+    --ego-speed-mps 0.0
+done
+```
+
+## Optional raw-CFAR mode
+
+If the full original 4DRT is available, the old genuine CFAR path remains available:
+
+```bash
+python -m tradition.cli.run \
+  --annotation "$ANN" \
+  --radar-root /path/to/K-Radar \
+  --output-dir work_dirs/traditional_raw_cfar \
+  --input-mode raw \
+  --cfar-backend numpy
+```
 
 ## Output
 
-A normal run creates only human-facing experiment artifacts:
+Normal experiments keep predictions in memory and write only human-facing artifacts:
 
 ```text
 <output-dir>/
 ├── traditional_metrics.csv
 ├── traditional_metrics.md
 ├── traditional_metrics.png
-├── scene_camera_simple_overlay.mp4   # when --video-scene is used
-└── scene_camera_simple_overlay.gif   # when --video-scene is used
+├── scene_camera_simple_overlay.mp4   # when video is requested
+└── scene_camera_simple_overlay.gif
 ```
 
-The table contains the same four metric rows used in the RadarOcc comparison:
+The metrics are SC IoU, SSC mIoU, Background IoU and Foreground IoU at 12.8 m, 25.6 m and 51.2 m. Confusion matrices are accumulated across the selected dataset before IoU is calculated.
 
-- SC IoU
-- SSC mIoU
-- Background IoU
-- Foreground IoU
-
-at 12.8 m, 25.6 m and 51.2 m. Metrics are accumulated over the selected dataset before IoU is computed; they are not naive averages of per-frame IoUs.
-
-## Recommended test command
-
-From the RadarOcc repository root:
-
-```bash
-PYTHONPATH=$PWD python -m tradition.cli.run \
-  --annotation data/annotations/kradar_dict_test_official_doppler8.pkl \
-  --radar-root /path/to/K-Radar \
-  --output-dir work_dirs/traditional_direct \
-  --cfar-backend numpy \
-  --ego-speed-mps 0.0
-```
-
-To additionally create the same camera + Prediction/GT overlay style already used by `tools/render_scene3_camera_prediction_gt.py`:
-
-```bash
-PYTHONPATH=$PWD python -m tradition.cli.run \
-  --annotation data/annotations/kradar_dict_test_official_doppler8.pkl \
-  --radar-root /path/to/K-Radar \
-  --output-dir work_dirs/traditional_direct \
-  --cfar-backend numpy \
-  --video-scene 3 \
-  --camera-dir /path/to/K-Radar/3/cam-front \
-  --max-video-frames 100 \
-  --fps 10
-```
-
-For the OpenRadar backend:
-
-```bash
-pip install -e /path/to/OpenRadar
-```
-
-then change `--cfar-backend numpy` to `--cfar-backend openradar`.
-
-## Architecture / SOLID
+## Architecture
 
 ```text
 tradition/
-├── core/           # config, types, interfaces, geometry
-├── io/             # raw reader; optional compatibility writer
-├── detection/      # CFAR strategy + target extraction
-├── motion/         # ego-compensated Doppler classifier
-├── mapping/        # 3D log-odds inverse sensor model
-├── pipeline/       # dependency-injected per-frame orchestration
-├── evaluation/     # dataset-level RadarOcc metrics
-├── reporting/      # CSV/Markdown/PNG result table
-├── visualization/  # adapter to existing RadarOcc video style
-├── experiment/     # direct dataset runner
-├── cli/            # command-line entry points
-└── tests/
+├── core/
+├── io/
+│   ├── kradar_reader.py              # raw 4DRT
+│   └── sparse_radar_reader.py        # EAsparse NPZ
+├── detection/
+│   ├── cfar.py                       # raw mode only
+│   ├── target_detector.py            # raw CFAR target list
+│   └── sparse_target_detector.py     # sparse candidate target list
+├── motion/
+├── mapping/
+├── pipeline/
+├── evaluation/
+├── reporting/
+├── visualization/
+├── experiment/
+└── cli/
 ```
-
-The direct runner consumes `FramePrediction` in memory. Detection, motion classification, mapping, metrics, reporting and visualization remain separate modules.
-
-## Coordinate/output contract
-
-- ROI: x `[0, 51.2)`, y `[-25.6, 25.6)`, z `[-2.6, 3.0)` m
-- voxel size: 0.4 m
-- in-memory dense grid: `[X,Y,Z] = [128,128,14]`
-- classes: 0 free, 1 static/background, 2 dynamic/foreground
-- GT default coordinate order: `xyz`; override with `--gt-order zyx` if required by a specific generated GT set
 
 ## Experimental cautions
 
-CFAR guard/noise/threshold parameters are validation parameters and must be frozen before final test reporting.
-
-For a moving ego vehicle, `--ego-speed-mps 0` is not a valid static/dynamic compensation. A synchronized ego-speed source should be supplied for the final experiment.
-
-Traditional dynamic/static partition is motion-derived, whereas RadarOcc foreground/background is semantic. Therefore SC IoU is the cleanest primary traditional-vs-RadarOcc comparison; SSC Background/Foreground results should be interpreted with this mismatch stated explicitly.
+- Sparse Top-K selection and CFAR are different signal-processing operations; do not label sparse-mode results as CFAR results.
+- `--sparse-max-per-range` is a validation parameter. Do not choose it using the final test results.
+- For a moving ego vehicle, `--ego-speed-mps 0` is only suitable for getting the pipeline running. Final static/dynamic evaluation requires synchronized ego-motion compensation.
+- RadarOcc foreground/background is semantic, whereas this baseline's static/dynamic classes are motion-derived. SC IoU is therefore the cleanest primary occupancy comparison; class-wise IoUs require this mismatch to be stated explicitly.
