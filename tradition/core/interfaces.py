@@ -2,17 +2,19 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 import numpy as np
 
 from .types import FramePrediction, MotionLabel, RadarDetection
 
 
-class RadarTensorReader(ABC):
+class RadarMeasurementReader(ABC):
+    """Load one radar representation without coupling the pipeline to storage."""
+
     @abstractmethod
-    def read(self, path: str | Path) -> np.ndarray:
-        """Return a [D,R,E,A] power tensor."""
+    def read(self, path: str | Path) -> Any:
+        """Return one representation-specific radar measurement."""
 
 
 class CFARBackend(ABC):
@@ -28,8 +30,8 @@ class CFARBackend(ABC):
 
 class TargetDetector(ABC):
     @abstractmethod
-    def detect(self, radar_tensor_drea: np.ndarray) -> list[RadarDetection]:
-        """Create a classical radar target list from a 4D radar tensor."""
+    def detect(self, measurement: Any) -> list[RadarDetection]:
+        """Create a classical target list from a radar measurement."""
 
 
 class MotionClassifier(ABC):
