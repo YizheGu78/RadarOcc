@@ -28,40 +28,27 @@ class RadarDetection:
 
 
 @dataclass(frozen=True)
-class SparseRadarFrame:
-    """One RadarOcc EAsparse frame.
+class RPCPointCloudFrame:
+    """Enhanced K-Radar density-reduced Cartesian point cloud.
 
-    descriptor rows follow the existing generator:
-      0:3 top-3 Doppler powers
-      3:6 matching Doppler-bin indices
-      6   mean Doppler power
-      7   Doppler variance
+    Source columns are [x, y, z, power, doppler, range, azimuth, elevation,
+    range_index, azimuth_index, elevation_index]. Angles are radians and
+    Doppler is already physical radial velocity in m/s.
     """
 
+    xyz_radar_m: np.ndarray
+    power: np.ndarray
+    radial_velocity_mps: np.ndarray
+    range_m: np.ndarray
+    azimuth_rad: np.ndarray
+    elevation_rad: np.ndarray
     range_ind: np.ndarray
-    elevation_ind: np.ndarray
     azimuth_ind: np.ndarray
-    descriptor: np.ndarray
+    elevation_ind: np.ndarray
 
     @property
     def size(self) -> int:
-        return int(self.range_ind.size)
-
-    @property
-    def top3_power(self) -> np.ndarray:
-        return self.descriptor[0:3]
-
-    @property
-    def top3_doppler_ind(self) -> np.ndarray:
-        return self.descriptor[3:6]
-
-    @property
-    def mean_power(self) -> np.ndarray:
-        return self.descriptor[6]
-
-    @property
-    def variance(self) -> np.ndarray:
-        return self.descriptor[7]
+        return int(self.power.size)
 
 
 @dataclass
