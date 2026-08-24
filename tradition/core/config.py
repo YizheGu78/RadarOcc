@@ -64,24 +64,6 @@ class CFARConfig:
 
 
 @dataclass(frozen=True)
-class SparseDetectionConfig:
-    """Candidate thinning after RadarOcc mean-power Top-K sparsification.
-
-    This is deliberately not called CFAR: EAsparse no longer contains the
-    complete neighboring noise/reference cells required for true CFAR.
-    """
-
-    max_per_range: int = 16
-    max_detections: int = 4096
-
-    def __post_init__(self) -> None:
-        if self.max_per_range <= 0:
-            raise ValueError("max_per_range must be positive.")
-        if self.max_detections <= 0:
-            raise ValueError("max_detections must be positive.")
-
-
-@dataclass(frozen=True)
 class MotionConfig:
     """Doppler-based static/dynamic split."""
 
