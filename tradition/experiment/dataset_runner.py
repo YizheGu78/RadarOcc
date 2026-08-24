@@ -319,7 +319,7 @@ class TraditionalDatasetRunner:
         gt_root: str | Path | None = None,
         gt_order: str = "xyz",
         scene: str | None = None,
-        ego_speed_mps: float = 0.0,
+        ego_speed_mps: float | None = None,
         max_frames: int | None = None,
         video_scene: str | None = None,
         camera_dir: str | Path | None = None,
@@ -409,6 +409,7 @@ class TraditionalDatasetRunner:
                 f"[{index}/{len(infos)}] mode={input_mode} "
                 f"scene={info.get('scene_token')} token={token} "
                 f"input={radar_path.name} detections={len(prediction.detections)} "
+                f"ego_speed={prediction.metadata['ego_speed_mps']:.2f}m/s "
                 f"background={sum(int(label) == 1 for label in prediction.semantic_labels)} "
                 f"foreground={sum(int(label) == 2 for label in prediction.semantic_labels)}"
             )

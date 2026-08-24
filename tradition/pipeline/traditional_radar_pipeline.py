@@ -7,6 +7,7 @@ import numpy as np
 
 from tradition.core.config import (
     CFARConfig,
+    EgoSpeedConfig,
     GridConfig,
     KRadarConfig,
     MappingConfig,
@@ -14,6 +15,7 @@ from tradition.core.config import (
     SemanticConfig,
 )
 from tradition.core.interfaces import (
+    EgoSpeedEstimator,
     MotionClassifier,
     OccupancyMapper,
     PredictionWriter,
@@ -30,6 +32,7 @@ from tradition.io.radarocc_writer import RadarOccPredictionWriter
 from tradition.io.rpc_radar_reader import KRadarRPCReader
 from tradition.mapping.occupancy_grid_3d import LogOddsOccupancyGrid3D
 from tradition.motion.doppler_classifier import EgoCompensatedDopplerClassifier
+from tradition.motion.ego_speed_estimator import RobustDopplerEgoSpeedEstimator
 from tradition.semantics.classical_classifier import ClassicalClusterSemanticClassifier
 
 
@@ -40,6 +43,7 @@ class TraditionalRadarPipeline:
         self,
         reader: RadarMeasurementReader,
         detector: TargetDetector,
+        ego_speed_estimator: EgoSpeedEstimator,
         motion_classifier: MotionClassifier,
         semantic_classifier: SemanticClassifier,
         mapper: OccupancyMapper,
@@ -47,6 +51,7 @@ class TraditionalRadarPipeline:
     ) -> None:
         self.reader = reader
         self.detector = detector
+        self.ego_speed_estimator = ego_speed_estimator
         self.motion_classifier = motion_classifier
         self.semantic_classifier = semantic_classifier
         self.mapper = mapper
@@ -55,11 +60,16 @@ class TraditionalRadarPipeline:
     def predict_measurement(
         self,
         measurement: Any,
-        ego_speed_mps: float = 0.0,
+        ego_speed_mps: float | None = None,
     ) -> FramePrediction:
         detections = self.detector.detect(measurement)
+        resolved_ego_speed_mps = (
+            self.ego_speed_estimator.estimate(detections)
+            if ego_speed_mps is None
+            else float(ego_speed_mps)
+        )
         motion_labels = self.motion_classifier.classify(
-            detections, ego_speed_mps=ego_speed_mps
+            detections, ego_speed_mps=resolved_ego_speed_mps
         )
         semantic_labels = self.semantic_classifier.classify(
             detections, motion_labels
@@ -73,7 +83,11 @@ class TraditionalRadarPipeline:
             motion_labels=motion_labels,
             semantic_labels=semantic_labels,
             metadata={
-                "ego_speed_mps": float(ego_speed_mps),
+                "ego_speed_mps": resolved_ego_speed_mps,
+                "ego_speed_source": (
+                    "doppler_auto" if ego_speed_mps is None else "fixed"
+                ),
+                "ego_speed_estimator": type(self.ego_speed_estimator).__name__,
                 "reader": type(self.reader).__name__,
                 "detector": type(self.detector).__name__,
                 "motion_classifier": type(self.motion_classifier).__name__,
@@ -84,7 +98,7 @@ class TraditionalRadarPipeline:
     def predict_tensor(
         self,
         radar_tensor_drea: np.ndarray,
-        ego_speed_mps: float = 0.0,
+        ego_speed_mps: float | None = None,
     ) -> FramePrediction:
         """Backward-compatible raw-tensor entry point."""
         return self.predict_measurement(
@@ -95,7 +109,7 @@ class TraditionalRadarPipeline:
     def predict_file(
         self,
         radar_path: str | Path,
-        ego_speed_mps: float = 0.0,
+        ego_speed_mps: float | None = None,
     ) -> FramePrediction:
         measurement = self.reader.read(radar_path)
         prediction = self.predict_measurement(
@@ -110,7 +124,7 @@ class TraditionalRadarPipeline:
         radar_path: str | Path,
         output_root: str | Path,
         token: str,
-        ego_speed_mps: float = 0.0,
+        ego_speed_mps: float | None = None,
     ) -> Path:
         prediction = self.predict_file(radar_path, ego_speed_mps=ego_speed_mps)
         return self.writer.write(prediction, output_root, token)
@@ -119,11 +133,23 @@ class TraditionalRadarPipeline:
 def _common_components(
     grid_cfg: GridConfig,
     radar_cfg: KRadarConfig,
+    ego_speed_cfg: EgoSpeedConfig,
     motion_cfg: MotionConfig,
     semantic_cfg: SemanticConfig,
     mapping_cfg: MappingConfig,
-) -> tuple[MotionClassifier, SemanticClassifier, OccupancyMapper, PredictionWriter]:
+) -> tuple[
+    EgoSpeedEstimator,
+    MotionClassifier,
+    SemanticClassifier,
+    OccupancyMapper,
+    PredictionWriter,
+]:
     return (
+        RobustDopplerEgoSpeedEstimator(
+            radar_cfg=radar_cfg,
+            motion_cfg=motion_cfg,
+            estimator_cfg=ego_speed_cfg,
+        ),
         EgoCompensatedDopplerClassifier(
             radar_cfg=radar_cfg,
             motion_cfg=motion_cfg,
@@ -143,6 +169,7 @@ def build_raw_pipeline(
     grid_cfg: GridConfig | None = None,
     radar_cfg: KRadarConfig | None = None,
     cfar_cfg: CFARConfig | None = None,
+    ego_speed_cfg: EgoSpeedConfig | None = None,
     motion_cfg: MotionConfig | None = None,
     semantic_cfg: SemanticConfig | None = None,
     mapping_cfg: MappingConfig | None = None,
@@ -152,6 +179,7 @@ def build_raw_pipeline(
     grid_cfg = grid_cfg or GridConfig()
     radar_cfg = radar_cfg or KRadarConfig()
     cfar_cfg = cfar_cfg or CFARConfig()
+    ego_speed_cfg = ego_speed_cfg or EgoSpeedConfig()
     motion_cfg = motion_cfg or MotionConfig()
     semantic_cfg = semantic_cfg or SemanticConfig()
     mapping_cfg = mapping_cfg or MappingConfig()
@@ -163,13 +191,16 @@ def build_raw_pipeline(
     else:
         raise ValueError("cfar_backend must be 'numpy' or 'openradar'.")
 
-    motion_classifier, semantic_classifier, mapper, writer = _common_components(
-        grid_cfg,
-        radar_cfg,
-        motion_cfg,
-        semantic_cfg,
-        mapping_cfg,
+    components = _common_components(
+        grid_cfg, radar_cfg, ego_speed_cfg, motion_cfg, semantic_cfg, mapping_cfg
     )
+    (
+        ego_speed_estimator,
+        motion_classifier,
+        semantic_classifier,
+        mapper,
+        writer,
+    ) = components
 
     return TraditionalRadarPipeline(
         reader=KRadarTensorReader(radar_cfg),
@@ -178,6 +209,7 @@ def build_raw_pipeline(
             radar_cfg=radar_cfg,
             cfar_cfg=cfar_cfg,
         ),
+        ego_speed_estimator=ego_speed_estimator,
         motion_classifier=motion_classifier,
         semantic_classifier=semantic_classifier,
         mapper=mapper,
@@ -188,6 +220,7 @@ def build_raw_pipeline(
 def build_rpc_pipeline(
     grid_cfg: GridConfig | None = None,
     radar_cfg: KRadarConfig | None = None,
+    ego_speed_cfg: EgoSpeedConfig | None = None,
     motion_cfg: MotionConfig | None = None,
     semantic_cfg: SemanticConfig | None = None,
     mapping_cfg: MappingConfig | None = None,
@@ -201,21 +234,26 @@ def build_rpc_pipeline(
 
     grid_cfg = grid_cfg or GridConfig()
     radar_cfg = radar_cfg or KRadarConfig()
+    ego_speed_cfg = ego_speed_cfg or EgoSpeedConfig()
     motion_cfg = motion_cfg or MotionConfig()
     semantic_cfg = semantic_cfg or SemanticConfig()
     mapping_cfg = mapping_cfg or MappingConfig()
 
-    motion_classifier, semantic_classifier, mapper, writer = _common_components(
-        grid_cfg,
-        radar_cfg,
-        motion_cfg,
-        semantic_cfg,
-        mapping_cfg,
+    components = _common_components(
+        grid_cfg, radar_cfg, ego_speed_cfg, motion_cfg, semantic_cfg, mapping_cfg
     )
+    (
+        ego_speed_estimator,
+        motion_classifier,
+        semantic_classifier,
+        mapper,
+        writer,
+    ) = components
 
     return TraditionalRadarPipeline(
         reader=KRadarRPCReader(),
         detector=RPCPointTargetDetector(radar_cfg=radar_cfg),
+        ego_speed_estimator=ego_speed_estimator,
         motion_classifier=motion_classifier,
         semantic_classifier=semantic_classifier,
         mapper=mapper,

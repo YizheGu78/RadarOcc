@@ -2,6 +2,7 @@
 
 from .core.config import (
     CFARConfig,
+    EgoSpeedConfig,
     GridConfig,
     KRadarConfig,
     MappingConfig,
@@ -11,6 +12,7 @@ from .pipeline.traditional_radar_pipeline import TraditionalRadarPipeline
 
 __all__ = [
     "CFARConfig",
+    "EgoSpeedConfig",
     "GridConfig",
     "KRadarConfig",
     "MappingConfig",

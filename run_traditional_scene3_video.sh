@@ -19,7 +19,7 @@ SCENE="${SCENE:-3}"
 CAMERA_OFFSET="${CAMERA_OFFSET:-0}"
 MAX_VIDEO_FRAMES="${MAX_VIDEO_FRAMES:-1000}"
 FPS="${FPS:-10}"
-EGO_SPEED_MPS="${EGO_SPEED_MPS:-0.0}"
+EGO_SPEED_MPS="${EGO_SPEED_MPS:-auto}"
 KEEP_FRAMES="${KEEP_FRAMES:-0}"
 
 fail() {
@@ -70,6 +70,7 @@ echo "  camera dir: $CAMERA_DIR"
 echo "  scene     : $SCENE"
 echo "  output    : $OUTPUT_DIR"
 echo "  fps       : $FPS"
+echo "  ego speed : $EGO_SPEED_MPS"
 
 cd "$REPO_ROOT"
 

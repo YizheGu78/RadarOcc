@@ -668,7 +668,7 @@ def compose_frame(
 
     # Keep the legend placement logic unchanged.
     legend_items = [
-        ("Base occupancy", (26, 115, 242)),
+        ("Background occupancy", (26, 115, 242)),
         ("Prediction", (242, 38, 26)),
         ("GT", (255, 209, 26)),
         ("Overlap", (255, 115, 13)),

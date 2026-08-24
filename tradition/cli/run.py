@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from tradition.cli.arguments import parse_ego_speed
 from tradition.experiment.dataset_runner import TraditionalDatasetRunner
 from tradition.pipeline.traditional_radar_pipeline import (
     build_raw_pipeline,
@@ -43,7 +44,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cfar-backend", choices=("numpy", "openradar"), default="numpy"
     )
-    parser.add_argument("--ego-speed-mps", type=float, default=0.0)
+    parser.add_argument(
+        "--ego-speed-mps",
+        type=parse_ego_speed,
+        default=None,
+        metavar="MPS|auto",
+        help=(
+            "Fixed synchronized ego speed, or 'auto' to estimate it from "
+            "each frame's wrapped Doppler consensus. Default: auto."
+        ),
+    )
 
     parser.add_argument(
         "--video-scene",

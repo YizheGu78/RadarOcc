@@ -68,7 +68,32 @@ class MotionConfig:
     """Doppler-based static/dynamic split."""
 
     static_residual_threshold_mps: float = 0.30
-    stationary_velocity_sign: float = 1.0
+    stationary_velocity_sign: float = -1.0
+
+
+@dataclass(frozen=True)
+class EgoSpeedConfig:
+    """Robust per-frame ego-speed search in aliased Doppler space."""
+
+    min_speed_mps: float = 0.0
+    max_speed_mps: float = 40.0
+    coarse_step_mps: float = 0.10
+    fine_step_mps: float = 0.01
+    min_abs_projection: float = 0.25
+    min_detections: int = 16
+    robust_quantile: float = 0.50
+
+    def __post_init__(self) -> None:
+        if self.min_speed_mps < 0.0 or self.max_speed_mps <= self.min_speed_mps:
+            raise ValueError("Invalid ego-speed search interval.")
+        if self.coarse_step_mps <= 0.0 or self.fine_step_mps <= 0.0:
+            raise ValueError("Ego-speed search steps must be positive.")
+        if not 0.0 < self.min_abs_projection <= 1.0:
+            raise ValueError("min_abs_projection must be in (0, 1].")
+        if self.min_detections < 1:
+            raise ValueError("min_detections must be positive.")
+        if not 0.0 < self.robust_quantile <= 1.0:
+            raise ValueError("robust_quantile must be in (0, 1].")
 
 
 @dataclass(frozen=True)

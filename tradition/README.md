@@ -20,6 +20,9 @@ rpc_*.npy / pc01p_*.npy
 validate [N,11] and remove invalid/zero-range points
         |
         v
+robust per-frame ego-speed estimation in wrapped-Doppler space
+        |
+        v
 ego-motion-compensated Doppler classification
         |
         v
@@ -54,7 +57,7 @@ python -m tradition.cli.run \\
   --output-dir work_dirs/tradition_rpc_smoke_seq3 \\
   --scene 3 \\
   --max-frames 1 \\
-  --ego-speed-mps 0.0
+  --ego-speed-mps auto
 ```
 
 RPC is the default input mode. Writing `--input-mode rpc` explicitly is optional. The resolver uses `radar_frame_idx` from the aligned annotation first, then the frame number in `radar_path`. Common layouts such as these are accepted:
@@ -71,7 +74,7 @@ data/K-Radar_rpc/3/pc01p_00042.npy
 python -m tradition.cli.predict \\
   --input data/K-Radar_rpc/3 \\
   --output work_dirs/tradition_rpc_predictions_seq3 \\
-  --ego-speed-mps 0.0
+  --ego-speed-mps auto
 ```
 
 Each output frame contains:
@@ -132,5 +135,5 @@ tradition/
 
 - RPC/pc01p is already a density-reduced detection-like representation. Describe it as an **Enhanced K-Radar RPC traditional OGM baseline**, not as original 4DRT + CFAR.
 - Background/foreground remains a classical geometric heuristic, not GT-box or learned semantic recognition. Tune its thresholds on a validation split only, and report it as such.
-- `--ego-speed-mps 0` is suitable only for a smoke test. Synchronized ego speed improves the Doppler cue, although the final semantic label is no longer a direct static/dynamic rename.
+- The default `--ego-speed-mps auto` estimates speed independently for every frame from the dominant stationary Doppler consensus. Pass a number only when synchronized ego speed is available; `0` is suitable only for a smoke test.
 - The requested three-class protocol has no unknown class, so unobserved OGM cells are collapsed into class 0/free.

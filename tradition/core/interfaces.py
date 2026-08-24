@@ -34,6 +34,12 @@ class TargetDetector(ABC):
         """Create a classical target list from a radar measurement."""
 
 
+class EgoSpeedEstimator(ABC):
+    @abstractmethod
+    def estimate(self, detections: Sequence[RadarDetection]) -> float:
+        """Estimate signed-forward ego speed from one radar target list."""
+
+
 class MotionClassifier(ABC):
     @abstractmethod
     def classify(
