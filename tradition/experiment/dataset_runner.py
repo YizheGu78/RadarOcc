@@ -21,6 +21,13 @@ _RAW_RADAR_DIRS = (
     "radar_tensor_8doppler",
     "radar_polar_cube",
 )
+_RPC_RADAR_DIRS = (
+    "",
+    "rpc",
+    "pc01p",
+    "radar_pc",
+    "radar_point_cloud",
+)
 
 
 def _natural_key(path: Path) -> list[object]:
@@ -87,7 +94,6 @@ def _resolve_gt(
 
 def _radar_value(info: dict[str, Any]) -> str | None:
     for key in (
-        "sparse_radar_path",
         "radar_tensor_path",
         "rdr_tensor_path",
         "radar_path",
@@ -98,8 +104,7 @@ def _radar_value(info: dict[str, Any]) -> str | None:
     curr = info.get("curr")
     if isinstance(curr, dict):
         for key in (
-            "sparse_radar_path",
-            "radar_tensor_path",
+                "radar_tensor_path",
             "rdr_tensor_path",
             "radar_path",
         ):
@@ -109,44 +114,13 @@ def _radar_value(info: dict[str, Any]) -> str | None:
     return None
 
 
-def _resolve_sparse_radar(
-    info: dict[str, Any],
-    repo_root: Path,
-    radar_root: Path | None,
-) -> Path:
-    value = _radar_value(info)
-    if value is None:
-        raise KeyError("Annotation entry has no radar-related path.")
-
-    raw = Path(value)
-    scene = str(info.get("scene_token", ""))
-    candidates = [raw, repo_root / raw]
-    if radar_root is not None:
-        candidates.extend(
-            [
-                radar_root / scene / "radar_tensor_8doppler" / raw.name,
-                radar_root / scene / raw.name,
-                radar_root / raw.name,
-            ]
-        )
-
-    for candidate in candidates:
-        candidate = candidate.expanduser()
-        if candidate.suffix.lower() == ".npz" and candidate.is_file():
-            return candidate.resolve()
-
-    raise FileNotFoundError(
-        "Cannot resolve RadarOcc sparse input. Expected an EAsparse_*.npz file.\n"
-        f"Annotation radar path: {raw}\n"
-        f"Scene: {scene}\n"
-        f"Input root: {radar_root}\n"
-        f"Tried: {candidates}"
-    )
-
-
 def _frame_tokens(info: dict[str, Any], radar_value: str) -> list[str]:
     raw = Path(radar_value)
-    sources = [raw.stem, str(info.get("lidar_token", ""))]
+    sources = [
+        str(info.get("radar_frame_idx", "")),
+        raw.stem,
+        str(info.get("lidar_token", "")),
+    ]
     tokens: list[str] = []
     for source in sources:
         groups = re.findall(r"\d+", source)
@@ -224,6 +198,78 @@ def _resolve_raw_radar(
     )
 
 
+def _rpc_names(frame_tokens: list[str]) -> list[str]:
+    names: list[str] = []
+    for frame in frame_tokens:
+        for name in (
+            f"rpc_{frame}.npy",
+            f"pc01p_{frame}.npy",
+            f"radar_pc_{frame}.npy",
+            f"{frame}.npy",
+        ):
+            if name not in names:
+                names.append(name)
+    return names
+
+
+def _scene_variants(scene: str) -> list[str]:
+    variants = [scene]
+    try:
+        number = int(scene)
+    except ValueError:
+        return variants
+    for value in (str(number), f"{number:02d}"):
+        if value not in variants:
+            variants.append(value)
+    return variants
+
+
+def _resolve_rpc_radar(
+    info: dict[str, Any],
+    repo_root: Path,
+    radar_root: Path | None,
+) -> Path:
+    value = _radar_value(info)
+    if value is None:
+        value = str(info.get("radar_frame_idx", ""))
+    if not value:
+        raise KeyError("Annotation entry has no radar path or radar_frame_idx.")
+
+    raw = Path(value)
+    scene = str(info.get("scene_token", ""))
+    frame_tokens = _frame_tokens(info, value)
+    names = _rpc_names(frame_tokens)
+
+    direct = _first_raw_radar([raw, repo_root / raw])
+    if direct is not None and direct.suffix.lower() == ".npy":
+        return direct
+
+    candidates: list[Path] = []
+    if radar_root is not None:
+        for scene_name in _scene_variants(scene):
+            scene_root = radar_root / scene_name
+            for folder in _RPC_RADAR_DIRS:
+                base = scene_root / folder if folder else scene_root
+                candidates.extend(base / name for name in names)
+        for folder in _RPC_RADAR_DIRS:
+            base = radar_root / folder if folder else radar_root
+            candidates.extend(base / name for name in names)
+
+    resolved = _first_raw_radar(candidates)
+    if resolved is not None and resolved.suffix.lower() == ".npy":
+        return resolved
+
+    raise FileNotFoundError(
+        "Cannot resolve Enhanced K-Radar RPC point cloud. Expected an "
+        "rpc_*.npy/pc01p_*.npy [N,11] file.\n"
+        f"Annotation radar path: {raw}\n"
+        f"Radar frame candidates: {frame_tokens}\n"
+        f"Scene: {scene}\n"
+        f"Input root: {radar_root}\n"
+        f"Tried: {candidates}"
+    )
+
+
 def _camera_map(
     infos: list[dict[str, Any]],
     scene: str,
@@ -281,10 +327,10 @@ class TraditionalDatasetRunner:
         max_video_frames: int = 100,
         fps: int = 10,
         keep_frames: bool = False,
-        input_mode: str = "sparse",
+        input_mode: str = "rpc",
     ) -> dict[str, Path]:
-        if input_mode not in {"sparse", "raw"}:
-            raise ValueError("input_mode must be 'sparse' or 'raw'.")
+        if input_mode not in {"rpc", "raw"}:
+            raise ValueError("input_mode must be 'rpc' or 'raw'.")
 
         annotation = Path(annotation).expanduser().resolve()
         output_dir = Path(output_dir).expanduser().resolve()
@@ -330,8 +376,8 @@ class TraditionalDatasetRunner:
         rendered = 0
         for index, info in enumerate(infos, start=1):
             token = str(info["lidar_token"])
-            if input_mode == "sparse":
-                radar_path = _resolve_sparse_radar(info, repo_root, radar_root_p)
+            if input_mode == "rpc":
+                radar_path = _resolve_rpc_radar(info, repo_root, radar_root_p)
             else:
                 radar_path = _resolve_raw_radar(info, repo_root, radar_root_p)
 
