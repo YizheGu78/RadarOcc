@@ -4,7 +4,10 @@ import argparse
 import re
 from pathlib import Path
 
-from tradition.pipeline.traditional_radar_pipeline import build_default_pipeline
+from tradition.pipeline.traditional_radar_pipeline import (
+    build_raw_pipeline,
+    build_rpc_pipeline,
+)
 
 
 def _natural_key(path: Path) -> list[object]:
@@ -32,10 +35,16 @@ def _default_token(path: Path) -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Traditional CFAR + Doppler + 3D OGM baseline for RadarOcc."
+        description="Traditional raw-CFAR or RPC point-cloud 3D OGM baseline."
     )
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--input-mode",
+        choices=("raw", "rpc"),
+        default="rpc",
+        help="rpc reads Enhanced K-Radar [N,11] point clouds directly.",
+    )
     parser.add_argument(
         "--cfar-backend", choices=("numpy", "openradar"), default="numpy"
     )
@@ -51,7 +60,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    pipeline = build_default_pipeline(cfar_backend=args.cfar_backend)
+    pipeline = (
+        build_rpc_pipeline()
+        if args.input_mode == "rpc"
+        else build_raw_pipeline(cfar_backend=args.cfar_backend)
+    )
     files = _input_files(args.input)
     for index, radar_path in enumerate(files, start=1):
         token = args.token_prefix + _default_token(radar_path)
