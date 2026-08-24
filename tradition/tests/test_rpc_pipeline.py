@@ -68,7 +68,7 @@ def test_rpc_resolver_prefers_aligned_radar_frame_index(tmp_path):
         "scene_token": "3",
         "lidar_token": "3_00040",
         "radar_frame_idx": 42,
-        "sparse_radar_path": "/missing/EAsparse_00099.npz",
+        "radar_path": "/missing/tesseract_00099.mat",
     }
 
     resolved = _resolve_rpc_radar(info, tmp_path, tmp_path)
