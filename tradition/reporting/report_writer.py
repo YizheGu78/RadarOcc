@@ -11,7 +11,9 @@ from tradition.evaluation.radarocc_metrics import MetricResult
 
 _METRICS = (
     ("SC IoU", "sc_iou"),
-    ("SSC mIoU", "ssc_miou"),
+    ("SSC mIoU (BG+FG)", "ssc_miou"),
+    ("3-class mIoU", "three_class_miou"),
+    ("Free IoU", "free_iou"),
     ("Background IoU", "background_iou"),
     ("Foreground IoU", "foreground_iou"),
 )

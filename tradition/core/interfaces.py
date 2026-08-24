@@ -6,7 +6,7 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from .types import FramePrediction, MotionLabel, RadarDetection
+from .types import FramePrediction, MotionLabel, RadarDetection, SemanticLabel
 
 
 class RadarMeasurementReader(ABC):
@@ -44,6 +44,16 @@ class MotionClassifier(ABC):
         """Split target-list evidence into static and dynamic."""
 
 
+class SemanticClassifier(ABC):
+    @abstractmethod
+    def classify(
+        self,
+        detections: Sequence[RadarDetection],
+        motion_labels: Sequence[MotionLabel],
+    ) -> list[SemanticLabel]:
+        """Classify detections as semantic background or foreground."""
+
+
 class OccupancyMapper(ABC):
     @abstractmethod
     def reset(self) -> None:
@@ -53,7 +63,7 @@ class OccupancyMapper(ABC):
     def update(
         self,
         detections: Sequence[RadarDetection],
-        motion_labels: Sequence[MotionLabel],
+        semantic_labels: Sequence[SemanticLabel],
     ) -> None:
         """Update inverse sensor-model evidence."""
 

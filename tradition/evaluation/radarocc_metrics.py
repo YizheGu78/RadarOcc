@@ -42,11 +42,30 @@ def load_gt_sparse_xyz(path: str | Path, coordinate_order: str = "xyz") -> np.nd
     return dense
 
 
+def load_prediction_sparse_zyx(path: str | Path) -> np.ndarray:
+    """Load a writer-produced ``[z,y,x,class]`` file into dense ``[X,Y,Z]``."""
+    sparse = np.load(path, allow_pickle=False)
+    dense = np.zeros(GRID_SHAPE_XYZ, dtype=np.uint8)
+    if sparse.size == 0:
+        return dense
+    if sparse.ndim != 2 or sparse.shape[1] < 4:
+        raise ValueError(f"Expected sparse prediction rows, got {sparse.shape}")
+    xyz = np.rint(sparse[:, :3]).astype(np.int64)[:, [2, 1, 0]]
+    labels = _simplify_labels(np.rint(sparse[:, -1]).astype(np.int64))
+    valid = np.all((xyz >= 0) & (xyz < np.asarray(GRID_SHAPE_XYZ)), axis=1)
+    xyz, labels = xyz[valid], labels[valid]
+    if xyz.size:
+        dense[xyz[:, 0], xyz[:, 1], xyz[:, 2]] = labels
+    return dense
+
+
 @dataclass(frozen=True)
 class MetricResult:
     range_m: float
     sc_iou: float
     ssc_miou: float
+    three_class_miou: float
+    free_iou: float
     background_iou: float
     foreground_iou: float
 
@@ -55,11 +74,13 @@ class RadarOccMetricAccumulator:
     """Accumulate confusion matrices exactly at dataset level.
 
     Labels follow the current RadarOcc K-Radar setup:
-      0 = free, 1 = background/static occupied, 2 = foreground occupied.
+      0 = free, 1 = background occupied, 2 = foreground occupied.
 
     SC IoU collapses classes 1/2 into occupied. SSC mIoU is the mean of
     Background IoU and Foreground IoU, matching the table convention used in
-    the RadarOcc paper/reproduction results.
+    the RadarOcc paper/reproduction results. Three-class mIoU additionally
+    includes Free IoU and is reported under a separate name so the official
+    SSC metric is not silently redefined.
     """
 
     def __init__(self, ranges_m: tuple[float, ...] = (12.8, 25.6, 51.2)) -> None:
@@ -110,6 +131,7 @@ class RadarOccMetricAccumulator:
         result: list[MetricResult] = []
         for range_m in self.ranges_m:
             cm = self._confusions[float(range_m)]
+            free = self._class_iou(cm, 0)
             bg = self._class_iou(cm, 1)
             fg = self._class_iou(cm, 2)
             result.append(
@@ -117,6 +139,8 @@ class RadarOccMetricAccumulator:
                     range_m=float(range_m),
                     sc_iou=self._occupied_iou(cm),
                     ssc_miou=float(np.nanmean([bg, fg])),
+                    three_class_miou=float(np.nanmean([free, bg, fg])),
+                    free_iou=free,
                     background_iou=bg,
                     foreground_iou=fg,
                 )

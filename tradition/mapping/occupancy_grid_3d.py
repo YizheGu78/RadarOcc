@@ -6,9 +6,9 @@ from typing import Sequence
 import numpy as np
 
 from tradition.core.config import GridConfig, KRadarConfig, MappingConfig
-from tradition.core.geometry import ray_voxels_dda, xyz_to_voxel
+from tradition.core.geometry import clip_segment_to_grid, ray_voxels_dda, xyz_to_voxel
 from tradition.core.interfaces import OccupancyMapper
-from tradition.core.types import MotionLabel, RadarDetection
+from tradition.core.types import RadarDetection, SemanticLabel
 
 
 def _logit(probability: float) -> float:
@@ -39,13 +39,13 @@ class LogOddsOccupancyGrid3D(OccupancyMapper):
     def reset(self) -> None:
         shape = self.grid_cfg.shape_xyz
         self.occupancy_log_odds = np.zeros(shape, dtype=np.float32)
-        self.static_evidence = np.zeros(shape, dtype=np.float32)
-        self.dynamic_evidence = np.zeros(shape, dtype=np.float32)
+        self.background_evidence = np.zeros(shape, dtype=np.float32)
+        self.foreground_evidence = np.zeros(shape, dtype=np.float32)
 
     def _update_hit_neighborhood(
         self,
         endpoint: tuple[int, int, int],
-        motion: MotionLabel,
+        semantic_label: SemanticLabel,
     ) -> None:
         cfg = self.mapping_cfg
         ex, ey, ez = endpoint
@@ -58,29 +58,43 @@ class LogOddsOccupancyGrid3D(OccupancyMapper):
                         continue
                     weight = math.exp(-0.5 * float(dx * dx + dy * dy + dz * dz))
                     self.occupancy_log_odds[x, y, z] += self._hit_update * weight
-                    if motion == MotionLabel.DYNAMIC:
-                        self.dynamic_evidence[x, y, z] += weight
+                    if semantic_label == SemanticLabel.FOREGROUND:
+                        self.foreground_evidence[x, y, z] += weight
                     else:
-                        self.static_evidence[x, y, z] += weight
+                        self.background_evidence[x, y, z] += weight
 
     def update(
         self,
         detections: Sequence[RadarDetection],
-        motion_labels: Sequence[MotionLabel],
+        semantic_labels: Sequence[SemanticLabel],
     ) -> None:
-        if len(detections) != len(motion_labels):
-            raise ValueError("detections and motion_labels must have equal length.")
+        if len(detections) != len(semantic_labels):
+            raise ValueError("detections and semantic_labels must have equal length.")
 
-        for det, motion in zip(detections, motion_labels):
+        for det, semantic_label in zip(detections, semantic_labels):
             endpoint = xyz_to_voxel(det.xyz_lidar_m, self.grid_cfg)
             if endpoint is None:
+                clipped_endpoint = clip_segment_to_grid(
+                    self.sensor_origin_lidar_m,
+                    det.xyz_lidar_m,
+                    self.grid_cfg,
+                )
+                if clipped_endpoint is None:
+                    continue
+                ray = ray_voxels_dda(
+                    self.sensor_origin_lidar_m,
+                    clipped_endpoint,
+                    self.grid_cfg,
+                )
+                for voxel in ray:
+                    self.occupancy_log_odds[voxel] += self._free_update
                 continue
             ray = ray_voxels_dda(
                 self.sensor_origin_lidar_m, det.xyz_lidar_m, self.grid_cfg
             )
             for voxel in ray[:-1]:
                 self.occupancy_log_odds[voxel] += self._free_update
-            self._update_hit_neighborhood(endpoint, motion)
+            self._update_hit_neighborhood(endpoint, semantic_label)
 
         cfg = self.mapping_cfg
         np.clip(
@@ -94,11 +108,11 @@ class LogOddsOccupancyGrid3D(OccupancyMapper):
         probability = 1.0 / (1.0 + np.exp(-self.occupancy_log_odds))
         occupied = probability >= self.mapping_cfg.occupancy_probability_threshold
         labels = np.zeros(self.grid_cfg.shape_xyz, dtype=np.uint8)
-        static = occupied & (
-            self.dynamic_evidence
-            < self.static_evidence * self.mapping_cfg.dynamic_override_ratio
+        background = occupied & (
+            self.foreground_evidence
+            < self.background_evidence * self.mapping_cfg.foreground_override_ratio
         )
-        dynamic = occupied & ~static
-        labels[static] = int(MotionLabel.STATIC)
-        labels[dynamic] = int(MotionLabel.DYNAMIC)
+        foreground = occupied & ~background
+        labels[background] = int(SemanticLabel.BACKGROUND)
+        labels[foreground] = int(SemanticLabel.FOREGROUND)
         return labels

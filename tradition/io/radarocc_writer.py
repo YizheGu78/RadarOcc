@@ -24,7 +24,9 @@ class RadarOccPredictionWriter(PredictionWriter):
                 f"Expected RadarOcc dense shape (128,128,14), got {dense.shape}"
             )
         if not np.all(np.isin(np.unique(dense), [0, 1, 2])):
-            raise ValueError("Prediction labels must be 0=free, 1=static, 2=dynamic.")
+            raise ValueError(
+                "Prediction labels must be 0=free, 1=background, 2=foreground."
+            )
 
         frame_dir = Path(output_root) / str(token)
         frame_dir.mkdir(parents=True, exist_ok=True)
@@ -47,9 +49,21 @@ class RadarOccPredictionWriter(PredictionWriter):
                 "lidar_token": str(token),
                 "dense_order": "xyz",
                 "sparse_order": "zyx_class",
-                "classes": {"0": "free", "1": "static/background", "2": "dynamic/foreground"},
+                "classes": {"0": "free", "1": "background", "2": "foreground"},
                 "occupied_voxels": int(sparse.shape[0]),
                 "detections": len(prediction.detections),
+                "motion_counts": {
+                    "static": sum(int(label) == 1 for label in prediction.motion_labels),
+                    "dynamic": sum(int(label) == 2 for label in prediction.motion_labels),
+                },
+                "semantic_counts": {
+                    "background": sum(
+                        int(label) == 1 for label in prediction.semantic_labels
+                    ),
+                    "foreground": sum(
+                        int(label) == 2 for label in prediction.semantic_labels
+                    ),
+                },
             }
         )
         with (frame_dir / "meta.json").open("w", encoding="utf-8") as handle:

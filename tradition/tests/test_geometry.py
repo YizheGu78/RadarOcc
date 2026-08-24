@@ -1,7 +1,12 @@
 import numpy as np
 
 from tradition.core.config import GridConfig, KRadarConfig
-from tradition.core.geometry import radar_to_lidar, spherical_to_cartesian, xyz_to_voxel
+from tradition.core.geometry import (
+    clip_segment_to_grid,
+    radar_to_lidar,
+    spherical_to_cartesian,
+    xyz_to_voxel,
+)
 
 
 def test_forward_axis_and_radar_to_lidar_translation():
@@ -15,3 +20,15 @@ def test_radarocc_grid_shape_and_voxel_index():
     grid = GridConfig()
     assert grid.shape_xyz == (128, 128, 14)
     assert xyz_to_voxel([0.2, -25.4, -2.4], grid) == (0, 0, 0)
+
+
+def test_segment_beyond_front_range_is_clipped_into_last_voxel():
+    grid = GridConfig()
+    clipped = clip_segment_to_grid(
+        np.array([2.54, -0.30, -0.70]),
+        np.array([62.54, -0.30, -0.70]),
+        grid,
+    )
+    assert clipped is not None
+    assert clipped[0] < grid.max_xyz[0]
+    assert xyz_to_voxel(clipped, grid) == (127, 63, 4)

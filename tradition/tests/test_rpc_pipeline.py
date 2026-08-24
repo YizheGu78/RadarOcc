@@ -2,7 +2,7 @@ import math
 
 import numpy as np
 
-from tradition.core.types import MotionLabel
+from tradition.core.types import MotionLabel, SemanticLabel
 from tradition.detection.rpc_target_detector import RPCPointTargetDetector
 from tradition.experiment.dataset_runner import _resolve_rpc_radar
 from tradition.io.rpc_radar_reader import KRadarRPCReader
@@ -56,8 +56,22 @@ def test_rpc_reader_detector_and_three_class_ogm(tmp_path):
     assert set(np.unique(prediction.dense_labels_xyz)).issubset({0, 1, 2})
     assert MotionLabel.STATIC in prediction.motion_labels
     assert MotionLabel.DYNAMIC in prediction.motion_labels
-    assert np.any(prediction.dense_labels_xyz == int(MotionLabel.STATIC))
-    assert np.any(prediction.dense_labels_xyz == int(MotionLabel.DYNAMIC))
+    assert SemanticLabel.BACKGROUND in prediction.semantic_labels
+    assert SemanticLabel.FOREGROUND in prediction.semantic_labels
+    assert np.any(prediction.dense_labels_xyz == int(SemanticLabel.BACKGROUND))
+    assert np.any(prediction.dense_labels_xyz == int(SemanticLabel.FOREGROUND))
+
+
+def test_rpc_endpoint_outside_grid_still_carves_free_ray(tmp_path):
+    path = tmp_path / "rpc_00043.npy"
+    np.save(path, np.asarray([_point(60.0, 0.0, 0.0)]), allow_pickle=False)
+
+    pipeline = build_rpc_pipeline()
+    prediction = pipeline.predict_file(path, ego_speed_mps=0.0)
+
+    assert np.all(prediction.dense_labels_xyz == 0)
+    assert pipeline.mapper.occupancy_log_odds[127, 63, 4] < 0.0
+    assert not np.any(pipeline.mapper.occupancy_log_odds > 0.0)
 
 
 def test_rpc_resolver_prefers_aligned_radar_frame_index(tmp_path):

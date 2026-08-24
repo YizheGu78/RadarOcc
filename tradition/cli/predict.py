@@ -52,7 +52,7 @@ def parse_args() -> argparse.Namespace:
         "--ego-speed-mps",
         type=float,
         default=0.0,
-        help="Supply synchronized ego speed for a meaningful static/dynamic split.",
+        help="Supply synchronized ego speed for the Doppler motion cue.",
     )
     parser.add_argument("--token-prefix", default="")
     return parser.parse_args()

@@ -70,6 +70,44 @@ def voxel_center(
     )
 
 
+def clip_segment_to_grid(
+    start_xyz_m: np.ndarray,
+    end_xyz_m: np.ndarray,
+    grid: GridConfig,
+) -> np.ndarray | None:
+    """Clip a finite segment to the grid AABB and return its last in-grid point.
+
+    The returned maximum-bound coordinates are nudged into the half-open grid so
+    they can safely be passed to :func:`xyz_to_voxel`.
+    """
+    start = np.asarray(start_xyz_m, dtype=np.float64)
+    end = np.asarray(end_xyz_m, dtype=np.float64)
+    lo = np.asarray(grid.min_xyz, dtype=np.float64)
+    hi = np.asarray(grid.max_xyz, dtype=np.float64)
+    direction = end - start
+    t_enter, t_exit = 0.0, 1.0
+
+    for axis in range(3):
+        if abs(float(direction[axis])) <= 1e-12:
+            if start[axis] < lo[axis] or start[axis] >= hi[axis]:
+                return None
+            continue
+        t0 = float((lo[axis] - start[axis]) / direction[axis])
+        t1 = float((hi[axis] - start[axis]) / direction[axis])
+        if t0 > t1:
+            t0, t1 = t1, t0
+        t_enter = max(t_enter, t0)
+        t_exit = min(t_exit, t1)
+        if t_enter > t_exit:
+            return None
+
+    if t_exit < 0.0 or t_enter > 1.0:
+        return None
+    clipped = start + min(1.0, t_exit) * direction
+    interior_hi = np.nextafter(hi, lo)
+    return np.minimum(np.maximum(clipped, lo), interior_hi)
+
+
 def ray_voxels_dda(
     start_xyz_m: np.ndarray,
     end_xyz_m: np.ndarray,

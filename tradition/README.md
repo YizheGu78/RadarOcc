@@ -23,11 +23,21 @@ validate [N,11] and remove invalid/zero-range points
 ego-motion-compensated Doppler classification
         |
         v
+classical 3-D clustering + object-shape semantic classification
+        |
+        v
 3D free-ray carving + log-odds occupancy mapping
         |
         v
-0=free, 1=background/static, 2=foreground/dynamic
+0=free, 1=background, 2=foreground
 ```
+
+Doppler static/dynamic is retained as an intermediate cue, but it is not the
+output semantic definition. Moving detections are foreground; compact,
+object-like clusters can also promote stationary detections (notably parked
+vehicles) to foreground. The classifier uses no GT boxes at inference time.
+Detections beyond the evaluation AABB still carve free space up to the grid
+boundary, but do not create an occupied endpoint outside the grid.
 
 ## Run an aligned evaluation
 
@@ -70,6 +80,11 @@ Each output frame contains:
 - `pred_c.npy`: occupied coordinates and class labels;
 - `meta.json`: input path, component names and class convention.
 
+Evaluation reports the RadarOcc-compatible `SC IoU`, `SSC mIoU (BG+FG)`,
+`Background IoU`, and `Foreground IoU`. It additionally reports `Free IoU` and
+`3-class mIoU` (free/background/foreground). The extra mIoU has a separate name
+so it cannot be confused with the paper's SSC mIoU definition.
+
 ## Optional original 4DRT + CFAR strategy
 
 ```bash
@@ -83,7 +98,7 @@ python -m tradition.cli.run \\
 
 ## SOLID structure
 
-- **Single responsibility:** readers parse measurements, detectors create target lists, the motion classifier assigns static/dynamic labels, the mapper updates occupancy, and the writer serializes results.
+- **Single responsibility:** readers parse measurements, detectors create target lists, the motion classifier supplies a Doppler cue, the semantic classifier assigns background/foreground, the mapper updates occupancy, and the writer serializes results.
 - **Open/closed:** RPC and raw-CFAR are composed from the same interfaces; adding another radar representation does not require changing the mapper or evaluator.
 - **Liskov substitution:** `KRadarRPCReader` and `KRadarTensorReader` implement the representation-neutral `RadarMeasurementReader` interface.
 - **Interface segregation:** reader, detector, classifier, mapper and writer contracts remain separate and small.
@@ -105,6 +120,7 @@ tradition/
 │   ├── target_detector.py            # optional raw CFAR target list
 │   └── cfar.py
 ├── motion/
+├── semantics/                        # classical BG/FG classifier
 ├── mapping/
 ├── pipeline/
 ├── evaluation/
@@ -115,6 +131,6 @@ tradition/
 ## Experimental cautions
 
 - RPC/pc01p is already a density-reduced detection-like representation. Describe it as an **Enhanced K-Radar RPC traditional OGM baseline**, not as original 4DRT + CFAR.
-- Class 1/2 is a motion-derived static/dynamic proxy, while RadarOcc background/foreground is semantic. Parked vehicles are the main mismatch.
-- `--ego-speed-mps 0` is suitable only for a smoke test. Final motion labels require synchronized ego speed; otherwise static structures may be predicted as foreground.
+- Background/foreground remains a classical geometric heuristic, not GT-box or learned semantic recognition. Tune its thresholds on a validation split only, and report it as such.
+- `--ego-speed-mps 0` is suitable only for a smoke test. Synchronized ego speed improves the Doppler cue, although the final semantic label is no longer a direct static/dynamic rename.
 - The requested three-class protocol has no unknown class, so unobserved OGM cells are collapsed into class 0/free.

@@ -12,6 +12,11 @@ class MotionLabel(IntEnum):
     DYNAMIC = 2
 
 
+class SemanticLabel(IntEnum):
+    BACKGROUND = 1
+    FOREGROUND = 2
+
+
 @dataclass(frozen=True)
 class RadarDetection:
     range_index: int
@@ -58,4 +63,5 @@ class FramePrediction:
     dense_labels_xyz: np.ndarray
     detections: list[RadarDetection]
     motion_labels: list[MotionLabel]
+    semantic_labels: list[SemanticLabel]
     metadata: dict[str, Any]
