@@ -3,11 +3,10 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from tradition.core.config import SparseDetectionConfig
 from tradition.experiment.dataset_runner import TraditionalDatasetRunner
 from tradition.pipeline.traditional_radar_pipeline import (
-    build_default_pipeline,
-    build_sparse_pipeline,
+    build_raw_pipeline,
+    build_rpc_pipeline,
 )
 
 
@@ -23,19 +22,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
     parser.add_argument(
         "--input-mode",
-        choices=("sparse", "raw"),
-        default="sparse",
+        choices=("rpc", "raw"),
+        default="rpc",
         help=(
-            "sparse: use existing RadarOcc EAsparse_*.npz and skip CFAR; "
-            "raw: use full 4DRT and run CFAR. Default: sparse."
+            "rpc: use Enhanced K-Radar pc01p [N,11] point clouds directly; "
+            "raw: use full 4DRT and run CFAR. Default: rpc."
         ),
     )
     parser.add_argument(
         "--radar-root",
         type=Path,
         help=(
-            "Input root. For sparse mode this is typically data/RadarOcc_8doppler; "
-            "for raw mode it is the K-Radar root."
+            "Input root: data/K-Radar_rpc for rpc, or the K-Radar root for raw."
         ),
     )
     parser.add_argument("--gt-root", type=Path)
@@ -44,16 +42,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-frames", type=int)
     parser.add_argument(
         "--cfar-backend", choices=("numpy", "openradar"), default="numpy"
-    )
-    parser.add_argument(
-        "--sparse-max-per-range",
-        type=int,
-        default=16,
-        help=(
-            "In sparse mode, keep at most this many of the already selected "
-            "EAsparse candidates per range, ranked by stored mean power. "
-            "Use 250 to treat all original Top-250 candidates as detections."
-        ),
     )
     parser.add_argument("--ego-speed-mps", type=float, default=0.0)
 
@@ -72,14 +60,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    if args.input_mode == "sparse":
-        pipeline = build_sparse_pipeline(
-            sparse_cfg=SparseDetectionConfig(
-                max_per_range=args.sparse_max_per_range,
-            )
-        )
+    if args.input_mode == "rpc":
+        pipeline = build_rpc_pipeline()
     else:
-        pipeline = build_default_pipeline(cfar_backend=args.cfar_backend)
+        pipeline = build_raw_pipeline(cfar_backend=args.cfar_backend)
 
     outputs = TraditionalDatasetRunner(pipeline).run(
         annotation=args.annotation,
