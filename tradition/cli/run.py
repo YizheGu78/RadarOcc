@@ -53,6 +53,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--camera-offset", type=int, default=0)
     parser.add_argument("--max-video-frames", type=int, default=100)
     parser.add_argument("--fps", type=int, default=10)
+    parser.add_argument(
+        "--no-rotate",
+        action="store_true",
+        help="Keep the occupancy panel in its original, unrotated orientation.",
+    )
     parser.add_argument("--keep-frames", action="store_true")
     return parser.parse_args()
 
@@ -80,6 +85,7 @@ def main() -> None:
         camera_offset=args.camera_offset,
         max_video_frames=args.max_video_frames,
         fps=args.fps,
+        no_rotate=args.no_rotate,
         keep_frames=args.keep_frames,
         input_mode=args.input_mode,
     )

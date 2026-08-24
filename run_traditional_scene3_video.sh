@@ -88,6 +88,7 @@ xvfb-run -a -s "-screen 0 1920x1080x24" \
     --camera-offset "$CAMERA_OFFSET" \
     --max-video-frames "$MAX_VIDEO_FRAMES" \
     --fps "$FPS" \
+    --no-rotate \
     "${KEEP_ARGS[@]}" \
     2>&1 | tee "$OUTPUT_DIR/run.log"
 

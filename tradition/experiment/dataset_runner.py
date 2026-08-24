@@ -326,6 +326,7 @@ class TraditionalDatasetRunner:
         camera_offset: int = 0,
         max_video_frames: int = 100,
         fps: int = 10,
+        no_rotate: bool = False,
         keep_frames: bool = False,
         input_mode: str = "rpc",
     ) -> dict[str, Path]:
@@ -369,6 +370,7 @@ class TraditionalDatasetRunner:
                 output_dir=output_dir,
                 scene=str(video_scene),
                 fps=fps,
+                no_rotate=no_rotate,
                 keep_frames=keep_frames,
             )
 
@@ -406,7 +408,9 @@ class TraditionalDatasetRunner:
             print(
                 f"[{index}/{len(infos)}] mode={input_mode} "
                 f"scene={info.get('scene_token')} token={token} "
-                f"input={radar_path.name} detections={len(prediction.detections)}"
+                f"input={radar_path.name} detections={len(prediction.detections)} "
+                f"background={sum(int(label) == 1 for label in prediction.semantic_labels)} "
+                f"foreground={sum(int(label) == 2 for label in prediction.semantic_labels)}"
             )
 
         outputs = MetricsReportWriter().write(
