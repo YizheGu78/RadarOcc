@@ -11,22 +11,21 @@ from tradition.core.config import (
     KRadarConfig,
     MappingConfig,
     MotionConfig,
-    SparseDetectionConfig,
 )
 from tradition.core.interfaces import (
     MotionClassifier,
     OccupancyMapper,
     PredictionWriter,
-    RadarTensorReader,
+    RadarMeasurementReader,
     TargetDetector,
 )
 from tradition.core.types import FramePrediction
 from tradition.detection.cfar import NumpyCACFAR, OpenRadarCACFAR
-from tradition.detection.sparse_target_detector import SparseCandidateTargetDetector
+from tradition.detection.rpc_target_detector import RPCPointTargetDetector
 from tradition.detection.target_detector import ClassicalTargetDetector
 from tradition.io.kradar_reader import KRadarTensorReader
 from tradition.io.radarocc_writer import RadarOccPredictionWriter
-from tradition.io.sparse_radar_reader import RadarOccSparseReader
+from tradition.io.rpc_radar_reader import KRadarRPCReader
 from tradition.mapping.occupancy_grid_3d import LogOddsOccupancyGrid3D
 from tradition.motion.doppler_classifier import EgoCompensatedDopplerClassifier
 
@@ -36,7 +35,7 @@ class TraditionalRadarPipeline:
 
     def __init__(
         self,
-        reader: RadarTensorReader,
+        reader: RadarMeasurementReader,
         detector: TargetDetector,
         motion_classifier: MotionClassifier,
         mapper: OccupancyMapper,
@@ -126,7 +125,7 @@ def _common_components(
     )
 
 
-def build_default_pipeline(
+def build_raw_pipeline(
     cfar_backend: str = "numpy",
     grid_cfg: GridConfig | None = None,
     radar_cfg: KRadarConfig | None = None,
@@ -169,22 +168,21 @@ def build_default_pipeline(
     )
 
 
-def build_sparse_pipeline(
+def build_rpc_pipeline(
     grid_cfg: GridConfig | None = None,
     radar_cfg: KRadarConfig | None = None,
-    sparse_cfg: SparseDetectionConfig | None = None,
     motion_cfg: MotionConfig | None = None,
     mapping_cfg: MappingConfig | None = None,
 ) -> TraditionalRadarPipeline:
-    """Build the practical EAsparse baseline.
+    """Build the default Enhanced K-Radar RPC point-cloud baseline.
 
-    This starts after RadarOcc's mean-power Top-K sparsification and therefore
-    does not claim to reproduce CFAR.
+    RPC/pc01p already contains Cartesian targets and physical Doppler velocity.
+    This composition therefore skips CFAR, polar conversion and Doppler-bin
+    conversion, then reuses the motion classifier, log-odds mapper and writer.
     """
 
     grid_cfg = grid_cfg or GridConfig()
     radar_cfg = radar_cfg or KRadarConfig()
-    sparse_cfg = sparse_cfg or SparseDetectionConfig()
     motion_cfg = motion_cfg or MotionConfig()
     mapping_cfg = mapping_cfg or MappingConfig()
 
@@ -196,11 +194,8 @@ def build_sparse_pipeline(
     )
 
     return TraditionalRadarPipeline(
-        reader=RadarOccSparseReader(),
-        detector=SparseCandidateTargetDetector(
-            radar_cfg=radar_cfg,
-            sparse_cfg=sparse_cfg,
-        ),
+        reader=KRadarRPCReader(),
+        detector=RPCPointTargetDetector(radar_cfg=radar_cfg),
         motion_classifier=motion_classifier,
         mapper=mapper,
         writer=writer,
