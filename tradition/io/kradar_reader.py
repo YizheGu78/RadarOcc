@@ -5,10 +5,10 @@ from pathlib import Path
 import numpy as np
 
 from tradition.core.config import KRadarConfig
-from tradition.core.interfaces import RadarTensorReader
+from tradition.core.interfaces import RadarMeasurementReader
 
 
-class KRadarTensorReader(RadarTensorReader):
+class KRadarTensorReader(RadarMeasurementReader):
     """Read K-Radar 4D power tensors without changing their source data."""
 
     def __init__(self, radar_cfg: KRadarConfig | None = None) -> None:
