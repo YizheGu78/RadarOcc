@@ -26,7 +26,7 @@ robust per-frame ego-speed estimation in wrapped-Doppler space
 ego-motion-compensated Doppler classification
         |
         v
-classical 3-D clustering + object-shape semantic classification
+direct static/background and dynamic/foreground mapping
         |
         v
 3D free-ray carving + log-odds occupancy mapping
@@ -35,10 +35,9 @@ classical 3-D clustering + object-shape semantic classification
 0=free, 1=background, 2=foreground
 ```
 
-Doppler static/dynamic is retained as an intermediate cue, but it is not the
-output semantic definition. Moving detections are foreground; compact,
-object-like clusters can also promote stationary detections (notably parked
-vehicles) to foreground. The classifier uses no GT boxes at inference time.
+Compensated Doppler is the complete background/foreground rule: static
+detections are background and dynamic detections are foreground. No spatial
+clustering, object-shape heuristic, learned classifier or GT box is used.
 Detections beyond the evaluation AABB still carve free space up to the grid
 boundary, but do not create an occupied endpoint outside the grid.
 
@@ -57,7 +56,8 @@ python -m tradition.cli.run \\
   --output-dir work_dirs/tradition_rpc_smoke_seq3 \\
   --scene 3 \\
   --max-frames 1 \\
-  --ego-speed-mps auto
+  --ego-speed-mps auto \\
+  --static-residual-threshold-mps 0.30
 ```
 
 RPC is the default input mode. Writing `--input-mode rpc` explicitly is optional. The resolver uses `radar_frame_idx` from the aligned annotation first, then the frame number in `radar_path`. Common layouts such as these are accepted:
@@ -134,6 +134,7 @@ tradition/
 ## Experimental cautions
 
 - RPC/pc01p is already a density-reduced detection-like representation. Describe it as an **Enhanced K-Radar RPC traditional OGM baseline**, not as original 4DRT + CFAR.
-- Background/foreground remains a classical geometric heuristic, not GT-box or learned semantic recognition. Tune its thresholds on a validation split only, and report it as such.
+- Background/foreground is a direct compensated-Doppler split, not GT-box, geometric-cluster or learned semantic recognition. Report static parked objects as a known limitation because they remain background.
 - The default `--ego-speed-mps auto` estimates speed independently for every frame from the dominant stationary Doppler consensus. Pass a number only when synchronized ego speed is available; `0` is suitable only for a smoke test.
+- The default static/background residual threshold is `0.30 m/s`. Increase `--static-residual-threshold-mps` cautiously when static structures remain foreground after ego-motion compensation; a larger value also hides slow-moving targets.
 - The requested three-class protocol has no unknown class, so unobserved OGM cells are collapsed into class 0/free.

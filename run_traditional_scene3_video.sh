@@ -22,6 +22,7 @@ MAX_VIDEO_FRAMES="${MAX_VIDEO_FRAMES:-1000}"
 MAX_FRAMES="${MAX_FRAMES:-}"
 FPS="${FPS:-10}"
 EGO_SPEED_MPS="${EGO_SPEED_MPS:-auto}"
+STATIC_RESIDUAL_THRESHOLD_MPS="${STATIC_RESIDUAL_THRESHOLD_MPS:-0.30}"
 KEEP_FRAMES="${KEEP_FRAMES:-0}"
 
 fail() {
@@ -81,6 +82,7 @@ echo "  scene     : $SCENE"
 echo "  output    : $OUTPUT_DIR"
 echo "  fps       : $FPS"
 echo "  ego speed : $EGO_SPEED_MPS"
+echo "  static thr: $STATIC_RESIDUAL_THRESHOLD_MPS m/s"
 
 cd "$REPO_ROOT"
 
@@ -95,6 +97,7 @@ xvfb-run -a -s "-screen 0 1920x1080x24" \
     "${FRAME_ARGS[@]}" \
     --gt-order xyz \
     --ego-speed-mps "$EGO_SPEED_MPS" \
+    --static-residual-threshold-mps "$STATIC_RESIDUAL_THRESHOLD_MPS" \
     --video-scene "$SCENE" \
     --camera-dir "$CAMERA_DIR" \
     --camera-offset "$CAMERA_OFFSET" \

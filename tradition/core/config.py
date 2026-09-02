@@ -97,34 +97,6 @@ class EgoSpeedConfig:
 
 
 @dataclass(frozen=True)
-class SemanticConfig:
-    """Geometry rules for the classical background/foreground classifier.
-
-    Doppler identifies moving foreground directly.  These settings let compact,
-    object-like clusters promote stationary returns (for example parked cars) to
-    foreground without using annotation boxes at inference time.
-    """
-
-    neighbor_radius_xy_m: float = 1.2
-    neighbor_radius_z_m: float = 0.8
-    min_cluster_points: int = 3
-    max_object_length_m: float = 12.0
-    max_object_width_m: float = 4.5
-    max_object_height_m: float = 4.5
-    min_object_height_m: float = 0.20
-    min_object_top_z_m: float = -0.40
-    dynamic_cluster_min_fraction: float = 0.15
-
-    def __post_init__(self) -> None:
-        if self.neighbor_radius_xy_m <= 0.0 or self.neighbor_radius_z_m <= 0.0:
-            raise ValueError("Semantic neighbor radii must be positive.")
-        if self.min_cluster_points < 2:
-            raise ValueError("min_cluster_points must be at least 2.")
-        if not 0.0 <= self.dynamic_cluster_min_fraction <= 1.0:
-            raise ValueError("dynamic_cluster_min_fraction must be in [0, 1].")
-
-
-@dataclass(frozen=True)
 class MappingConfig:
     """Inverse sensor model for one-frame 3D occupancy."""
 

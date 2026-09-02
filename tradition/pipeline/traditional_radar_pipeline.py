@@ -12,7 +12,6 @@ from tradition.core.config import (
     KRadarConfig,
     MappingConfig,
     MotionConfig,
-    SemanticConfig,
 )
 from tradition.core.interfaces import (
     EgoSpeedEstimator,
@@ -33,7 +32,7 @@ from tradition.io.rpc_radar_reader import KRadarRPCReader
 from tradition.mapping.occupancy_grid_3d import LogOddsOccupancyGrid3D
 from tradition.motion.doppler_classifier import EgoCompensatedDopplerClassifier
 from tradition.motion.ego_speed_estimator import RobustDopplerEgoSpeedEstimator
-from tradition.semantics.classical_classifier import ClassicalClusterSemanticClassifier
+from tradition.semantics.classical_classifier import DopplerSemanticClassifier
 
 
 class TraditionalRadarPipeline:
@@ -135,7 +134,6 @@ def _common_components(
     radar_cfg: KRadarConfig,
     ego_speed_cfg: EgoSpeedConfig,
     motion_cfg: MotionConfig,
-    semantic_cfg: SemanticConfig,
     mapping_cfg: MappingConfig,
 ) -> tuple[
     EgoSpeedEstimator,
@@ -154,7 +152,7 @@ def _common_components(
             radar_cfg=radar_cfg,
             motion_cfg=motion_cfg,
         ),
-        ClassicalClusterSemanticClassifier(semantic_cfg),
+        DopplerSemanticClassifier(),
         LogOddsOccupancyGrid3D(
             grid_cfg=grid_cfg,
             radar_cfg=radar_cfg,
@@ -171,7 +169,6 @@ def build_raw_pipeline(
     cfar_cfg: CFARConfig | None = None,
     ego_speed_cfg: EgoSpeedConfig | None = None,
     motion_cfg: MotionConfig | None = None,
-    semantic_cfg: SemanticConfig | None = None,
     mapping_cfg: MappingConfig | None = None,
 ) -> TraditionalRadarPipeline:
     """Build the genuine raw-4DRT CFAR baseline."""
@@ -181,7 +178,6 @@ def build_raw_pipeline(
     cfar_cfg = cfar_cfg or CFARConfig()
     ego_speed_cfg = ego_speed_cfg or EgoSpeedConfig()
     motion_cfg = motion_cfg or MotionConfig()
-    semantic_cfg = semantic_cfg or SemanticConfig()
     mapping_cfg = mapping_cfg or MappingConfig()
 
     if cfar_backend == "numpy":
@@ -192,7 +188,7 @@ def build_raw_pipeline(
         raise ValueError("cfar_backend must be 'numpy' or 'openradar'.")
 
     components = _common_components(
-        grid_cfg, radar_cfg, ego_speed_cfg, motion_cfg, semantic_cfg, mapping_cfg
+        grid_cfg, radar_cfg, ego_speed_cfg, motion_cfg, mapping_cfg
     )
     (
         ego_speed_estimator,
@@ -222,7 +218,6 @@ def build_rpc_pipeline(
     radar_cfg: KRadarConfig | None = None,
     ego_speed_cfg: EgoSpeedConfig | None = None,
     motion_cfg: MotionConfig | None = None,
-    semantic_cfg: SemanticConfig | None = None,
     mapping_cfg: MappingConfig | None = None,
 ) -> TraditionalRadarPipeline:
     """Build the default Enhanced K-Radar RPC point-cloud baseline.
@@ -236,11 +231,10 @@ def build_rpc_pipeline(
     radar_cfg = radar_cfg or KRadarConfig()
     ego_speed_cfg = ego_speed_cfg or EgoSpeedConfig()
     motion_cfg = motion_cfg or MotionConfig()
-    semantic_cfg = semantic_cfg or SemanticConfig()
     mapping_cfg = mapping_cfg or MappingConfig()
 
     components = _common_components(
-        grid_cfg, radar_cfg, ego_speed_cfg, motion_cfg, semantic_cfg, mapping_cfg
+        grid_cfg, radar_cfg, ego_speed_cfg, motion_cfg, mapping_cfg
     )
     (
         ego_speed_estimator,

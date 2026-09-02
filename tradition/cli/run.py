@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 from tradition.cli.arguments import parse_ego_speed
+from tradition.core.config import MotionConfig
 from tradition.experiment.dataset_runner import TraditionalDatasetRunner
 from tradition.pipeline.traditional_radar_pipeline import (
     build_raw_pipeline,
@@ -54,6 +55,15 @@ def parse_args() -> argparse.Namespace:
             "each frame's wrapped Doppler consensus. Default: auto."
         ),
     )
+    parser.add_argument(
+        "--static-residual-threshold-mps",
+        type=float,
+        default=0.30,
+        help=(
+            "Maximum absolute ego-compensated Doppler residual classified "
+            "as static/background. Default: 0.30 m/s."
+        ),
+    )
 
     parser.add_argument(
         "--video-scene",
@@ -83,11 +93,19 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.static_residual_threshold_mps < 0.0:
+        raise ValueError("--static-residual-threshold-mps must be non-negative.")
+    motion_cfg = MotionConfig(
+        static_residual_threshold_mps=args.static_residual_threshold_mps
+    )
 
     if args.input_mode == "rpc":
-        pipeline = build_rpc_pipeline()
+        pipeline = build_rpc_pipeline(motion_cfg=motion_cfg)
     else:
-        pipeline = build_raw_pipeline(cfar_backend=args.cfar_backend)
+        pipeline = build_raw_pipeline(
+            cfar_backend=args.cfar_backend,
+            motion_cfg=motion_cfg,
+        )
 
     outputs = TraditionalDatasetRunner(pipeline).run(
         annotation=args.annotation,
