@@ -69,6 +69,15 @@ def parse_args() -> argparse.Namespace:
         help="Keep the occupancy panel in its original, unrotated orientation.",
     )
     parser.add_argument("--keep-frames", action="store_true")
+    parser.add_argument(
+        "--video-background-prediction-root",
+        type=Path,
+        help=(
+            "Visualization only: replace the traditional label-1 video "
+            "background with label-1 voxels from RadarOcc */pred_c.npy "
+            "files. Traditional metrics remain unchanged."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -97,6 +106,9 @@ def main() -> None:
         fps=args.fps,
         no_rotate=args.no_rotate,
         keep_frames=args.keep_frames,
+        video_background_prediction_root=(
+            args.video_background_prediction_root
+        ),
         input_mode=args.input_mode,
     )
     print("\nOutputs:")

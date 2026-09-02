@@ -328,6 +328,7 @@ class TraditionalDatasetRunner:
         fps: int = 10,
         no_rotate: bool = False,
         keep_frames: bool = False,
+        video_background_prediction_root: str | Path | None = None,
         input_mode: str = "rpc",
     ) -> dict[str, Path]:
         if input_mode not in {"rpc", "raw"}:
@@ -372,6 +373,7 @@ class TraditionalDatasetRunner:
                 fps=fps,
                 no_rotate=no_rotate,
                 keep_frames=keep_frames,
+                background_prediction_root=video_background_prediction_root,
             )
 
         accumulator = RadarOccMetricAccumulator()
