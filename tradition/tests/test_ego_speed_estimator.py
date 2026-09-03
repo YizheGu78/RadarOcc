@@ -30,7 +30,7 @@ def _detection(azimuth: float, radial_velocity: float) -> RadarDetection:
 def test_estimates_highway_speed_from_aliased_static_returns():
     true_speed = 12.0
     detections = [
-        _detection(azimuth, _wrap(-true_speed * math.cos(azimuth)))
+        _detection(azimuth, _wrap(true_speed * math.cos(azimuth)))
         for azimuth in np.linspace(-0.85, 0.85, 41)
     ]
     detections.extend(

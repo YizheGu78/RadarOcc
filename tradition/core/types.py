@@ -12,6 +12,14 @@ class MotionLabel(IntEnum):
     DYNAMIC = 2
 
 
+class DopplerEvidence(IntEnum):
+    """Internal evidence; UNCERTAIN is never emitted as a RadarOcc class."""
+
+    DYNAMIC = -1
+    UNCERTAIN = 0
+    STATIC = 1
+
+
 class SemanticLabel(IntEnum):
     BACKGROUND = 1
     FOREGROUND = 2
@@ -54,6 +62,39 @@ class RPCPointCloudFrame:
     @property
     def size(self) -> int:
         return int(self.power.size)
+
+
+@dataclass(frozen=True)
+class EgoMotion:
+    """Per-frame sensor motion derived from synchronized LiDAR poses."""
+
+    pose_lidar_to_world: np.ndarray
+    linear_velocity_lidar_mps: np.ndarray
+    linear_velocity_radar_mps: np.ndarray
+    yaw_rate_rps: float
+    source: str = "pose"
+
+
+@dataclass(frozen=True)
+class TemporalDetectionFrame:
+    """Reliable detections and motion evidence for one buffered frame."""
+
+    token: str
+    pose_lidar_to_world: np.ndarray
+    detections: list[RadarDetection]
+    doppler_residuals_mps: np.ndarray
+    doppler_evidence: np.ndarray
+
+
+@dataclass(frozen=True)
+class TemporalClassification:
+    """Accepted current detections plus pose-aligned historic background."""
+
+    current_indices: np.ndarray
+    current_motion_labels: list[MotionLabel]
+    historic_background_lidar_m: np.ndarray
+    static_support: np.ndarray
+    dynamic_support: np.ndarray
 
 
 @dataclass

@@ -12,26 +12,42 @@ from tradition.core.config import (
     KRadarConfig,
     MappingConfig,
     MotionConfig,
+    ReliabilityConfig,
+    TemporalConfig,
 )
 from tradition.core.interfaces import (
+    DetectionReliabilityFilter,
     EgoSpeedEstimator,
     MotionClassifier,
     OccupancyMapper,
+    PoseAwareDopplerClassifier,
     PredictionWriter,
     RadarMeasurementReader,
     SemanticClassifier,
     TargetDetector,
+    TemporalMotionClassifier,
+    TemporalOccupancyMapper,
 )
-from tradition.core.types import FramePrediction
+from tradition.core.types import (
+    DopplerEvidence,
+    EgoMotion,
+    FramePrediction,
+    TemporalDetectionFrame,
+)
 from tradition.detection.cfar import NumpyCACFAR, OpenRadarCACFAR
 from tradition.detection.rpc_target_detector import RPCPointTargetDetector
+from tradition.detection.rpc_reliability_filter import LocalPowerRPCFilter
 from tradition.detection.target_detector import ClassicalTargetDetector
 from tradition.io.kradar_reader import KRadarTensorReader
 from tradition.io.radarocc_writer import RadarOccPredictionWriter
 from tradition.io.rpc_radar_reader import KRadarRPCReader
 from tradition.mapping.occupancy_grid_3d import LogOddsOccupancyGrid3D
+from tradition.mapping.temporal_occupancy_grid_3d import (
+    TemporalLogOddsOccupancyGrid3D,
+)
 from tradition.motion.doppler_classifier import EgoCompensatedDopplerClassifier
 from tradition.motion.ego_speed_estimator import RobustDopplerEgoSpeedEstimator
+from tradition.motion.temporal_consistency import PoseAlignedTemporalClassifier
 from tradition.semantics.classical_classifier import DopplerSemanticClassifier
 
 
@@ -47,6 +63,8 @@ class TraditionalRadarPipeline:
         semantic_classifier: SemanticClassifier,
         mapper: OccupancyMapper,
         writer: PredictionWriter,
+        reliability_filter: DetectionReliabilityFilter | None = None,
+        temporal_classifier: TemporalMotionClassifier | None = None,
     ) -> None:
         self.reader = reader
         self.detector = detector
@@ -55,6 +73,12 @@ class TraditionalRadarPipeline:
         self.semantic_classifier = semantic_classifier
         self.mapper = mapper
         self.writer = writer
+        self.reliability_filter = reliability_filter
+        self.temporal_classifier = temporal_classifier
+
+    def reset_sequence(self) -> None:
+        if self.temporal_classifier is not None:
+            self.temporal_classifier.reset()
 
     def predict_measurement(
         self,
@@ -117,6 +141,103 @@ class TraditionalRadarPipeline:
         )
         prediction.metadata["radar_path"] = str(radar_path)
         return prediction
+
+    def predict_temporal_file(
+        self,
+        radar_path: str | Path,
+        token: str,
+        ego_motion: EgoMotion,
+    ) -> FramePrediction:
+        """Predict one RPC frame with pose motion and causal temporal evidence."""
+        if self.reliability_filter is None or self.temporal_classifier is None:
+            raise RuntimeError("This pipeline was not built for temporal RPC input.")
+        if not isinstance(self.motion_classifier, PoseAwareDopplerClassifier):
+            raise TypeError("Temporal RPC requires a pose-aware Doppler classifier.")
+        if not isinstance(self.mapper, TemporalOccupancyMapper):
+            raise TypeError("Temporal RPC requires a temporal occupancy mapper.")
+
+        measurement = self.reader.read(radar_path)
+        raw_detections = self.detector.detect(measurement)
+        reliable_detections = self.reliability_filter.filter(raw_detections)
+        residuals, evidence = self.motion_classifier.evidence_with_velocity(
+            reliable_detections,
+            ego_motion.linear_velocity_radar_mps,
+        )
+        temporal_frame = TemporalDetectionFrame(
+            token=str(token),
+            pose_lidar_to_world=ego_motion.pose_lidar_to_world,
+            detections=reliable_detections,
+            doppler_residuals_mps=residuals,
+            doppler_evidence=evidence,
+        )
+        classification = self.temporal_classifier.update(temporal_frame)
+        accepted_detections = [
+            reliable_detections[int(index)]
+            for index in classification.current_indices
+        ]
+        motion_labels = classification.current_motion_labels
+        semantic_labels = self.semantic_classifier.classify(
+            accepted_detections, motion_labels
+        )
+
+        self.mapper.reset()
+        self.mapper.update(accepted_detections, semantic_labels)
+        self.mapper.update_historic_background(
+            classification.historic_background_lidar_m
+        )
+        dense = self.mapper.labels()
+        finite_residuals = np.abs(residuals[np.isfinite(residuals)])
+        return FramePrediction(
+            dense_labels_xyz=dense,
+            detections=accepted_detections,
+            motion_labels=motion_labels,
+            semantic_labels=semantic_labels,
+            metadata={
+                "radar_path": str(radar_path),
+                "ego_speed_mps": float(
+                    np.linalg.norm(ego_motion.linear_velocity_lidar_mps[:2])
+                ),
+                "ego_velocity_lidar_mps": (
+                    ego_motion.linear_velocity_lidar_mps.tolist()
+                ),
+                "ego_velocity_radar_mps": (
+                    ego_motion.linear_velocity_radar_mps.tolist()
+                ),
+                "yaw_rate_rps": ego_motion.yaw_rate_rps,
+                "ego_speed_source": ego_motion.source,
+                "raw_detection_count": len(raw_detections),
+                "reliable_detection_count": len(reliable_detections),
+                "accepted_detection_count": len(accepted_detections),
+                "historic_background_count": int(
+                    classification.historic_background_lidar_m.shape[0]
+                ),
+                "doppler_static_evidence_count": int(
+                    np.count_nonzero(evidence == int(DopplerEvidence.STATIC))
+                ),
+                "doppler_uncertain_evidence_count": int(
+                    np.count_nonzero(evidence == int(DopplerEvidence.UNCERTAIN))
+                ),
+                "doppler_dynamic_evidence_count": int(
+                    np.count_nonzero(evidence == int(DopplerEvidence.DYNAMIC))
+                ),
+                "doppler_residual_median_mps": (
+                    float(np.median(finite_residuals))
+                    if finite_residuals.size
+                    else float("nan")
+                ),
+                "doppler_residual_p90_mps": (
+                    float(np.quantile(finite_residuals, 0.90))
+                    if finite_residuals.size
+                    else float("nan")
+                ),
+                "reader": type(self.reader).__name__,
+                "detector": type(self.detector).__name__,
+                "reliability_filter": type(self.reliability_filter).__name__,
+                "motion_classifier": type(self.motion_classifier).__name__,
+                "temporal_classifier": type(self.temporal_classifier).__name__,
+                "semantic_classifier": type(self.semantic_classifier).__name__,
+            },
+        )
 
     def predict_and_write(
         self,
@@ -219,6 +340,8 @@ def build_rpc_pipeline(
     ego_speed_cfg: EgoSpeedConfig | None = None,
     motion_cfg: MotionConfig | None = None,
     mapping_cfg: MappingConfig | None = None,
+    reliability_cfg: ReliabilityConfig | None = None,
+    temporal_cfg: TemporalConfig | None = None,
 ) -> TraditionalRadarPipeline:
     """Build the default Enhanced K-Radar RPC point-cloud baseline.
 
@@ -232,17 +355,25 @@ def build_rpc_pipeline(
     ego_speed_cfg = ego_speed_cfg or EgoSpeedConfig()
     motion_cfg = motion_cfg or MotionConfig()
     mapping_cfg = mapping_cfg or MappingConfig()
+    reliability_cfg = reliability_cfg or ReliabilityConfig()
+    temporal_cfg = temporal_cfg or TemporalConfig()
 
-    components = _common_components(
-        grid_cfg, radar_cfg, ego_speed_cfg, motion_cfg, mapping_cfg
+    ego_speed_estimator = RobustDopplerEgoSpeedEstimator(
+        radar_cfg=radar_cfg,
+        motion_cfg=motion_cfg,
+        estimator_cfg=ego_speed_cfg,
     )
-    (
-        ego_speed_estimator,
-        motion_classifier,
-        semantic_classifier,
-        mapper,
-        writer,
-    ) = components
+    motion_classifier = EgoCompensatedDopplerClassifier(
+        radar_cfg=radar_cfg,
+        motion_cfg=motion_cfg,
+    )
+    semantic_classifier = DopplerSemanticClassifier()
+    mapper = TemporalLogOddsOccupancyGrid3D(
+        grid_cfg=grid_cfg,
+        radar_cfg=radar_cfg,
+        mapping_cfg=mapping_cfg,
+    )
+    writer = RadarOccPredictionWriter()
 
     return TraditionalRadarPipeline(
         reader=KRadarRPCReader(),
@@ -252,4 +383,9 @@ def build_rpc_pipeline(
         semantic_classifier=semantic_classifier,
         mapper=mapper,
         writer=writer,
+        reliability_filter=LocalPowerRPCFilter(reliability_cfg),
+        temporal_classifier=PoseAlignedTemporalClassifier(
+            temporal_cfg=temporal_cfg,
+            motion_cfg=motion_cfg,
+        ),
     )

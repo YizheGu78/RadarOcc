@@ -67,8 +67,93 @@ class CFARConfig:
 class MotionConfig:
     """Doppler-based static/dynamic split."""
 
-    static_residual_threshold_mps: float = 0.30
-    stationary_velocity_sign: float = -1.0
+    static_residual_threshold_mps: float = 0.50
+    dynamic_residual_threshold_mps: float = 0.80
+    # K-Radar RPC convention in the supplied scene: positive Doppler for a
+    # stationary return projected along positive ego translation.
+    stationary_velocity_sign: float = 1.0
+
+    def __post_init__(self) -> None:
+        if self.static_residual_threshold_mps < 0.0:
+            raise ValueError("Static residual threshold must be non-negative.")
+        if (
+            self.dynamic_residual_threshold_mps
+            < self.static_residual_threshold_mps
+        ):
+            raise ValueError(
+                "Dynamic residual threshold must be greater than or equal "
+                "to the static residual threshold."
+            )
+        if self.stationary_velocity_sign not in (-1.0, 1.0):
+            raise ValueError("Stationary velocity sign must be -1 or +1.")
+
+
+@dataclass(frozen=True)
+class PoseConfig:
+    """LiDAR-pose sampling and rigid radar extrinsics."""
+
+    frame_dt_s: float = 0.10
+    radar_to_lidar_rotation: Tuple[
+        Tuple[float, float, float],
+        Tuple[float, float, float],
+        Tuple[float, float, float],
+    ] = (
+        (1.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0),
+        (0.0, 0.0, 1.0),
+    )
+
+    def __post_init__(self) -> None:
+        if self.frame_dt_s <= 0.0:
+            raise ValueError("Pose frame interval must be positive.")
+
+
+@dataclass(frozen=True)
+class ReliabilityConfig:
+    """Local polar-neighbourhood RPC sidelobe/reliability filter."""
+
+    range_radius_bins: int = 1
+    azimuth_radius_bins: int = 2
+    elevation_radius_bins: int = 1
+    min_local_power_ratio: float = 0.25
+    min_local_neighbors: int = 1
+
+    def __post_init__(self) -> None:
+        if min(
+            self.range_radius_bins,
+            self.azimuth_radius_bins,
+            self.elevation_radius_bins,
+        ) < 0:
+            raise ValueError("Reliability neighbourhood radii must be non-negative.")
+        if not 0.0 <= self.min_local_power_ratio <= 1.0:
+            raise ValueError("Local power ratio must lie in [0, 1].")
+        if self.min_local_neighbors < 0:
+            raise ValueError("Minimum local neighbour count must be non-negative.")
+
+
+@dataclass(frozen=True)
+class TemporalConfig:
+    """Causal temporal consistency settings for pose-aligned RPC frames."""
+
+    window_size: int = 3
+    min_static_support: int = 2
+    min_dynamic_support: int = 2
+    static_match_radius_m: float = 0.60
+    dynamic_match_radius_m: float = 2.00
+
+    def __post_init__(self) -> None:
+        if self.window_size < 1:
+            raise ValueError("Temporal window must contain at least one frame.")
+        if not 1 <= self.min_static_support <= self.window_size:
+            raise ValueError("Invalid static temporal support.")
+        if not 1 <= self.min_dynamic_support <= self.window_size:
+            raise ValueError("Invalid dynamic temporal support.")
+        if self.static_match_radius_m <= 0.0:
+            raise ValueError("Static match radius must be positive.")
+        if self.dynamic_match_radius_m < self.static_match_radius_m:
+            raise ValueError(
+                "Dynamic match radius must not be smaller than static radius."
+            )
 
 
 @dataclass(frozen=True)

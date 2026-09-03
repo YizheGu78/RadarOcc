@@ -22,6 +22,32 @@ def wrapped_velocity_residual(value_mps: float, period_mps: float) -> float:
     return (value_mps + half) % period_mps - half
 
 
+def transform_points(
+    xyz_m: np.ndarray,
+    transform: np.ndarray,
+) -> np.ndarray:
+    """Apply a 4x4 rigid transform to an [N,3] Cartesian point array."""
+    xyz = np.asarray(xyz_m, dtype=np.float64)
+    matrix = np.asarray(transform, dtype=np.float64)
+    if xyz.ndim != 2 or xyz.shape[1] != 3:
+        raise ValueError(f"Expected points with shape [N,3], got {xyz.shape}.")
+    if matrix.shape != (4, 4):
+        raise ValueError(f"Expected a 4x4 transform, got {matrix.shape}.")
+    return xyz @ matrix[:3, :3].T + matrix[:3, 3]
+
+
+def relative_lidar_transform(
+    source_lidar_to_world: np.ndarray,
+    target_lidar_to_world: np.ndarray,
+) -> np.ndarray:
+    """Transform points from a source LiDAR frame into a target frame."""
+    source = np.asarray(source_lidar_to_world, dtype=np.float64)
+    target = np.asarray(target_lidar_to_world, dtype=np.float64)
+    if source.shape != (4, 4) or target.shape != (4, 4):
+        raise ValueError("Pose matrices must both be 4x4.")
+    return np.linalg.inv(target) @ source
+
+
 def spherical_to_cartesian(
     range_m: float,
     azimuth_rad: float,

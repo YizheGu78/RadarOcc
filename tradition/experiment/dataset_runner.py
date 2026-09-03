@@ -1,17 +1,20 @@
 from __future__ import annotations
 
+import math
 import pickle
 import re
 from pathlib import Path
 from typing import Any
 
+from tradition.core.config import KRadarConfig, PoseConfig
 from tradition.evaluation.radarocc_metrics import (
     RadarOccMetricAccumulator,
     load_gt_sparse_xyz,
 )
+from tradition.io.pose_reader import RadarOccPoseReader
+from tradition.motion.pose_ego_motion import PoseEgoMotionEstimator
 from tradition.pipeline.traditional_radar_pipeline import TraditionalRadarPipeline
 from tradition.reporting.report_writer import MetricsReportWriter
-from tradition.visualization.radarocc_video import RadarOccStyleVideoRenderer
 
 
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
@@ -328,8 +331,9 @@ class TraditionalDatasetRunner:
         fps: int = 10,
         no_rotate: bool = False,
         keep_frames: bool = False,
-        video_background_prediction_root: str | Path | None = None,
         input_mode: str = "rpc",
+        pose_root: str | Path | None = None,
+        pose_dt_s: float = 0.10,
     ) -> dict[str, Path]:
         if input_mode not in {"rpc", "raw"}:
             raise ValueError("input_mode must be 'rpc' or 'raw'.")
@@ -341,6 +345,22 @@ class TraditionalDatasetRunner:
             Path(radar_root).expanduser().resolve() if radar_root else None
         )
         gt_root_p = Path(gt_root).expanduser().resolve() if gt_root else None
+        pose_root_p = (
+            Path(pose_root).expanduser().resolve() if pose_root else None
+        )
+        if pose_root_p is not None and input_mode != "rpc":
+            raise ValueError("Pose-temporal processing currently supports RPC only.")
+        pose_reader = (
+            RadarOccPoseReader(pose_root_p) if pose_root_p is not None else None
+        )
+        pose_estimator = (
+            PoseEgoMotionEstimator(
+                radar_cfg=KRadarConfig(),
+                pose_cfg=PoseConfig(frame_dt_s=pose_dt_s),
+            )
+            if pose_reader is not None
+            else None
+        )
 
         infos = _load_infos(annotation)
         if scene is not None:
@@ -355,8 +375,13 @@ class TraditionalDatasetRunner:
             raise RuntimeError("No annotation entries selected.")
 
         camera_by_token: dict[str, Path] = {}
-        renderer: RadarOccStyleVideoRenderer | None = None
+        renderer = None
         if video_scene is not None:
+            # Keep video-only Mayavi/Qt dependencies out of metrics-only runs.
+            from tradition.visualization.radarocc_video import (
+                RadarOccStyleVideoRenderer,
+            )
+
             if camera_dir is None:
                 raise ValueError(
                     "--camera-dir is required when --video-scene is used."
@@ -373,23 +398,59 @@ class TraditionalDatasetRunner:
                 fps=fps,
                 no_rotate=no_rotate,
                 keep_frames=keep_frames,
-                background_prediction_root=video_background_prediction_root,
             )
 
         accumulator = RadarOccMetricAccumulator()
         rendered = 0
+        active_scene: str | None = None
+        self.pipeline.reset_sequence()
         for index, info in enumerate(infos, start=1):
             token = str(info["lidar_token"])
+            scene_token = str(info.get("scene_token"))
+            if scene_token != active_scene:
+                self.pipeline.reset_sequence()
+                active_scene = scene_token
             if input_mode == "rpc":
                 radar_path = _resolve_rpc_radar(info, repo_root, radar_root_p)
             else:
                 radar_path = _resolve_raw_radar(info, repo_root, radar_root_p)
 
             gt_path = _resolve_gt(info, repo_root, gt_root_p)
-            prediction = self.pipeline.predict_file(
-                radar_path,
-                ego_speed_mps=ego_speed_mps,
-            )
+            if pose_reader is not None and pose_estimator is not None:
+                pose_index = pose_reader.frame_index(token)
+                current_pose, current_pose_path = pose_reader.read_index(
+                    scene_token, pose_index
+                )
+                previous = pose_reader.try_read_index(
+                    scene_token, pose_index - 1
+                )
+                following = (
+                    pose_reader.try_read_index(scene_token, pose_index + 1)
+                    if previous is None
+                    else None
+                )
+                ego_motion = pose_estimator.estimate(
+                    current_pose=current_pose,
+                    previous_pose=previous[0] if previous is not None else None,
+                    next_pose=following[0] if following is not None else None,
+                )
+                prediction = self.pipeline.predict_temporal_file(
+                    radar_path=radar_path,
+                    token=token,
+                    ego_motion=ego_motion,
+                )
+                prediction.metadata["pose_path"] = str(current_pose_path)
+                prediction.metadata["pose_index"] = pose_index
+                prediction.metadata["pose_dt_s"] = pose_dt_s
+                if previous is not None:
+                    prediction.metadata["adjacent_pose_path"] = str(previous[1])
+                elif following is not None:
+                    prediction.metadata["adjacent_pose_path"] = str(following[1])
+            else:
+                prediction = self.pipeline.predict_file(
+                    radar_path,
+                    ego_speed_mps=ego_speed_mps,
+                )
             gt = load_gt_sparse_xyz(gt_path, coordinate_order=gt_order)
             accumulator.update(prediction.dense_labels_xyz, gt)
 
@@ -407,14 +468,39 @@ class TraditionalDatasetRunner:
                 )
                 rendered += 1
 
-            print(
-                f"[{index}/{len(infos)}] mode={input_mode} "
-                f"scene={info.get('scene_token')} token={token} "
-                f"input={radar_path.name} detections={len(prediction.detections)} "
-                f"ego_speed={prediction.metadata['ego_speed_mps']:.2f}m/s "
-                f"background={sum(int(label) == 1 for label in prediction.semantic_labels)} "
-                f"foreground={sum(int(label) == 2 for label in prediction.semantic_labels)}"
+            background_count = sum(
+                int(label) == 1 for label in prediction.semantic_labels
             )
+            foreground_count = sum(
+                int(label) == 2 for label in prediction.semantic_labels
+            )
+            if pose_reader is not None:
+                velocity = prediction.metadata["ego_velocity_lidar_mps"]
+                print(
+                    f"[{index}/{len(infos)}] mode=rpc-temporal "
+                    f"scene={scene_token} token={token} input={radar_path.name} "
+                    f"pose={prediction.metadata['pose_index']} "
+                    f"raw={prediction.metadata['raw_detection_count']} "
+                    f"reliable={prediction.metadata['reliable_detection_count']} "
+                    f"accepted={prediction.metadata['accepted_detection_count']} "
+                    f"history_bg={prediction.metadata['historic_background_count']} "
+                    f"doppler_s/u/d="
+                    f"{prediction.metadata['doppler_static_evidence_count']}/"
+                    f"{prediction.metadata['doppler_uncertain_evidence_count']}/"
+                    f"{prediction.metadata['doppler_dynamic_evidence_count']} "
+                    f"residual_med={prediction.metadata['doppler_residual_median_mps']:.2f}m/s "
+                    f"vx={velocity[0]:.2f}m/s vy={velocity[1]:.2f}m/s "
+                    f"yaw_rate={math.degrees(prediction.metadata['yaw_rate_rps']):.2f}deg/s "
+                    f"background={background_count} foreground={foreground_count}"
+                )
+            else:
+                print(
+                    f"[{index}/{len(infos)}] mode={input_mode} "
+                    f"scene={scene_token} token={token} "
+                    f"input={radar_path.name} detections={len(prediction.detections)} "
+                    f"ego_speed={prediction.metadata['ego_speed_mps']:.2f}m/s "
+                    f"background={background_count} foreground={foreground_count}"
+                )
 
         outputs = MetricsReportWriter().write(
             accumulator.results(),

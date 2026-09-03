@@ -6,7 +6,14 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from .types import FramePrediction, MotionLabel, RadarDetection, SemanticLabel
+from .types import (
+    FramePrediction,
+    MotionLabel,
+    RadarDetection,
+    SemanticLabel,
+    TemporalClassification,
+    TemporalDetectionFrame,
+)
 
 
 class RadarMeasurementReader(ABC):
@@ -34,6 +41,14 @@ class TargetDetector(ABC):
         """Create a classical target list from a radar measurement."""
 
 
+class DetectionReliabilityFilter(ABC):
+    @abstractmethod
+    def filter(
+        self, detections: Sequence[RadarDetection]
+    ) -> list[RadarDetection]:
+        """Return measurement-supported detections suitable for mapping."""
+
+
 class EgoSpeedEstimator(ABC):
     @abstractmethod
     def estimate(self, detections: Sequence[RadarDetection]) -> float:
@@ -48,6 +63,28 @@ class MotionClassifier(ABC):
         ego_speed_mps: float,
     ) -> list[MotionLabel]:
         """Split target-list evidence into static and dynamic."""
+
+
+class PoseAwareDopplerClassifier(MotionClassifier):
+    @abstractmethod
+    def evidence_with_velocity(
+        self,
+        detections: Sequence[RadarDetection],
+        ego_velocity_radar_mps: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return wrapped residuals and three-way internal Doppler evidence."""
+
+
+class TemporalMotionClassifier(ABC):
+    @abstractmethod
+    def reset(self) -> None:
+        """Clear buffered frames at a scene boundary."""
+
+    @abstractmethod
+    def update(
+        self, frame: TemporalDetectionFrame
+    ) -> TemporalClassification:
+        """Fuse a new frame with its pose-aligned causal history."""
 
 
 class SemanticClassifier(ABC):
@@ -76,6 +113,12 @@ class OccupancyMapper(ABC):
     @abstractmethod
     def labels(self) -> np.ndarray:
         """Return a dense RadarOcc-style class grid [X,Y,Z]."""
+
+
+class TemporalOccupancyMapper(OccupancyMapper):
+    @abstractmethod
+    def update_historic_background(self, xyz_lidar_m: np.ndarray) -> None:
+        """Add aligned static endpoints without carving historic free rays."""
 
 
 class PredictionWriter(ABC):
