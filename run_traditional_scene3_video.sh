@@ -17,6 +17,7 @@ POSE_ROOT="${POSE_ROOT:-$REPO_ROOT/data/K-RadarOcc}"
 CAMERA_DIR="${CAMERA_DIR:-$REPO_ROOT/data/K-Radar-RGB/K-Radar/K-Radar-RGB/3/images_rb_switched}"
 OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/work_dirs/tradition_rpc_test_official_scene3_video}"
 OBJECT_MODEL="${OBJECT_MODEL:-$REPO_ROOT/work_dirs/traditional_object_classifier/object_random_forest.joblib}"
+VIDEO_BACKGROUND_PREDICTION_ROOT="${VIDEO_BACKGROUND_PREDICTION_ROOT:-$REPO_ROOT/work_dirs/radarocc_small_fp32_idfix_timealign_v2/visualization_epoch4_test}"
 
 SCENE="${SCENE:-3}"
 CAMERA_OFFSET="${CAMERA_OFFSET:-0}"
@@ -77,6 +78,8 @@ activate_conda_env
 [[ -d "$CAMERA_DIR" ]] || fail "Camera directory not found: $CAMERA_DIR"
 [[ -f "$OBJECT_MODEL" ]] || fail \
     "Object model not found: $OBJECT_MODEL. Run ./train_traditional_object_classifier.sh first."
+[[ -d "$VIDEO_BACKGROUND_PREDICTION_ROOT" ]] || fail \
+    "RadarOcc background prediction root not found: $VIDEO_BACKGROUND_PREDICTION_ROOT"
 [[ -f "$REPO_ROOT/tradition/cli/run.py" ]] || fail "Not a RadarOcc repository: $REPO_ROOT"
 python -c "import sklearn, joblib" >/dev/null 2>&1 || fail \
     "Install scikit-learn and joblib in '$CONDA_ENV'. Train and run with the same environment."
@@ -107,6 +110,7 @@ echo "  camera dir: $CAMERA_DIR"
 echo "  scene     : $SCENE"
 echo "  output    : $OUTPUT_DIR"
 echo "  RF model  : $OBJECT_MODEL"
+echo "  blue base : $VIDEO_BACKGROUND_PREDICTION_ROOT (visualization only)"
 echo "  fps       : $FPS"
 echo "  pose dt   : $POSE_DT_S s"
 echo "  residuals : static <= $STATIC_RESIDUAL_THRESHOLD_MPS m/s; dynamic >= $DYNAMIC_RESIDUAL_THRESHOLD_MPS m/s"
@@ -151,6 +155,7 @@ xvfb-run -a -s "-screen 0 1920x1080x24" \
     --video-scene "$SCENE" \
     --camera-dir "$CAMERA_DIR" \
     --camera-offset "$CAMERA_OFFSET" \
+    --video-background-prediction-root "$VIDEO_BACKGROUND_PREDICTION_ROOT" \
     --max-video-frames "$MAX_VIDEO_FRAMES" \
     --fps "$FPS" \
     --no-rotate \

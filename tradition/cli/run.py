@@ -136,6 +136,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--camera-dir", type=Path)
     parser.add_argument("--camera-offset", type=int, default=0)
+    parser.add_argument(
+        "--video-background-prediction-root",
+        type=Path,
+        help=(
+            "Optional RadarOcc prediction root. Its label-1 voxels are used "
+            "only as the blue video background; metrics are unchanged."
+        ),
+    )
     parser.add_argument("--max-video-frames", type=int, default=100)
     parser.add_argument("--fps", type=int, default=10)
     parser.add_argument(
@@ -208,6 +216,7 @@ def main() -> None:
         video_scene=args.video_scene,
         camera_dir=args.camera_dir,
         camera_offset=args.camera_offset,
+        video_background_prediction_root=args.video_background_prediction_root,
         max_video_frames=args.max_video_frames,
         fps=args.fps,
         no_rotate=args.no_rotate,

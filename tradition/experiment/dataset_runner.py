@@ -327,6 +327,7 @@ class TraditionalDatasetRunner:
         video_scene: str | None = None,
         camera_dir: str | Path | None = None,
         camera_offset: int = 0,
+        video_background_prediction_root: str | Path | None = None,
         max_video_frames: int = 100,
         fps: int = 10,
         no_rotate: bool = False,
@@ -398,6 +399,7 @@ class TraditionalDatasetRunner:
                 fps=fps,
                 no_rotate=no_rotate,
                 keep_frames=keep_frames,
+                background_prediction_root=video_background_prediction_root,
             )
 
         accumulator = RadarOccMetricAccumulator()

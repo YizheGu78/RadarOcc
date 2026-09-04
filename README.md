@@ -155,6 +155,39 @@ To evaluate the **RadarOcc-S** with our pre-trained weight [best_SSC_mean_epoch_
 ```
 bash run.sh ./projects/baselines/RadarOcc_Small.py 2 $PATH_TO_WEIGHT$
 ```
+### Traditional Scene 3 overlay with the RadarOcc blue background
+
+The one-command traditional runner can reproduce the earlier dense blue visual
+base while keeping the evaluation itself purely traditional:
+
+```bash
+./run_traditional_scene3_video.sh
+```
+
+For each token, the renderer takes only class `1` (background occupancy) from
+the matching RadarOcc `pred_c.npy`. Class `2` (foreground) remains the output of
+the traditional object-aware classifier, with red foreground taking visual
+priority over blue. Ground-truth foreground is used only for the yellow/orange
+overlay. The RadarOcc background substitution occurs after the traditional
+prediction has been accumulated into the metrics, so
+`traditional_metrics.csv` and `traditional_metrics.md` are not hybrid metrics.
+
+The default RadarOcc prediction root is:
+
+```text
+work_dirs/radarocc_small_fp32_idfix_timealign_v2/visualization_epoch4_test
+```
+
+Override it when the prediction files are elsewhere:
+
+```bash
+VIDEO_BACKGROUND_PREDICTION_ROOT=/path/to/predictions \
+./run_traditional_scene3_video.sh
+```
+
+The directory may contain nested token directories, but each token must have a
+unique `<token>/pred_c.npy` file.
+
 ## Acknowledgement
 
 Many thanks to these excellent projects:
