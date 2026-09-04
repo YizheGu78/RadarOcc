@@ -157,6 +157,34 @@ class TemporalConfig:
 
 
 @dataclass(frozen=True)
+class ObjectClusteringConfig:
+    """Dual-branch object proposals for classical semantic occupancy."""
+
+    static_cell_size_m: float = 0.40
+    static_dilation_cells: int = 1
+    static_min_points: int = 3
+    static_min_cells: int = 2
+    dynamic_eps_xy_m: float = 2.00
+    dynamic_eps_z_m: float = 1.00
+    dynamic_min_points: int = 2
+    foreground_probability_threshold: float = 0.50
+
+    def __post_init__(self) -> None:
+        if self.static_cell_size_m <= 0.0:
+            raise ValueError("Static occupancy cell size must be positive.")
+        if self.static_dilation_cells < 0:
+            raise ValueError("Static dilation must be non-negative.")
+        if self.static_min_points < 1 or self.static_min_cells < 1:
+            raise ValueError("Static candidate minima must be positive.")
+        if self.dynamic_eps_xy_m <= 0.0 or self.dynamic_eps_z_m <= 0.0:
+            raise ValueError("Dynamic DBSCAN radii must be positive.")
+        if self.dynamic_min_points < 1:
+            raise ValueError("Dynamic DBSCAN min points must be positive.")
+        if not 0.0 <= self.foreground_probability_threshold <= 1.0:
+            raise ValueError("Foreground probability threshold must be in [0, 1].")
+
+
+@dataclass(frozen=True)
 class EgoSpeedConfig:
     """Robust per-frame ego-speed search in aliased Doppler space."""
 

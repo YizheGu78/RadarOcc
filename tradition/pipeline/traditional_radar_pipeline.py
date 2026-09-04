@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ from tradition.core.config import (
     KRadarConfig,
     MappingConfig,
     MotionConfig,
+    ObjectClusteringConfig,
     ReliabilityConfig,
     TemporalConfig,
 )
@@ -32,6 +34,7 @@ from tradition.core.types import (
     DopplerEvidence,
     EgoMotion,
     FramePrediction,
+    MotionLabel,
     TemporalDetectionFrame,
 )
 from tradition.detection.cfar import NumpyCACFAR, OpenRadarCACFAR
@@ -49,6 +52,7 @@ from tradition.motion.doppler_classifier import EgoCompensatedDopplerClassifier
 from tradition.motion.ego_speed_estimator import RobustDopplerEgoSpeedEstimator
 from tradition.motion.temporal_consistency import PoseAlignedTemporalClassifier
 from tradition.semantics.classical_classifier import DopplerSemanticClassifier
+from tradition.semantics.object_classifier import ObjectAwareSemanticClassifier
 
 
 class TraditionalRadarPipeline:
@@ -171,19 +175,78 @@ class TraditionalRadarPipeline:
             doppler_evidence=evidence,
         )
         classification = self.temporal_classifier.update(temporal_frame)
-        accepted_detections = [
+        temporal_accepted_detections = [
             reliable_detections[int(index)]
             for index in classification.current_indices
         ]
-        motion_labels = classification.current_motion_labels
-        semantic_labels = self.semantic_classifier.classify(
-            accepted_detections, motion_labels
+        temporal_feature_detections = [
+            replace(
+                reliable_detections[int(index)],
+                radial_velocity_mps=float(residuals[int(index)]),
+            )
+            for index in classification.current_indices
+        ]
+        temporal_motion_labels = classification.current_motion_labels
+        historic_detections = classification.historic_detections
+        combined_detections = temporal_feature_detections + historic_detections
+        combined_motion_labels = temporal_motion_labels + [
+            MotionLabel.STATIC
+        ] * len(historic_detections)
+
+        classifier_with_acceptance = getattr(
+            self.semantic_classifier, "classify_with_acceptance", None
         )
+        if classifier_with_acceptance is None:
+            combined_semantic_labels = self.semantic_classifier.classify(
+                combined_detections, combined_motion_labels
+            )
+            accepted_mask = np.ones(len(combined_detections), dtype=bool)
+        else:
+            combined_semantic_labels, accepted_mask = classifier_with_acceptance(
+                combined_detections, combined_motion_labels
+            )
+
+        current_count = len(temporal_accepted_detections)
+        current_mask = accepted_mask[:current_count]
+        historic_mask = accepted_mask[current_count:]
+        accepted_detections = [
+            detection
+            for detection, keep in zip(temporal_accepted_detections, current_mask)
+            if keep
+        ]
+        motion_labels = [
+            label
+            for label, keep in zip(temporal_motion_labels, current_mask)
+            if keep
+        ]
+        semantic_labels = [
+            label
+            for label, keep in zip(
+                combined_semantic_labels[:current_count], current_mask
+            )
+            if keep
+        ]
+        accepted_historic_detections = [
+            detection
+            for detection, keep in zip(historic_detections, historic_mask)
+            if keep
+        ]
+        historic_semantic_labels = [
+            label
+            for label, keep in zip(
+                combined_semantic_labels[current_count:], historic_mask
+            )
+            if keep
+        ]
 
         self.mapper.reset()
         self.mapper.update(accepted_detections, semantic_labels)
-        self.mapper.update_historic_background(
-            classification.historic_background_lidar_m
+        self.mapper.update_historic_semantics(
+            np.asarray(
+                [item.xyz_lidar_m for item in accepted_historic_detections],
+                dtype=np.float64,
+            ).reshape(-1, 3),
+            historic_semantic_labels,
         )
         dense = self.mapper.labels()
         finite_residuals = np.abs(residuals[np.isfinite(residuals)])
@@ -207,9 +270,16 @@ class TraditionalRadarPipeline:
                 "ego_speed_source": ego_motion.source,
                 "raw_detection_count": len(raw_detections),
                 "reliable_detection_count": len(reliable_detections),
+                "temporal_accepted_detection_count": len(
+                    temporal_accepted_detections
+                ),
                 "accepted_detection_count": len(accepted_detections),
-                "historic_background_count": int(
-                    classification.historic_background_lidar_m.shape[0]
+                "historic_detection_count": len(accepted_historic_detections),
+                "historic_background_count": sum(
+                    label == 1 for label in historic_semantic_labels
+                ),
+                "historic_foreground_count": sum(
+                    label == 2 for label in historic_semantic_labels
                 ),
                 "doppler_static_evidence_count": int(
                     np.count_nonzero(evidence == int(DopplerEvidence.STATIC))
@@ -236,6 +306,9 @@ class TraditionalRadarPipeline:
                 "motion_classifier": type(self.motion_classifier).__name__,
                 "temporal_classifier": type(self.temporal_classifier).__name__,
                 "semantic_classifier": type(self.semantic_classifier).__name__,
+                "object_classifier": dict(
+                    getattr(self.semantic_classifier, "last_diagnostics", {})
+                ),
             },
         )
 
@@ -342,6 +415,8 @@ def build_rpc_pipeline(
     mapping_cfg: MappingConfig | None = None,
     reliability_cfg: ReliabilityConfig | None = None,
     temporal_cfg: TemporalConfig | None = None,
+    object_cfg: ObjectClusteringConfig | None = None,
+    object_model_path: str | Path | None = None,
 ) -> TraditionalRadarPipeline:
     """Build the default Enhanced K-Radar RPC point-cloud baseline.
 
@@ -357,6 +432,7 @@ def build_rpc_pipeline(
     mapping_cfg = mapping_cfg or MappingConfig()
     reliability_cfg = reliability_cfg or ReliabilityConfig()
     temporal_cfg = temporal_cfg or TemporalConfig()
+    object_cfg = object_cfg or ObjectClusteringConfig()
 
     ego_speed_estimator = RobustDopplerEgoSpeedEstimator(
         radar_cfg=radar_cfg,
@@ -367,7 +443,14 @@ def build_rpc_pipeline(
         radar_cfg=radar_cfg,
         motion_cfg=motion_cfg,
     )
-    semantic_classifier = DopplerSemanticClassifier()
+    semantic_classifier: SemanticClassifier
+    if object_model_path is None:
+        semantic_classifier = DopplerSemanticClassifier()
+    else:
+        semantic_classifier = ObjectAwareSemanticClassifier.from_file(
+            object_model_path,
+            config=object_cfg,
+        )
     mapper = TemporalLogOddsOccupancyGrid3D(
         grid_cfg=grid_cfg,
         radar_cfg=radar_cfg,

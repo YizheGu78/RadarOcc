@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from dataclasses import replace
 
 import numpy as np
 
@@ -135,15 +136,26 @@ class PoseAlignedTemporalClassifier(TemporalMotionClassifier):
                 current_labels.append(MotionLabel.DYNAMIC)
 
         historic_background: list[np.ndarray] = []
+        historic_detections = []
         # Accumulate only confirmed static history; current accepted points are
         # already handled by the ordinary inverse sensor model.
         for frame_index in range(len(frames) - 1):
-            for point in transformed[frame_index]:
+            source = frames[frame_index]
+            for history_index, point in enumerate(transformed[frame_index]):
                 support, _ = self._static_support(
                     point, frames, static_indices
                 )
                 if support >= required_static:
                     historic_background.append(point)
+                    historic_detections.append(
+                        replace(
+                            source.detections[history_index],
+                            xyz_lidar_m=point.copy(),
+                            radial_velocity_mps=float(
+                                source.doppler_residuals_mps[history_index]
+                            ),
+                        )
+                    )
 
         return TemporalClassification(
             current_indices=np.asarray(current_indices, dtype=np.int64),
@@ -151,6 +163,7 @@ class PoseAlignedTemporalClassifier(TemporalMotionClassifier):
             historic_background_lidar_m=np.asarray(
                 historic_background, dtype=np.float64
             ).reshape(-1, 3),
+            historic_detections=historic_detections,
             static_support=static_support,
             dynamic_support=dynamic_support,
         )

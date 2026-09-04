@@ -117,6 +117,14 @@ class OccupancyMapper(ABC):
 
 class TemporalOccupancyMapper(OccupancyMapper):
     @abstractmethod
+    def update_historic_semantics(
+        self,
+        xyz_lidar_m: np.ndarray,
+        semantic_labels: Sequence[SemanticLabel],
+    ) -> None:
+        """Add pose-aligned endpoints without carving historic free rays."""
+
+    @abstractmethod
     def update_historic_background(self, xyz_lidar_m: np.ndarray) -> None:
         """Add aligned static endpoints without carving historic free rays."""
 

@@ -6,6 +6,7 @@ from pathlib import Path
 from tradition.cli.arguments import parse_ego_speed
 from tradition.core.config import (
     MotionConfig,
+    ObjectClusteringConfig,
     PoseConfig,
     ReliabilityConfig,
     TemporalConfig,
@@ -111,6 +112,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dynamic-match-radius-m", type=float, default=2.00)
     parser.add_argument("--min-local-power-ratio", type=float, default=0.25)
     parser.add_argument("--min-local-neighbors", type=int, default=1)
+    parser.add_argument(
+        "--object-model",
+        type=Path,
+        help=(
+            "Joblib Random-Forest objectness bundle. When supplied, static "
+            "OGM components and dynamic DBSCAN clusters replace the direct "
+            "static/background, dynamic/foreground semantic rule."
+        ),
+    )
+    parser.add_argument("--object-probability-threshold", type=float, default=0.50)
+    parser.add_argument("--static-object-cell-size-m", type=float, default=0.40)
+    parser.add_argument("--static-object-dilation-cells", type=int, default=1)
+    parser.add_argument("--static-object-min-points", type=int, default=3)
+    parser.add_argument("--static-object-min-cells", type=int, default=2)
+    parser.add_argument("--dynamic-object-eps-xy-m", type=float, default=2.00)
+    parser.add_argument("--dynamic-object-eps-z-m", type=float, default=1.00)
+    parser.add_argument("--dynamic-object-min-points", type=int, default=2)
 
     parser.add_argument(
         "--video-scene",
@@ -148,16 +166,30 @@ def main() -> None:
         static_match_radius_m=args.static_match_radius_m,
         dynamic_match_radius_m=args.dynamic_match_radius_m,
     )
+    object_cfg = ObjectClusteringConfig(
+        static_cell_size_m=args.static_object_cell_size_m,
+        static_dilation_cells=args.static_object_dilation_cells,
+        static_min_points=args.static_object_min_points,
+        static_min_cells=args.static_object_min_cells,
+        dynamic_eps_xy_m=args.dynamic_object_eps_xy_m,
+        dynamic_eps_z_m=args.dynamic_object_eps_z_m,
+        dynamic_min_points=args.dynamic_object_min_points,
+        foreground_probability_threshold=args.object_probability_threshold,
+    )
 
     if args.input_mode == "rpc":
         pipeline = build_rpc_pipeline(
             motion_cfg=motion_cfg,
             reliability_cfg=reliability_cfg,
             temporal_cfg=temporal_cfg,
+            object_cfg=object_cfg,
+            object_model_path=args.object_model,
         )
     else:
         if args.pose_root is not None:
             raise ValueError("--pose-root is currently supported only in RPC mode.")
+        if args.object_model is not None:
+            raise ValueError("--object-model is currently supported only in RPC mode.")
         pipeline = build_raw_pipeline(
             cfar_backend=args.cfar_backend,
             motion_cfg=motion_cfg,

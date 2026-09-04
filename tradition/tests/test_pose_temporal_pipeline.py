@@ -114,6 +114,11 @@ def test_pose_alignment_confirms_static_background_over_two_frames():
     np.testing.assert_allclose(
         result.historic_background_lidar_m, [[9.0, 0.0, 0.0]], atol=1e-9
     )
+    assert len(result.historic_detections) == 1
+    np.testing.assert_allclose(
+        result.historic_detections[0].xyz_lidar_m, [9.0, 0.0, 0.0], atol=1e-9
+    )
+    assert result.historic_detections[0].radial_velocity_mps == 0.1
 
 
 def test_persistent_large_residual_becomes_foreground_without_clustering():

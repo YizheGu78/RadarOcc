@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Sequence
+
 import numpy as np
 
 from tradition.core.config import GridConfig, KRadarConfig, MappingConfig
@@ -24,11 +26,24 @@ class TemporalLogOddsOccupancyGrid3D(
 
     def update_historic_background(self, xyz_lidar_m: np.ndarray) -> None:
         points = np.asarray(xyz_lidar_m, dtype=np.float64).reshape(-1, 3)
-        for point in points:
+        self.update_historic_semantics(
+            points,
+            [SemanticLabel.BACKGROUND] * len(points),
+        )
+
+    def update_historic_semantics(
+        self,
+        xyz_lidar_m: np.ndarray,
+        semantic_labels: Sequence[SemanticLabel],
+    ) -> None:
+        points = np.asarray(xyz_lidar_m, dtype=np.float64).reshape(-1, 3)
+        if len(points) != len(semantic_labels):
+            raise ValueError("Historic points and semantic labels must align.")
+        for point, semantic_label in zip(points, semantic_labels):
             endpoint = xyz_to_voxel(point, self.grid_cfg)
             if endpoint is not None:
                 self._update_hit_neighborhood(
-                    endpoint, SemanticLabel.BACKGROUND
+                    endpoint, semantic_label
                 )
         np.clip(
             self.occupancy_log_odds,

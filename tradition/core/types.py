@@ -88,11 +88,12 @@ class TemporalDetectionFrame:
 
 @dataclass(frozen=True)
 class TemporalClassification:
-    """Accepted current detections plus pose-aligned historic background."""
+    """Accepted current detections plus pose-aligned historic measurements."""
 
     current_indices: np.ndarray
     current_motion_labels: list[MotionLabel]
     historic_background_lidar_m: np.ndarray
+    historic_detections: list[RadarDetection]
     static_support: np.ndarray
     dynamic_support: np.ndarray
 

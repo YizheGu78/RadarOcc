@@ -1,4 +1,4 @@
-# Non-learning Radar Occupancy Baseline
+# Classical Object-Aware Radar Occupancy Baseline
 
 This folder implements a traditional, non-learning occupancy baseline for
 K-Radar/RadarOcc. Enhanced K-Radar RPC/pc01p point clouds are the default input.
@@ -24,22 +24,50 @@ RPC [N,11]
     -> local polar-neighbour power/reliability filtering
     -> adjacent LiDAR poses produce vx, vy and yaw rate
     -> full-vector ego-motion-compensated wrapped Doppler residual
-    -> pose-align causal [t-2, t-1, t] points into frame t
-    -> 2/3 static support: background
-       2/3 dynamic support: foreground
-       uncertain/isolated returns: discard
-    -> current free rays + current endpoints + historic static endpoints
+    -> pose-align a causal five-frame window
+    -> persistent stationary points: 2D OGM + 8-connected components
+       persistent moving points: scaled XYZ DBSCAN
+    -> cluster geometry/power/compensated-residual features
+    -> trained classical Random Forest objectness
+    -> object cluster: foreground; other occupied structure: background
+    -> current free rays + semantically classified temporal endpoints
     -> 0=free, 1=background, 2=foreground
 ```
 
-Classification fuses pose-compensated wrapped Doppler with pose-aligned
-temporal persistence. It does not use DBSCAN/geometric object clustering,
-object-shape heuristics, a learned classifier, GT boxes, or RadarOcc neural
-predictions. The blue video background comes only from the traditional
-temporal OGM.
+Motion is proposal evidence, not the semantic definition. A parked vehicle can
+therefore be foreground and a stationary guardrail can remain background. The
+classifier is a non-neural Random Forest trained on hand-crafted cluster
+features. RadarOcc train GT is used only to construct training labels and is
+never read by the inference classifier.
 
 Detections beyond the evaluation AABB still carve free space up to the grid
 boundary but do not create an occupied endpoint outside the grid.
+
+## Train the objectness model once
+
+Install `scikit-learn` and `joblib` in `radarocc-vis`; use the same environment
+for training and video inference so the serialized estimator stays compatible.
+
+```bash
+./train_traditional_object_classifier.sh
+```
+
+The default model is written to:
+
+```text
+work_dirs/traditional_object_classifier/object_random_forest.joblib
+```
+
+The default is `kradar_dict_train_official_doppler8.pkl`. Do not train on
+`test_official`; that would leak test labels into the classifier.
+
+Small training smoke test:
+
+```bash
+MAX_FRAMES=100 \
+OUTPUT_MODEL=$PWD/work_dirs/traditional_object_classifier/smoke.joblib \
+./train_traditional_object_classifier.sh
+```
 
 ## Run Scene 3
 
@@ -57,9 +85,10 @@ python -m tradition.cli.run \
   --output-dir work_dirs/tradition_rpc_pose_smoke \
   --scene 3 \
   --max-frames 3 \
+  --object-model work_dirs/traditional_object_classifier/object_random_forest.joblib \
   --static-residual-threshold-mps 0.50 \
   --dynamic-residual-threshold-mps 0.80 \
-  --temporal-window 3 \
+  --temporal-window 5 \
   --min-static-support 2 \
   --min-dynamic-support 2
 ```
@@ -142,8 +171,11 @@ tradition/
 │   ├── pose_ego_motion.py             # pose -> velocity and yaw rate
 │   ├── doppler_classifier.py          # wrapped residual evidence
 │   └── temporal_consistency.py        # pose-aligned persistence
+├── semantics/
+│   ├── object_classifier.py           # OGM/DBSCAN, features, RF inference
+│   └── training.py                    # train-GT cluster labels and RF fit
 ├── mapping/
-│   └── temporal_occupancy_grid_3d.py  # static-history log-odds OGM
+│   └── temporal_occupancy_grid_3d.py  # semantic-history log-odds OGM
 ├── pipeline/
 ├── evaluation/
 ├── experiment/
@@ -162,9 +194,11 @@ tradition/
   `+1`; use `DOPPLER_SIGN=-1` only for an export with the opposite convention.
 - Residuals `<=0.50 m/s` are static evidence, `>=0.80 m/s` are dynamic
   evidence, and values in the dead band are discarded.
-- The first two outputs are warm-up frames: required support is reduced to the
-  number of frames currently available until the three-frame window is full.
-- Static parked objects remain background. This is a motion/background split,
-  not object-level semantic recognition.
+- Early outputs are warm-up frames: required support is reduced to the number
+  of frames currently available until the five-frame window is full.
+- The Random Forest must be trained only on the official training split. GT is
+  not loaded during validation/test inference.
+- Foreground means a RadarOcc object category, not simply a moving return;
+  background means occupied environment structure, not simply a static return.
 - Unobserved cells are class 0/free because the requested evaluation has only
   three output classes and no unknown class.
