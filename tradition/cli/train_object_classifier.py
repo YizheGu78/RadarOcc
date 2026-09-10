@@ -137,6 +137,7 @@ def main() -> None:
         pose_cfg=PoseConfig(frame_dt_s=args.pose_dt_s),
     )
     candidates = DualBranchCandidateExtractor(object_cfg)
+    print(f"Object feature schema: {len(candidates.features.feature_names)} dimensions")
     labeller = RadarOccClusterLabeller(
         GridConfig(),
         ClusterLabellingConfig(

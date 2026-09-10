@@ -118,6 +118,7 @@ def train_random_forest_objectness(
             "metadata": {
                 **(metadata or {}),
                 "sample_count": int(len(y)),
+                "feature_count": len(FEATURE_NAMES),
                 "background_samples": int(np.count_nonzero(y == 0)),
                 "foreground_samples": int(np.count_nonzero(y == 1)),
                 "oob_score": float(estimator.oob_score_),

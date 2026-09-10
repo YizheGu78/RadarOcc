@@ -87,6 +87,8 @@ def test_isolated_dynamic_return_is_discarded():
 
 
 def test_random_forest_bundle_round_trip(tmp_path):
+    import joblib
+
     rng = np.random.default_rng(4)
     features = rng.normal(size=(40, len(FEATURE_NAMES)))
     targets = np.asarray([0] * 20 + [1] * 20, dtype=np.int8)
@@ -95,6 +97,40 @@ def test_random_forest_bundle_round_trip(tmp_path):
     )
     classifier = ObjectAwareSemanticClassifier.from_file(path)
     assert classifier.estimator.n_estimators == 10
+    assert classifier.estimator.n_features_in_ == 42
+    bundle = joblib.load(path)
+    assert bundle["metadata"]["feature_count"] == 42
+    assert tuple(bundle["feature_names"]) == FEATURE_NAMES
+    predictions = classifier.estimator.predict_proba(features[:3])
+    assert predictions.shape == (3, 2)
+    np.testing.assert_allclose(predictions.sum(axis=1), np.ones(3))
+
+
+def test_legacy_28_feature_model_is_rejected_with_retraining_message(tmp_path):
+    import joblib
+
+    path = tmp_path / "legacy.joblib"
+    joblib.dump({"estimator": _GeometryEstimator(), "feature_names": FEATURE_NAMES[:28]}, path)
+    with np.testing.assert_raises_regex(ValueError, "stored 28 features.*expected 42.*retrain"):
+        ObjectAwareSemanticClassifier.from_file(path)
+
+
+def test_inconsistent_estimator_dimension_is_rejected(tmp_path):
+    import joblib
+
+    estimator = _GeometryEstimator()
+    estimator.n_features_in_ = 28
+    path = tmp_path / "inconsistent.joblib"
+    joblib.dump({"estimator": estimator, "feature_names": FEATURE_NAMES}, path)
+    with np.testing.assert_raises_regex(ValueError, "must accept 42 features"):
+        ObjectAwareSemanticClassifier.from_file(path)
+
+
+def test_training_rejects_legacy_28_feature_arrays(tmp_path):
+    with np.testing.assert_raises_regex(ValueError, r"Expected features \[N,42\]"):
+        train_random_forest_objectness(
+            np.zeros((2, 28)), np.array([0, 1]), tmp_path / "unused.joblib"
+        )
 
 
 def test_historic_static_object_can_be_mapped_as_foreground():

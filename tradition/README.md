@@ -69,6 +69,68 @@ OUTPUT_MODEL=$PWD/work_dirs/traditional_object_classifier/smoke.joblib \
 ./train_traditional_object_classifier.sh
 ```
 
+## 42-D cluster features and retraining
+
+Training and inference both call `RadarObjectFeatureExtractor.extract` through
+`DualBranchCandidateExtractor`. `FEATURE_NAMES` is the ordered schema: the
+original 28 entries retain their positions and the following 14 are appended.
+These are cluster-level inputs to the binary objectness Random Forest, not
+new output classes; occupancy output remains free/background/foreground.
+
+| Appended feature | Definition |
+| --- | --- |
+| `range_compensated_point_count` | Number of candidate points times their mean measured radar range, `N * mean(range_m)` |
+| `power_span` | Maximum minus minimum RPC power (in the supplied power scale, not an amplitude/dB conversion) |
+| `oriented_bbox_perimeter_m` | Perimeter of the minimum-area enclosing rectangle of the XY convex hull, allowing rotation |
+| `max_line_deviation_m` | Mean perpendicular distance of all XY points to the infinite line through their farthest pair |
+| `compactness_m` | Mean Euclidean XY distance to the arithmetic XY centroid |
+| `major_doppler_spread_ratio` | Point-coordinate span along the largest-covariance-eigenvalue axis divided by `residual_span + 0.001 m/s` |
+| `minor_doppler_spread_ratio` | Corresponding span along the smallest-eigenvalue axis, using the same denominator |
+| `range_doppler_correlation` | Signed Pearson correlation of measured radar range and compensated wrapped Doppler residual |
+| `z_mean_m` | Mean aligned Cartesian Z coordinate |
+| `z_std_m` | Population standard deviation of aligned Z (`ddof=0`) |
+| `z_min_m` | Minimum aligned Z coordinate |
+| `z_max_m` | Maximum aligned Z coordinate |
+| `elevation_mean_rad` | Mean original measured radar elevation angle, in radians |
+| `elevation_std_rad` | Population standard deviation of original measured elevation (`ddof=0`) |
+
+Geometry and Z use `xyz_lidar_m` in the **current** LiDAR/vehicle frame after
+pose alignment, not world height or height above an estimated road plane.
+Range/elevation remain the observations at each source frame's radar pose,
+including for historic static points. They are not recomputed from aligned
+XYZ. Both training and inference use this convention. Candidate point counts
+include any accepted static history, as in the original features.
+
+The caller already replaces `radial_velocity_mps` with the ego-compensated,
+wrapped residual before feature extraction. The two principal-axis spans are
+computed by projecting the points onto the XY covariance eigenvectors; they
+are not the lengths of a fitted confidence ellipse. Their ratios have units
+of seconds and are descriptors, not target velocities. The added `0.001 m/s`
+regularizer prevents division by zero but can still yield large ratios for
+almost constant residuals. It does not unwrap Doppler ambiguities or change
+the motion thresholds. Correlation is zero for singleton or constant data.
+Single/duplicate XY points have zero geometric spans; collinear points have
+zero area and a rectangle perimeter of twice the segment length.
+
+The descriptors are adaptations of feature ideas, not an exact reproduction
+of a published 50-D schema. Additional inputs are not guaranteed to improve
+accuracy; compare with the 28-D baseline on the same held-out sequences.
+
+**Old 28-D model files cannot be used with the 42-D extractor.** Loading an old
+schema raises an explicit retraining error. The training command regenerates
+features from RPC inputs, logs the dimension, and stores `feature_names` plus
+`metadata.feature_count` in the new bundle. To keep the old model for baseline
+comparisons, train to a different path:
+
+```bash
+OUTPUT_MODEL="$PWD/work_dirs/traditional_object_classifier/object_random_forest_42d.joblib" \
+./train_traditional_object_classifier.sh
+```
+
+For the video script, select it with `OBJECT_MODEL`; for the Python inference
+CLI, pass the new path via `--object-model`. Use only the official training
+split to fit the model, and do not use test GT to choose features/thresholds.
+
 ## Run Scene 3
 
 Smoke test:
@@ -173,6 +235,7 @@ tradition/
 │   └── temporal_consistency.py        # pose-aligned persistence
 ├── semantics/
 │   ├── object_classifier.py           # OGM/DBSCAN, features, RF inference
+│   ├── cluster_geometry.py            # rotated rectangle and diameter-line geometry
 │   └── training.py                    # train-GT cluster labels and RF fit
 ├── mapping/
 │   └── temporal_occupancy_grid_3d.py  # semantic-history log-odds OGM

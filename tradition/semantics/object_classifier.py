@@ -9,6 +9,10 @@ import numpy as np
 from tradition.core.config import ObjectClusteringConfig
 from tradition.core.interfaces import SemanticClassifier
 from tradition.core.types import MotionLabel, RadarDetection, SemanticLabel
+from tradition.semantics.cluster_geometry import (
+    mean_diameter_line_distance,
+    minimum_area_bbox_perimeter,
+)
 
 
 FEATURE_NAMES = (
@@ -40,7 +44,35 @@ FEATURE_NAMES = (
     "range_mean_m",
     "range_std_m",
     "dynamic_fraction",
+    "range_compensated_point_count",
+    "power_span",
+    "oriented_bbox_perimeter_m",
+    "max_line_deviation_m",
+    "compactness_m",
+    "major_doppler_spread_ratio",
+    "minor_doppler_spread_ratio",
+    "range_doppler_correlation",
+    "z_mean_m",
+    "z_std_m",
+    "z_min_m",
+    "z_max_m",
+    "elevation_mean_rad",
+    "elevation_std_rad",
 )
+
+# Regularize the denominator in spatial-spread / (residual-spread + epsilon).
+# This is a numerical floor scale, not a Doppler classification threshold.
+DOPPLER_SPREAD_EPS_MPS = 1e-3
+
+
+def _safe_correlation(first: np.ndarray, second: np.ndarray) -> float:
+    """Pearson correlation, defined as zero for insufficient/constant data."""
+    if len(first) < 2 or np.std(first) <= 1e-9 or np.std(second) <= 1e-9:
+        return 0.0
+    centered_first = first - np.mean(first)
+    centered_second = second - np.mean(second)
+    denominator = np.linalg.norm(centered_first) * np.linalg.norm(centered_second)
+    return float(np.clip(centered_first @ centered_second / denominator, -1.0, 1.0))
 
 
 @dataclass(frozen=True)
@@ -90,7 +122,12 @@ def _hull_area_perimeter(points_xy: np.ndarray) -> tuple[float, float]:
 
 
 class RadarObjectFeatureExtractor:
-    """Geometric, power and compensated-Doppler cluster descriptors."""
+    """Shared 42-D training/inference descriptors (original 28 entries first).
+
+    Callers supply ego-compensated wrapped residuals in ``radial_velocity_mps``.
+    Geometry/height use pose-aligned ``xyz_lidar_m``. Range and elevation remain
+    each point's original radar measurement, also for aligned static history.
+    """
 
     feature_names = FEATURE_NAMES
 
@@ -114,26 +151,37 @@ class RadarObjectFeatureExtractor:
             [item.radial_velocity_mps for item in selected], dtype=np.float64
         )
         ranges = np.asarray([item.range_m for item in selected], dtype=np.float64)
+        elevations = np.asarray(
+            [item.elevation_rad for item in selected], dtype=np.float64
+        )
         labels = [motion_labels[int(index)] for index in indices]
 
         extent = np.ptp(xyz, axis=0) if len(xyz) > 1 else np.zeros(3)
         bbox_area = float(max(extent[0] * extent[1], 0.0))
         bbox_volume = float(max(bbox_area * extent[2], 0.0))
-        hull_area, hull_perimeter = _hull_area_perimeter(xy)
+        hull = _convex_hull(xy)
+        hull_area, hull_perimeter = _hull_area_perimeter(hull)
         cell = np.floor(xy / self.cell_size_m).astype(np.int64)
         unique_cells = int(len(np.unique(cell, axis=0)))
 
         if len(xy) > 1:
             covariance = np.cov(xy, rowvar=False)
-            eigenvalues = np.sort(np.linalg.eigvalsh(covariance))[::-1]
-            major, minor = float(eigenvalues[0]), float(eigenvalues[1])
+            eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+            major, minor = float(eigenvalues[-1]), float(eigenvalues[0])
+            # Projection spans along covariance axes, not ellipse axis lengths.
+            principal_coordinates = (xy - np.mean(xy, axis=0)) @ eigenvectors[:, ::-1]
+            principal_spreads = np.ptp(principal_coordinates, axis=0)
         else:
             major = minor = 0.0
+            principal_spreads = np.zeros(2)
         linearity = 0.0 if major <= 1e-9 else 1.0 - minor / major
         density_area = max(hull_area, self.cell_size_m**2)
         dynamic_fraction = sum(
             label == MotionLabel.DYNAMIC for label in labels
         ) / len(labels)
+        residual_spread = float(np.ptp(residual)) + DOPPLER_SPREAD_EPS_MPS
+        center = np.mean(xy, axis=0)
+        z = xyz[:, 2]
 
         features = np.asarray(
             [
@@ -165,6 +213,20 @@ class RadarObjectFeatureExtractor:
                 float(np.mean(ranges)),
                 float(np.std(ranges)),
                 float(dynamic_fraction),
+                float(len(selected) * np.mean(ranges)),
+                float(np.ptp(power)),
+                minimum_area_bbox_perimeter(hull),
+                mean_diameter_line_distance(xy, hull),
+                float(np.mean(np.linalg.norm(xy - center, axis=1))),
+                float(principal_spreads[0] / residual_spread),
+                float(principal_spreads[1] / residual_spread),
+                _safe_correlation(ranges, residual),
+                float(np.mean(z)),
+                float(np.std(z)),
+                float(np.min(z)),
+                float(np.max(z)),
+                float(np.mean(elevations)),
+                float(np.std(elevations)),
             ],
             dtype=np.float64,
         )
@@ -363,7 +425,19 @@ class ObjectAwareSemanticClassifier(SemanticClassifier):
         if not isinstance(bundle, dict) or "estimator" not in bundle:
             raise ValueError(f"Invalid object classifier bundle: {model_path}")
         if tuple(bundle.get("feature_names", ())) != FEATURE_NAMES:
-            raise ValueError("Object model feature schema does not match this code version.")
+            raise ValueError(
+                "Object model feature schema does not match this code version: "
+                f"stored {len(bundle.get('feature_names', ()))} features; "
+                f"expected {len(FEATURE_NAMES)} in the current order. "
+                "Regenerate the training features and retrain with "
+                "train_traditional_object_classifier.sh."
+            )
+        expected_count = len(FEATURE_NAMES)
+        if getattr(bundle["estimator"], "n_features_in_", expected_count) != expected_count:
+            raise ValueError(
+                f"Object estimator must accept {expected_count} features. "
+                "Regenerate the training features and retrain the object classifier."
+            )
         instance = cls(bundle["estimator"], config=config)
         instance.last_diagnostics = {
             "model_path": str(model_path),
