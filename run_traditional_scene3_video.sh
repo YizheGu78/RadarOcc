@@ -2,10 +2,11 @@
 
 set -Eeuo pipefail
 
-# Pose-compensated, object-aware traditional RPC OGM evaluation + video for
-# official test Scene 3. Train the Random Forest once with
-# ./train_traditional_object_classifier.sh before running this script.
+# Pose-compensated, object-aware traditional RPC OGM evaluation + video.
+# Metrics cover every scene in official test by default; visualization uses
+# Scene 3 only. Train the Random Forest once before running this script.
 #   FPS=5 KEEP_FRAMES=1 ./run_traditional_scene3_video.sh
+# Set EVAL_SCENE=3 only for a quick Scene-3-only smoke test.
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$SCRIPT_DIR}"
@@ -15,11 +16,12 @@ ANNOTATION="${ANNOTATION:-$REPO_ROOT/data/annotations/kradar_dict_test_official_
 RADAR_ROOT="${RADAR_ROOT:-$REPO_ROOT/data/K-Radar_rpc}"
 POSE_ROOT="${POSE_ROOT:-$REPO_ROOT/data/K-RadarOcc}"
 CAMERA_DIR="${CAMERA_DIR:-$REPO_ROOT/data/K-Radar-RGB/K-Radar/K-Radar-RGB/3/images_rb_switched}"
-OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/work_dirs/tradition_rpc_test_official_scene3_video}"
+OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/work_dirs/tradition_rpc_test_official_all_video_scene3}"
 OBJECT_MODEL="${OBJECT_MODEL:-$REPO_ROOT/work_dirs/traditional_object_classifier/object_random_forest.joblib}"
 VIDEO_BACKGROUND_PREDICTION_ROOT="${VIDEO_BACKGROUND_PREDICTION_ROOT:-$REPO_ROOT/work_dirs/radarocc_small_fp32_idfix_timealign_v2/visualization_epoch4_test}"
 
-SCENE="${SCENE:-3}"
+EVAL_SCENE="${EVAL_SCENE:-}"
+VIDEO_SCENE="${VIDEO_SCENE:-3}"
 CAMERA_OFFSET="${CAMERA_OFFSET:-0}"
 MAX_VIDEO_FRAMES="${MAX_VIDEO_FRAMES:-1000}"
 MAX_FRAMES="${MAX_FRAMES:-}"
@@ -101,13 +103,23 @@ if [[ -n "$MAX_FRAMES" ]]; then
     FRAME_ARGS+=(--max-frames "$MAX_FRAMES")
 fi
 
+EVAL_ARGS=()
+if [[ -n "$EVAL_SCENE" ]]; then
+    EVAL_ARGS+=(--scene "$EVAL_SCENE")
+fi
+
 echo "Object-aware dual-branch traditional RPC OGM + video"
 echo "  conda env : $CONDA_ENV"
 echo "  annotation: $ANNOTATION"
 echo "  radar root: $RADAR_ROOT"
 echo "  pose root : $POSE_ROOT"
 echo "  camera dir: $CAMERA_DIR"
-echo "  scene     : $SCENE"
+if [[ -n "$EVAL_SCENE" ]]; then
+    echo "  metrics   : scene $EVAL_SCENE only"
+else
+    echo "  metrics   : all scenes in test_official annotation"
+fi
+echo "  video     : scene $VIDEO_SCENE only"
 echo "  output    : $OUTPUT_DIR"
 echo "  RF model  : $OBJECT_MODEL"
 echo "  blue base : $VIDEO_BACKGROUND_PREDICTION_ROOT (visualization only)"
@@ -131,7 +143,7 @@ xvfb-run -a -s "-screen 0 1920x1080x24" \
     --pose-dt-s "$POSE_DT_S" \
     --output-dir "$OUTPUT_DIR" \
     --input-mode rpc \
-    --scene "$SCENE" \
+    "${EVAL_ARGS[@]}" \
     "${FRAME_ARGS[@]}" \
     --gt-order xyz \
     --static-residual-threshold-mps "$STATIC_RESIDUAL_THRESHOLD_MPS" \
@@ -152,7 +164,7 @@ xvfb-run -a -s "-screen 0 1920x1080x24" \
     --dynamic-object-eps-xy-m "$DYNAMIC_OBJECT_EPS_XY_M" \
     --dynamic-object-eps-z-m "$DYNAMIC_OBJECT_EPS_Z_M" \
     --dynamic-object-min-points "$DYNAMIC_OBJECT_MIN_POINTS" \
-    --video-scene "$SCENE" \
+    --video-scene "$VIDEO_SCENE" \
     --camera-dir "$CAMERA_DIR" \
     --camera-offset "$CAMERA_OFFSET" \
     --video-background-prediction-root "$VIDEO_BACKGROUND_PREDICTION_ROOT" \

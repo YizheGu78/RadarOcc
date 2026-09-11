@@ -131,7 +131,7 @@ For the video script, select it with `OBJECT_MODEL`; for the Python inference
 CLI, pass the new path via `--object-model`. Use only the official training
 split to fit the model, and do not use test GT to choose features/thresholds.
 
-## Run Scene 3
+## Evaluate official test and render Scene 3
 
 Smoke test:
 
@@ -155,17 +155,25 @@ python -m tradition.cli.run \
   --min-dynamic-support 2
 ```
 
-Complete official-test Scene 3 metrics and video:
+Complete official-test metrics over **all scenes**, while rendering only Scene 3:
 
 ```bash
+OBJECT_MODEL=$PWD/work_dirs/traditional_object_classifier/object_random_forest_42d.joblib \
 ./run_traditional_scene3_video.sh
 ```
 
-Three-frame video smoke test:
+The default evaluation deliberately omits `--scene`, so every entry in
+`kradar_dict_test_official_doppler8.pkl` contributes to the reported metrics.
+`VIDEO_SCENE=3` controls only which frames are rendered. This matches the
+RadarOcc comparison protocol: whole official test split for quantitative
+metrics and Scene 3 for qualitative visualization.
+
+Three-frame Scene-3-only video smoke test:
 
 ```bash
 OUTPUT_DIR=$PWD/work_dirs/tradition_scene3_pose_smoke \
-MAX_FRAMES=3 MAX_VIDEO_FRAMES=3 KEEP_FRAMES=1 \
+EVAL_SCENE=3 MAX_FRAMES=3 MAX_VIDEO_FRAMES=3 KEEP_FRAMES=1 \
+OBJECT_MODEL=$PWD/work_dirs/traditional_object_classifier/object_random_forest_42d.joblib \
 ./run_traditional_scene3_video.sh
 ```
 
