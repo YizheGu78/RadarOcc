@@ -11,7 +11,6 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$SCRIPT_DIR}"
 CONDA_ENV="${CONDA_ENV:-radarocc-vis}"
-QT_PLATFORM="${QT_PLATFORM:-offscreen}"
 
 ANNOTATION="${ANNOTATION:-$REPO_ROOT/data/annotations/kradar_dict_test_official_doppler8.pkl}"
 RADAR_ROOT="${RADAR_ROOT:-$REPO_ROOT/data/K-Radar_rpc}"
@@ -111,7 +110,6 @@ fi
 
 echo "Object-aware dual-branch traditional RPC OGM + video"
 echo "  conda env : $CONDA_ENV"
-echo "  Qt backend: $QT_PLATFORM (headless rendering)"
 echo "  annotation: $ANNOTATION"
 echo "  radar root: $RADAR_ROOT"
 echo "  pose root : $POSE_ROOT"
@@ -136,8 +134,8 @@ echo "  semantics : stationary OGM components + moving DBSCAN -> Random Forest o
 
 cd "$REPO_ROOT"
 
-xvfb-run -a -s "-screen 0 1920x1080x24 -ac +extension GLX +render -noreset" \
-    env QT_QPA_PLATFORM="$QT_PLATFORM" MPLBACKEND=Agg PYTHONPATH="$REPO_ROOT" \
+xvfb-run -a -s "-screen 0 1920x1080x24" \
+    env QT_QPA_PLATFORM=xcb PYTHONPATH="$REPO_ROOT" \
     python -u -m tradition.cli.run \
     --annotation "$ANNOTATION" \
     --radar-root "$RADAR_ROOT" \

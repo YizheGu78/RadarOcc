@@ -521,10 +521,6 @@ def render_simple_overlay(
             "Mayavi is required. Activate the radarocc-vis environment."
         ) from exc
 
-    # Use Mayavi's off-screen engine so rendering does not create a Qt window.
-    # Xvfb still provides the GLX context required by common VTK builds.
-    mlab.options.offscreen = True
-
     size = args.panel_size
     figure = mlab.figure(
         size=(size, size),
