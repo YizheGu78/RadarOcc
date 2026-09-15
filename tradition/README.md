@@ -55,7 +55,7 @@ for training and video inference so the serialized estimator stays compatible.
 The default model is written to:
 
 ```text
-work_dirs/traditional_object_classifier/object_random_forest.joblib
+work_dirs/traditional_object_classifier/object_random_forest_42d.joblib
 ```
 
 The default is `kradar_dict_train_official_doppler8.pkl`. Do not train on
@@ -119,13 +119,9 @@ accuracy; compare with the 28-D baseline on the same held-out sequences.
 **Old 28-D model files cannot be used with the 42-D extractor.** Loading an old
 schema raises an explicit retraining error. The training command regenerates
 features from RPC inputs, logs the dimension, and stores `feature_names` plus
-`metadata.feature_count` in the new bundle. To keep the old model for baseline
-comparisons, train to a different path:
-
-```bash
-OUTPUT_MODEL="$PWD/work_dirs/traditional_object_classifier/object_random_forest_42d.joblib" \
-./train_traditional_object_classifier.sh
-```
+`metadata.feature_count` in the new bundle. The training and video scripts
+default to `object_random_forest_42d.joblib`, leaving the old 28-D file intact
+for baseline comparisons.
 
 For the video script, select it with `OBJECT_MODEL`; for the Python inference
 CLI, pass the new path via `--object-model`. Use only the official training
@@ -147,7 +143,7 @@ python -m tradition.cli.run \
   --output-dir work_dirs/tradition_rpc_pose_smoke \
   --scene 3 \
   --max-frames 3 \
-  --object-model work_dirs/traditional_object_classifier/object_random_forest.joblib \
+  --object-model work_dirs/traditional_object_classifier/object_random_forest_42d.joblib \
   --static-residual-threshold-mps 0.50 \
   --dynamic-residual-threshold-mps 0.80 \
   --temporal-window 5 \
@@ -203,15 +199,13 @@ python -m tradition.cli.predict \
 ```
 
 `tradition.cli.predict` is kept as a single-frame compatibility path; it does
-not perform pose-temporal fusion. Each output frame contains:
+not perform pose-temporal fusion. Like RadarOcc `save_occ()`, each output frame
+contains only `pred_c.npy` in `[z,y,x,class]` order.
 
-- `pred_dense.npy`: dense `[128,128,14]` uint8 grid;
-- `pred_c.npy`: occupied coordinates and class labels;
-- `meta.json`: input path, component names, and class convention.
-
-Evaluation reports RadarOcc-compatible `SC IoU`, `SSC mIoU (BG+FG)`,
-`Background IoU`, and `Foreground IoU`. It additionally reports `Free IoU` and
-`3-class mIoU` (free/background/foreground).
+Evaluation emits exactly RadarOcc's 15 coarse metric keys on the same 0-1
+scale. `SC1`/`SSC1` use `[x:0..64, y:32..96, z:all]` (25.6 m), while
+`SC2`/`SSC2` use `[x:0..32, y:48..80, z:all]` (12.8 m). Full-range metrics use
+the complete `[128,128,14]` grid, and GT label `255` is excluded.
 
 ## Optional original 4DRT + CFAR strategy
 

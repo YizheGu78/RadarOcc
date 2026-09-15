@@ -3,10 +3,13 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import numpy as np
+
 from tradition.evaluation.radarocc_metrics import (
     RadarOccMetrics,
     load_gt_sparse_xyz,
     load_prediction_sparse_zyx,
+    radarocc_metric_dict,
 )
 
 
@@ -26,19 +29,11 @@ def main() -> None:
     gt = load_gt_sparse_xyz(args.ground_truth, coordinate_order=args.gt_order)
     results = RadarOccMetrics().evaluate(pred, gt)
     print(
-        "range_m,SC_IoU,SSC_mIoU_BG_FG,ThreeClass_mIoU,"
-        "Free_IoU,Background_IoU,Foreground_IoU"
+        {
+            key: float(np.round(value, 3))
+            for key, value in radarocc_metric_dict(results).items()
+        }
     )
-    for result in results:
-        print(
-            f"{result.range_m:.1f},"
-            f"{100*result.sc_iou:.3f},"
-            f"{100*result.ssc_miou:.3f},"
-            f"{100*result.three_class_miou:.3f},"
-            f"{100*result.free_iou:.3f},"
-            f"{100*result.background_iou:.3f},"
-            f"{100*result.foreground_iou:.3f}"
-        )
 
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@ RADAR_ROOT="${RADAR_ROOT:-$REPO_ROOT/data/K-Radar_rpc}"
 POSE_ROOT="${POSE_ROOT:-$REPO_ROOT/data/K-RadarOcc}"
 CAMERA_DIR="${CAMERA_DIR:-$REPO_ROOT/data/K-Radar-RGB/K-Radar/K-Radar-RGB/3/images_rb_switched}"
 OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/work_dirs/tradition_rpc_test_official_all_video_scene3}"
-OBJECT_MODEL="${OBJECT_MODEL:-$REPO_ROOT/work_dirs/traditional_object_classifier/object_random_forest.joblib}"
+OBJECT_MODEL="${OBJECT_MODEL:-$REPO_ROOT/work_dirs/traditional_object_classifier/object_random_forest_42d.joblib}"
 VIDEO_BACKGROUND_PREDICTION_ROOT="${VIDEO_BACKGROUND_PREDICTION_ROOT:-$REPO_ROOT/work_dirs/radarocc_small_fp32_idfix_timealign_v2/visualization_epoch4_test}"
 
 EVAL_SCENE="${EVAL_SCENE:-}"

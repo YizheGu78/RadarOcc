@@ -6,23 +6,16 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-from tradition.evaluation.radarocc_metrics import MetricResult
-
-
-_METRICS = (
-    ("SC IoU", "sc_iou"),
-    ("SSC mIoU (BG+FG)", "ssc_miou"),
-    ("3-class mIoU", "three_class_miou"),
-    ("Free IoU", "free_iou"),
-    ("Background IoU", "background_iou"),
-    ("Foreground IoU", "foreground_iou"),
+from tradition.evaluation.radarocc_metrics import (
+    MetricResult,
+    radarocc_metric_dict,
 )
 
 
-def _percent(value: float) -> str:
+def _format_metric(value: float) -> str:
     if math.isnan(value):
         return "nan"
-    return f"{100.0 * value:.1f}"
+    return f"{value:.3f}"
 
 
 def _font(size: int, bold: bool = False) -> ImageFont.ImageFont:
@@ -46,37 +39,36 @@ class MetricsReportWriter:
         md_path = output_dir / "traditional_metrics.md"
         png_path = output_dir / "traditional_metrics.png"
 
-        rows: list[tuple[str, str, str]] = []
-        for item in results:
-            for metric_name, attribute in _METRICS:
-                rows.append((f"{item.range_m:g} m", metric_name, _percent(getattr(item, attribute))))
+        metrics = radarocc_metric_dict(results)
+        rows = [(name, _format_metric(value)) for name, value in metrics.items()]
 
         with csv_path.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
-            writer.writerow(["Range", "Metric", "Traditional"])
+            writer.writerow(["Metric", "Traditional"])
             writer.writerows(rows)
 
         with md_path.open("w", encoding="utf-8") as handle:
-            handle.write("| Range | Metric | Traditional |\n")
-            handle.write("| --- | --- | ---: |\n")
+            handle.write("| Metric | Traditional |\n")
+            handle.write("| --- | ---: |\n")
             for row in rows:
-                handle.write(f"| {row[0]} | {row[1]} | {row[2]} |\n")
+                handle.write(f"| {row[0]} | {row[1]} |\n")
 
         self._write_png(rows, png_path)
         self._print(rows)
         return {"csv": csv_path, "markdown": md_path, "png": png_path}
 
     @staticmethod
-    def _print(rows: list[tuple[str, str, str]]) -> None:
-        print("\nTraditional radar occupancy results (%)")
-        print(f"{'Range':<10}{'Metric':<20}{'Traditional':>12}")
-        print("-" * 42)
-        for range_name, metric, value in rows:
-            print(f"{range_name:<10}{metric:<20}{value:>12}")
+    def _print(rows: list[tuple[str, str]]) -> None:
+        values = {
+            name: float(value) if value != "nan" else float("nan")
+            for name, value in rows
+        }
+        print("\nTraditional RadarOcc-compatible results")
+        print(values)
 
     @staticmethod
-    def _write_png(rows: list[tuple[str, str, str]], path: Path) -> None:
-        widths = (150, 250, 180)
+    def _write_png(rows: list[tuple[str, str]], path: Path) -> None:
+        widths = (280, 180)
         row_h = 46
         header_h = 54
         margin = 20
@@ -89,7 +81,7 @@ class MetricsReportWriter:
         header_font = _font(20, bold=True)
         cell_font = _font(18, bold=False)
         x0, y0 = margin, margin
-        headers = ("Range", "Metric", "Traditional")
+        headers = ("Metric", "Traditional")
 
         x = x0
         for width, header in zip(widths, headers):

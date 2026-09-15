@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import numpy as np
@@ -30,7 +29,6 @@ class RadarOccPredictionWriter(PredictionWriter):
 
         frame_dir = Path(output_root) / str(token)
         frame_dir.mkdir(parents=True, exist_ok=True)
-        np.save(frame_dir / "pred_dense.npy", dense.astype(np.uint8), allow_pickle=False)
 
         xyz = np.argwhere(dense != 0).astype(np.int64)
         if xyz.size:
@@ -42,31 +40,5 @@ class RadarOccPredictionWriter(PredictionWriter):
 
         pred_path = frame_dir / "pred_c.npy"
         np.save(pred_path, sparse, allow_pickle=False)
-
-        metadata = dict(prediction.metadata)
-        metadata.update(
-            {
-                "lidar_token": str(token),
-                "dense_order": "xyz",
-                "sparse_order": "zyx_class",
-                "classes": {"0": "free", "1": "background", "2": "foreground"},
-                "occupied_voxels": int(sparse.shape[0]),
-                "detections": len(prediction.detections),
-                "motion_counts": {
-                    "static": sum(int(label) == 1 for label in prediction.motion_labels),
-                    "dynamic": sum(int(label) == 2 for label in prediction.motion_labels),
-                },
-                "semantic_counts": {
-                    "background": sum(
-                        int(label) == 1 for label in prediction.semantic_labels
-                    ),
-                    "foreground": sum(
-                        int(label) == 2 for label in prediction.semantic_labels
-                    ),
-                },
-            }
-        )
-        with (frame_dir / "meta.json").open("w", encoding="utf-8") as handle:
-            json.dump(metadata, handle, indent=2, sort_keys=True)
 
         return pred_path

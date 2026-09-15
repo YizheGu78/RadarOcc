@@ -11,3 +11,4 @@ def test_writer_uses_zyx_sparse_order(tmp_path):
     path = RadarOccPredictionWriter().write(prediction, tmp_path, "abc")
     sparse = np.load(path, allow_pickle=False)
     np.testing.assert_array_equal(sparse, np.array([[3, 20, 10, 2]]))
+    assert sorted(item.name for item in path.parent.iterdir()) == ["pred_c.npy"]

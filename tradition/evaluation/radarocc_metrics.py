@@ -7,13 +7,26 @@ import numpy as np
 
 
 GRID_SHAPE_XYZ = (128, 128, 14)
+IGNORE_LABEL = 255
+RADAROCC_RANGES_M = (51.2, 25.6, 12.8)
+RADAROCC_REGION_SLICES_XYZ = {
+    51.2: (slice(0, 128), slice(0, 128), slice(0, 14)),
+    25.6: (slice(0, 64), slice(32, 96), slice(0, 14)),
+    12.8: (slice(0, 32), slice(48, 80), slice(0, 14)),
+}
 
 
-def _simplify_labels(labels: np.ndarray) -> np.ndarray:
+def _simplify_labels(
+    labels: np.ndarray,
+    *,
+    preserve_ignore: bool = False,
+) -> np.ndarray:
     labels = np.asarray(labels, dtype=np.int64)
     result = np.zeros_like(labels, dtype=np.uint8)
     result[labels == 1] = 1
-    result[(labels >= 2) & (labels != 255)] = 2
+    result[(labels >= 2) & (labels != IGNORE_LABEL)] = 2
+    if preserve_ignore:
+        result[labels == IGNORE_LABEL] = IGNORE_LABEL
     return result
 
 
@@ -34,7 +47,10 @@ def load_gt_sparse_xyz(path: str | Path, coordinate_order: str = "xyz") -> np.nd
     else:
         raise ValueError("coordinate_order must be 'xyz' or 'zyx'.")
 
-    labels = _simplify_labels(np.rint(sparse[:, -1]).astype(np.int64))
+    labels = _simplify_labels(
+        np.rint(sparse[:, -1]).astype(np.int64),
+        preserve_ignore=True,
+    )
     valid = np.all((xyz >= 0) & (xyz < np.asarray(GRID_SHAPE_XYZ)), axis=1)
     xyz, labels = xyz[valid], labels[valid]
     if xyz.size:
@@ -64,10 +80,38 @@ class MetricResult:
     range_m: float
     sc_iou: float
     ssc_miou: float
-    three_class_miou: float
     free_iou: float
     background_iou: float
     foreground_iou: float
+
+
+def radarocc_metric_dict(results: list[MetricResult]) -> dict[str, float]:
+    """Return exactly the metric keys emitted by RadarOcc evaluation."""
+    by_range = {result.range_m: result for result in results}
+    missing = set(RADAROCC_RANGES_M) - set(by_range)
+    if missing:
+        raise ValueError(f"Missing RadarOcc metric ranges: {sorted(missing)}")
+
+    full = by_range[51.2]
+    range1 = by_range[25.6]
+    range2 = by_range[12.8]
+    return {
+        "SC_non-empty": full.sc_iou,
+        "SC1_non-empty": range1.sc_iou,
+        "SC2_non-empty": range2.sc_iou,
+        "SSC_free": full.free_iou,
+        "SSC_Background": full.background_iou,
+        "SSC_Foreground": full.foreground_iou,
+        "SSC_mean": full.ssc_miou,
+        "SSC1_free": range1.free_iou,
+        "SSC1_Background": range1.background_iou,
+        "SSC1_Foreground": range1.foreground_iou,
+        "SSC1_mean": range1.ssc_miou,
+        "SSC2_free": range2.free_iou,
+        "SSC2_Background": range2.background_iou,
+        "SSC2_Foreground": range2.foreground_iou,
+        "SSC2_mean": range2.ssc_miou,
+    }
 
 
 class RadarOccMetricAccumulator:
@@ -78,12 +122,18 @@ class RadarOccMetricAccumulator:
 
     SC IoU collapses classes 1/2 into occupied. SSC mIoU is the mean of
     Background IoU and Foreground IoU, matching the table convention used in
-    the RadarOcc paper/reproduction results. Three-class mIoU additionally
-    includes Free IoU and is reported under a separate name so the official
-    SSC metric is not silently redefined.
+    the RadarOcc paper/reproduction results.
     """
 
-    def __init__(self, ranges_m: tuple[float, ...] = (12.8, 25.6, 51.2)) -> None:
+    def __init__(
+        self,
+        ranges_m: tuple[float, ...] = RADAROCC_RANGES_M,
+    ) -> None:
+        unsupported = set(ranges_m) - set(RADAROCC_REGION_SLICES_XYZ)
+        if unsupported:
+            raise ValueError(
+                f"Unsupported RadarOcc metric ranges: {sorted(unsupported)}"
+            )
         self.ranges_m = ranges_m
         self._confusions = {
             float(r): np.zeros((3, 3), dtype=np.int64) for r in ranges_m
@@ -94,7 +144,13 @@ class RadarOccMetricAccumulator:
     def _confusion(pred: np.ndarray, gt: np.ndarray) -> np.ndarray:
         pred_flat = pred.reshape(-1).astype(np.int64)
         gt_flat = gt.reshape(-1).astype(np.int64)
-        valid = (gt_flat >= 0) & (gt_flat <= 2) & (pred_flat >= 0) & (pred_flat <= 2)
+        valid = (
+            (gt_flat != IGNORE_LABEL)
+            & (gt_flat >= 0)
+            & (gt_flat <= 2)
+            & (pred_flat >= 0)
+            & (pred_flat <= 2)
+        )
         encoded = gt_flat[valid] * 3 + pred_flat[valid]
         return np.bincount(encoded, minlength=9).reshape(3, 3)
 
@@ -107,9 +163,9 @@ class RadarOccMetricAccumulator:
             )
 
         for range_m in self.ranges_m:
-            x_bins = min(GRID_SHAPE_XYZ[0], int(round(range_m / 0.4)))
+            region = RADAROCC_REGION_SLICES_XYZ[float(range_m)]
             self._confusions[float(range_m)] += self._confusion(
-                pred[:x_bins], gt[:x_bins]
+                pred[region], gt[region]
             )
         self.frames += 1
 
@@ -138,8 +194,7 @@ class RadarOccMetricAccumulator:
                 MetricResult(
                     range_m=float(range_m),
                     sc_iou=self._occupied_iou(cm),
-                    ssc_miou=float(np.nanmean([bg, fg])),
-                    three_class_miou=float(np.nanmean([free, bg, fg])),
+                    ssc_miou=(bg + fg) / 2.0,
                     free_iou=free,
                     background_iou=bg,
                     foreground_iou=fg,
@@ -155,7 +210,7 @@ class RadarOccMetrics:
         self,
         prediction_xyz: np.ndarray,
         ground_truth_xyz: np.ndarray,
-        ranges_m: tuple[float, ...] = (12.8, 25.6, 51.2),
+        ranges_m: tuple[float, ...] = RADAROCC_RANGES_M,
     ) -> list[MetricResult]:
         accumulator = RadarOccMetricAccumulator(ranges_m)
         accumulator.update(prediction_xyz, ground_truth_xyz)
