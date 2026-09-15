@@ -28,6 +28,7 @@ from tradition.motion.temporal_consistency import PoseAlignedTemporalClassifier
 from tradition.semantics.object_classifier import DualBranchCandidateExtractor
 from tradition.semantics.training import (
     ClusterLabellingConfig,
+    ClusterLabellingOutcome,
     RadarOccClusterLabeller,
     train_random_forest_objectness,
 )
@@ -158,7 +159,7 @@ def main() -> None:
 
     x: list[np.ndarray] = []
     y: list[int] = []
-    ignored = 0
+    outcome_counts = {outcome: 0 for outcome in ClusterLabellingOutcome}
     active_scene = None
     temporal.reset()
     for ordinal, info in enumerate(infos, start=1):
@@ -198,17 +199,33 @@ def main() -> None:
         gt = load_gt_sparse_xyz(gt_path, coordinate_order=args.gt_order)
         frame_candidates = candidates.extract(combined, motion)
         for candidate in frame_candidates:
-            target = labeller.label(candidate, combined, gt)
+            target, outcome = labeller.label_with_outcome(candidate, combined, gt)
+            outcome_counts[outcome] += 1
             if target is None:
-                ignored += 1
                 continue
             x.append(candidate.features)
             y.append(target)
         print(
             f"[{ordinal}/{len(infos)}] scene={scene} token={token} "
             f"raw={len(raw)} reliable={len(reliable)} "
-            f"candidates={len(frame_candidates)} samples={len(y)} ignored={ignored}"
+            f"candidates={len(frame_candidates)} "
+            f"foreground={outcome_counts[ClusterLabellingOutcome.FOREGROUND]} "
+            f"background={outcome_counts[ClusterLabellingOutcome.BACKGROUND]} "
+            "ignored_free_dominated="
+            f"{outcome_counts[ClusterLabellingOutcome.FREE_DOMINATED]} "
+            "ignored_ambiguous="
+            f"{outcome_counts[ClusterLabellingOutcome.AMBIGUOUS]}"
         )
+
+    print(
+        "Training candidate totals: "
+        f"foreground={outcome_counts[ClusterLabellingOutcome.FOREGROUND]} "
+        f"background={outcome_counts[ClusterLabellingOutcome.BACKGROUND]} "
+        "ignored_free_dominated="
+        f"{outcome_counts[ClusterLabellingOutcome.FREE_DOMINATED]} "
+        "ignored_ambiguous="
+        f"{outcome_counts[ClusterLabellingOutcome.AMBIGUOUS]}"
+    )
 
     model_path = train_random_forest_objectness(
         np.asarray(x, dtype=np.float64),
@@ -219,7 +236,18 @@ def main() -> None:
         metadata={
             "annotation": str(args.annotation.expanduser().resolve()),
             "frame_count": len(infos),
-            "ignored_ambiguous_candidates": ignored,
+            "foreground_candidates": outcome_counts[
+                ClusterLabellingOutcome.FOREGROUND
+            ],
+            "background_candidates": outcome_counts[
+                ClusterLabellingOutcome.BACKGROUND
+            ],
+            "ignored_free_dominated_candidates": outcome_counts[
+                ClusterLabellingOutcome.FREE_DOMINATED
+            ],
+            "ignored_ambiguous_candidates": outcome_counts[
+                ClusterLabellingOutcome.AMBIGUOUS
+            ],
             "temporal_window": args.temporal_window,
             "positive_foreground_fraction": args.positive_foreground_fraction,
             "negative_foreground_fraction": args.negative_foreground_fraction,

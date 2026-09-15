@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Sequence
 
@@ -14,7 +15,7 @@ from tradition.semantics.object_classifier import FEATURE_NAMES, ObjectCandidate
 
 @dataclass(frozen=True)
 class ClusterLabellingConfig:
-    """Convert RadarOcc train GT into cluster-level objectness targets."""
+    """Convert RadarOcc train GT into occupied BG/FG cluster targets."""
 
     match_radius_voxels: int = 2
     positive_foreground_fraction: float = 0.20
@@ -30,6 +31,15 @@ class ClusterLabellingConfig:
             <= 1.0
         ):
             raise ValueError("Invalid positive/negative foreground fractions.")
+
+
+class ClusterLabellingOutcome(str, Enum):
+    """Training disposition for one object proposal."""
+
+    FOREGROUND = "foreground"
+    BACKGROUND = "background"
+    FREE_DOMINATED = "free_dominated"
+    AMBIGUOUS = "ambiguous"
 
 
 class RadarOccClusterLabeller:
@@ -49,11 +59,21 @@ class RadarOccClusterLabeller:
         detections: Sequence[RadarDetection],
         gt_labels_xyz: np.ndarray,
     ) -> int | None:
+        target, _ = self.label_with_outcome(candidate, detections, gt_labels_xyz)
+        return target
+
+    def label_with_outcome(
+        self,
+        candidate: ObjectCandidate,
+        detections: Sequence[RadarDetection],
+        gt_labels_xyz: np.ndarray,
+    ) -> tuple[int | None, ClusterLabellingOutcome]:
         if gt_labels_xyz.shape != self.grid_cfg.shape_xyz:
             raise ValueError(
                 f"GT shape {gt_labels_xyz.shape} != {self.grid_cfg.shape_xyz}."
             )
-        matches: list[bool] = []
+        foreground_matches: list[bool] = []
+        background_matches: list[bool] = []
         radius = self.config.match_radius_voxels
         sx, sy, sz = self.grid_cfg.shape_xyz
         for index in candidate.indices:
@@ -66,15 +86,26 @@ class RadarOccClusterLabeller:
                 max(0, y - radius) : min(sy, y + radius + 1),
                 max(0, z - radius) : min(sz, z + radius + 1),
             ]
-            matches.append(bool(np.any(region == 2)))
-        if not matches:
-            return None
-        foreground_fraction = float(np.mean(matches))
+            has_foreground = bool(np.any(region == 2))
+            has_background = bool(np.any(region == 1))
+            foreground_matches.append(has_foreground)
+            # Foreground wins when both occupied classes occur in the neighbourhood.
+            background_matches.append(has_background and not has_foreground)
+        if not foreground_matches:
+            return None, ClusterLabellingOutcome.AMBIGUOUS
+        foreground_fraction = float(np.mean(foreground_matches))
+        background_fraction = float(np.mean(background_matches))
         if foreground_fraction >= self.config.positive_foreground_fraction:
-            return 1
+            return 1, ClusterLabellingOutcome.FOREGROUND
+        # Reuse the existing positive-support threshold for occupied BG.
+        if (
+            foreground_fraction <= self.config.negative_foreground_fraction
+            and background_fraction >= self.config.positive_foreground_fraction
+        ):
+            return 0, ClusterLabellingOutcome.BACKGROUND
         if foreground_fraction <= self.config.negative_foreground_fraction:
-            return 0
-        return None
+            return None, ClusterLabellingOutcome.FREE_DOMINATED
+        return None, ClusterLabellingOutcome.AMBIGUOUS
 
 
 def train_random_forest_objectness(

@@ -2,15 +2,21 @@ import math
 
 import numpy as np
 
-from tradition.core.config import ObjectClusteringConfig
+from tradition.core.config import GridConfig, ObjectClusteringConfig
+from tradition.core.geometry import xyz_to_voxel
 from tradition.core.types import MotionLabel, RadarDetection, SemanticLabel
 from tradition.mapping.temporal_occupancy_grid_3d import TemporalLogOddsOccupancyGrid3D
 from tradition.semantics.object_classifier import (
     FEATURE_NAMES,
     DualBranchCandidateExtractor,
     ObjectAwareSemanticClassifier,
+    ObjectCandidate,
 )
-from tradition.semantics.training import train_random_forest_objectness
+from tradition.semantics.training import (
+    ClusterLabellingOutcome,
+    RadarOccClusterLabeller,
+    train_random_forest_objectness,
+)
 
 
 def _detection(x: float, y: float, z: float = 0.0, residual: float = 0.1):
@@ -196,3 +202,75 @@ def test_historic_static_object_can_be_mapped_as_foreground():
     )
     labels = mapper.labels()
     assert int(np.count_nonzero(labels == int(SemanticLabel.FOREGROUND))) > 0
+
+
+def _candidate(detections):
+    return ObjectCandidate(
+        indices=np.arange(len(detections), dtype=np.int64),
+        branch="static",
+        features=np.zeros(len(FEATURE_NAMES), dtype=np.float64),
+    )
+
+
+def _gt_with_point_labels(detections, point_labels):
+    grid_cfg = GridConfig()
+    gt = np.zeros(grid_cfg.shape_xyz, dtype=np.uint8)
+    for index, label in point_labels.items():
+        voxel = xyz_to_voxel(detections[index].xyz_lidar_m, grid_cfg)
+        assert voxel is not None
+        gt[voxel] = label
+    return gt
+
+
+def test_cluster_labeller_ignores_all_free_candidate():
+    detections = [_detection(10.0, 0.0)]
+    labeller = RadarOccClusterLabeller()
+
+    target, outcome = labeller.label_with_outcome(
+        _candidate(detections), detections, _gt_with_point_labels(detections, {})
+    )
+
+    assert target is None
+    assert outcome == ClusterLabellingOutcome.FREE_DOMINATED
+
+
+def test_cluster_labeller_accepts_explicit_background_at_existing_20_percent():
+    detections = [_detection(x, 0.0) for x in (2.0, 6.0, 10.0, 14.0, 18.0)]
+    labeller = RadarOccClusterLabeller()
+
+    target, outcome = labeller.label_with_outcome(
+        _candidate(detections),
+        detections,
+        _gt_with_point_labels(detections, {0: 1}),
+    )
+
+    assert target == 0
+    assert outcome == ClusterLabellingOutcome.BACKGROUND
+
+
+def test_cluster_labeller_keeps_foreground_priority_at_existing_20_percent():
+    detections = [_detection(x, 0.0) for x in (2.0, 6.0, 10.0, 14.0, 18.0)]
+    labeller = RadarOccClusterLabeller()
+
+    target, outcome = labeller.label_with_outcome(
+        _candidate(detections),
+        detections,
+        _gt_with_point_labels(detections, {0: 2, 1: 1, 2: 1, 3: 1, 4: 1}),
+    )
+
+    assert target == 1
+    assert outcome == ClusterLabellingOutcome.FOREGROUND
+
+
+def test_cluster_labeller_keeps_intermediate_foreground_fraction_ambiguous():
+    detections = [_detection(float(x), 0.0) for x in range(2, 42, 4)]
+    labeller = RadarOccClusterLabeller()
+    labels = {index: 1 for index in range(1, len(detections))}
+    labels[0] = 2
+
+    target, outcome = labeller.label_with_outcome(
+        _candidate(detections), detections, _gt_with_point_labels(detections, labels)
+    )
+
+    assert target is None
+    assert outcome == ClusterLabellingOutcome.AMBIGUOUS
