@@ -45,6 +45,17 @@ class _GeometryEstimator:
         return np.asarray(result)
 
 
+class _FixedProbabilityEstimator:
+    classes_ = np.asarray([0, 1])
+
+    def __init__(self, foreground_probability: float):
+        self.foreground_probability = foreground_probability
+
+    def predict_proba(self, features):
+        foreground = np.full(len(features), self.foreground_probability)
+        return np.column_stack((1.0 - foreground, foreground))
+
+
 def test_stationary_object_shape_can_be_foreground_while_guardrail_stays_background():
     vehicle = [
         _detection(10.0 + dx, -1.0 + dy)
@@ -74,6 +85,51 @@ def test_dynamic_dbscan_is_only_a_proposal_and_model_decides_semantics():
     ).extract(detections, motion)
     assert len(candidates) == 1
     assert candidates[0].branch == "dynamic"
+
+
+def test_dynamic_rf_rejection_falls_back_to_mapped_background():
+    detections = [
+        _detection(10.0, 0.0, residual=1.1),
+        _detection(10.5, 0.2, residual=1.2),
+    ]
+    motion = [MotionLabel.DYNAMIC] * len(detections)
+    classifier = ObjectAwareSemanticClassifier(
+        _FixedProbabilityEstimator(0.1),
+        ObjectClusteringConfig(dynamic_min_points=2),
+    )
+
+    labels, accepted = classifier.classify_with_acceptance(detections, motion)
+
+    assert accepted.tolist() == [True, True]
+    assert labels == [SemanticLabel.BACKGROUND, SemanticLabel.BACKGROUND]
+    assert classifier.last_diagnostics["dynamic_background_fallback_cluster_count"] == 1
+    assert classifier.last_diagnostics["dynamic_background_fallback_point_count"] == 2
+
+    mapper = TemporalLogOddsOccupancyGrid3D()
+    mapper.update(
+        [detection for detection, keep in zip(detections, accepted) if keep],
+        [label for label, keep in zip(labels, accepted) if keep],
+    )
+    dense = mapper.labels()
+    assert np.any(dense == int(SemanticLabel.BACKGROUND))
+    assert not np.any(dense == int(SemanticLabel.FOREGROUND))
+
+
+def test_dynamic_rf_acceptance_remains_mapped_foreground():
+    detections = [
+        _detection(10.0, 0.0, residual=1.1),
+        _detection(10.5, 0.2, residual=1.2),
+    ]
+    motion = [MotionLabel.DYNAMIC] * len(detections)
+    classifier = ObjectAwareSemanticClassifier(
+        _FixedProbabilityEstimator(0.9),
+        ObjectClusteringConfig(dynamic_min_points=2),
+    )
+
+    labels, accepted = classifier.classify_with_acceptance(detections, motion)
+
+    assert accepted.tolist() == [True, True]
+    assert labels == [SemanticLabel.FOREGROUND, SemanticLabel.FOREGROUND]
 
 
 def test_isolated_dynamic_return_is_discarded():

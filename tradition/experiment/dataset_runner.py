@@ -489,6 +489,7 @@ class TraditionalDatasetRunner:
                     f"history_bg={prediction.metadata['historic_background_count']} "
                     f"history_fg={prediction.metadata.get('historic_foreground_count', 0)} "
                     f"objects={prediction.metadata.get('object_classifier', {}).get('candidate_count', 0)} "
+                    f"fallback_bg={prediction.metadata.get('object_classifier', {}).get('dynamic_background_fallback_point_count', 0)} "
                     f"doppler_s/u/d="
                     f"{prediction.metadata['doppler_static_evidence_count']}/"
                     f"{prediction.metadata['doppler_uncertain_evidence_count']}/"

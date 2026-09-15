@@ -467,15 +467,20 @@ class ObjectAwareSemanticClassifier(SemanticClassifier):
         candidates = self.candidates.extract(detections, motion_labels)
         probabilities: list[float] = []
         foreground_clusters = 0
+        dynamic_background_fallback_clusters = 0
+        dynamic_background_fallback_points = 0
         for candidate in candidates:
             probability = self._foreground_probability(candidate.features)
             probabilities.append(probability)
-            if candidate.branch == "static":
-                accepted[candidate.indices] = True
+            # Every RF-evaluated proposal participates in occupancy mapping.
+            # A dynamic proposal that is not foreground falls back to background.
+            accepted[candidate.indices] = True
             if probability < self.config.foreground_probability_threshold:
+                if candidate.branch == "dynamic":
+                    dynamic_background_fallback_clusters += 1
+                    dynamic_background_fallback_points += len(candidate.indices)
                 continue
             foreground_clusters += 1
-            accepted[candidate.indices] = True
             for index in candidate.indices:
                 labels[int(index)] = SemanticLabel.FOREGROUND
         persistent = {
@@ -489,6 +494,10 @@ class ObjectAwareSemanticClassifier(SemanticClassifier):
             "static_candidate_count": sum(c.branch == "static" for c in candidates),
             "dynamic_candidate_count": sum(c.branch == "dynamic" for c in candidates),
             "foreground_cluster_count": foreground_clusters,
+            "dynamic_background_fallback_cluster_count": (
+                dynamic_background_fallback_clusters
+            ),
+            "dynamic_background_fallback_point_count": dynamic_background_fallback_points,
             "mean_foreground_probability": (
                 float(np.mean(probabilities)) if probabilities else float("nan")
             ),
