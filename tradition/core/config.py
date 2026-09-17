@@ -221,3 +221,36 @@ class MappingConfig:
     hit_radius_xy_voxels: int = 1
     hit_radius_z_voxels: int = 1
     foreground_override_ratio: float = 0.80
+
+
+@dataclass(frozen=True)
+class UnwrappingConfig:
+    """Experimental range-only CA-KF; values need validation on real RPC tracks."""
+
+    frame_dt_s: float = 0.10
+    cluster_radius_m: float = 1.5
+    min_cluster_points: int = 2
+    association_radius_m: float = 1.5
+    max_speed_mps: float = 40.0
+    max_gap_s: float = 0.5
+    init_frames: int = 4
+    history_size: int = 12
+    range_std_m: float = 0.20
+    jerk_variance: float = 1.0
+    initial_acceleration_std_mps2: float = 2.0
+    innovation_sigma: float = 4.0
+    velocity_floor_std_mps: float = 0.20
+    confidence_sigma: float = 2.0
+    max_doppler_error_mps: float = 0.80
+    range_check_tolerance_mps: float = 1.0
+
+    def __post_init__(self):
+        import math
+        for name, value in vars(self).items():
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and positive.")
+        for name in ('min_cluster_points', 'init_frames', 'history_size'):
+            if not isinstance(getattr(self, name), int):
+                raise ValueError(f"{name} must be an integer.")
+        if self.init_frames < 3 or self.history_size < self.init_frames:
+            raise ValueError("Require history_size >= init_frames >= 3.")

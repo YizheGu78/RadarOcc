@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import pickle
 import re
@@ -339,6 +340,12 @@ class TraditionalDatasetRunner:
         if input_mode not in {"rpc", "raw"}:
             raise ValueError("input_mode must be 'rpc' or 'raw'.")
 
+        unwrapper = self.pipeline.velocity_unwrapper
+        if unwrapper is not None:
+            if input_mode != "rpc" or pose_root is None:
+                raise ValueError("Range-Kalman unwrapping requires RPC with poses.")
+            if not math.isclose(unwrapper.config.frame_dt_s, pose_dt_s):
+                raise ValueError("Unwrapping and pose frame intervals must match.")
         annotation = Path(annotation).expanduser().resolve()
         output_dir = Path(output_dir).expanduser().resolve()
         repo_root = Path(repo_root).expanduser().resolve()
@@ -453,6 +460,13 @@ class TraditionalDatasetRunner:
                     radar_path,
                     ego_speed_mps=ego_speed_mps,
                 )
+            if unwrapper is not None:
+                diagnostics_dir = output_dir / "velocity_unwrapping"
+                diagnostics_dir.mkdir(parents=True, exist_ok=True)
+                (diagnostics_dir / f"{token}.json").write_text(
+                    json.dumps(prediction.metadata["velocity_unwrapping"], allow_nan=False),
+                    encoding="utf-8",
+                )
             gt = load_gt_sparse_xyz(gt_path, coordinate_order=gt_order)
             accumulator.update(prediction.dense_labels_xyz, gt)
 
@@ -517,3 +531,4 @@ class TraditionalDatasetRunner:
             if video is not None:
                 outputs["mp4"], outputs["gif"] = video
         return outputs
+

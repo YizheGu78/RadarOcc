@@ -120,13 +120,15 @@ class PoseAlignedTemporalClassifier(TemporalMotionClassifier):
                 spatial.neighbours(point).size > 0
                 for spatial in dynamic_indices
             )
-            is_background = support >= required_static
+            is_background = (
+                support >= required_static
+                and frame.doppler_evidence[index] == int(DopplerEvidence.STATIC)
+            )
             is_foreground = (
                 not is_background
                 and frame.doppler_evidence[index]
                 == int(DopplerEvidence.DYNAMIC)
                 and dynamic_support[index] >= required_dynamic
-                and support < required_static
             )
             if is_background:
                 current_indices.append(index)
@@ -145,7 +147,11 @@ class PoseAlignedTemporalClassifier(TemporalMotionClassifier):
                 support, _ = self._static_support(
                     point, frames, static_indices
                 )
-                if support >= required_static:
+                if (
+                    support >= required_static
+                    and source.doppler_evidence[history_index]
+                    == int(DopplerEvidence.STATIC)
+                ):
                     historic_background.append(point)
                     historic_detections.append(
                         replace(
@@ -180,6 +186,9 @@ class PoseAlignedTemporalClassifier(TemporalMotionClassifier):
             neighbours = spatial.neighbours(point)
             if neighbours.size == 0:
                 continue
+            neighbours = neighbours[
+                source.doppler_evidence[neighbours] == int(DopplerEvidence.STATIC)
+            ]
             frame_residuals = np.abs(source.doppler_residuals_mps[neighbours])
             finite = frame_residuals[np.isfinite(frame_residuals)]
             if finite.size == 0:
@@ -189,3 +198,4 @@ class PoseAlignedTemporalClassifier(TemporalMotionClassifier):
             if best_residual <= self.motion_cfg.static_residual_threshold_mps:
                 static_evidence_support += 1
         return static_evidence_support, residuals
+
