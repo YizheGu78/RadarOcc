@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-from collections import deque
 from pathlib import Path
 
 import matplotlib
@@ -49,17 +48,6 @@ def add_velocity_arguments(parser):
     parser.add_argument("--range-difference-history", type=int, default=3)
     parser.add_argument("--range-difference-max-speed-mps", type=float, default=40.0)
     parser.add_argument("--range-difference-max-error-mps", type=float, default=0.80)
-    parser.add_argument("--fallback-static-window", type=int, default=5)
-    parser.add_argument("--fallback-static-min-support", type=int, default=2)
-    parser.add_argument("--fallback-static-match-radius-m", type=float, default=0.60)
-    parser.add_argument(
-        "--disable-static-fallback", "--disable-static-prefilter",
-        dest="disable_static_prefilter", action="store_true",
-        help=(
-            "Disable the world-stable point-wise static prefilter. The old "
-            "--disable-static-fallback spelling remains as a compatibility alias."
-        ),
-    )
 
 
 class RangeDifferenceUnwrapper:
@@ -102,17 +90,11 @@ class RangeDifferenceUnwrapper:
         self.scene = None
         self.last_diagnostics = {}
 
-    def _clusters(self, detections, excluded_mask=None):
+    def _clusters(self, detections):
         xyz = np.asarray(
             [det.xyz_lidar_m for det in detections], dtype=np.float64
         ).reshape(-1, 3)
-        valid_mask = np.all(np.isfinite(xyz), axis=1)
-        if excluded_mask is not None:
-            excluded = np.asarray(excluded_mask, dtype=bool)
-            if excluded.shape != (len(detections),):
-                raise ValueError("excluded_mask must match detections")
-            valid_mask &= ~excluded
-        valid = np.flatnonzero(valid_mask)
+        valid = np.flatnonzero(np.all(np.isfinite(xyz), axis=1))
         if not len(valid):
             return []
         tree = cKDTree(xyz[valid])
@@ -155,7 +137,7 @@ class RangeDifferenceUnwrapper:
             return previous_center
         return previous_center + velocity * (time - previous_time)
 
-    def update(self, detections, ego_motion, token, excluded_mask=None):
+    def update(self, detections, ego_motion, token):
         time = RadarOccPoseReader.frame_index(str(token)) * self.frame_dt_s
         scene = str(token).rsplit("_", 1)[0]
         if self.scene != scene or (
@@ -176,22 +158,11 @@ class RangeDifferenceUnwrapper:
         ambiguity = [None] * len(detections)
         temporal_prediction = [None] * len(detections)
         failure_reason = ["no_cluster"] * len(detections)
-        if excluded_mask is None:
-            excluded = np.zeros(len(detections), dtype=bool)
-        else:
-            excluded = np.asarray(excluded_mask, dtype=bool)
-            if excluded.shape != (len(detections),):
-                raise ValueError("excluded_mask must match detections")
-            for index in np.flatnonzero(excluded):
-                # The static branch has already resolved this point. Preserve
-                # its near-zero wrapped residual as the final residual and do
-                # not send it through moving-object clustering.
-                output[int(index)] = wrapped[int(index)]
-                failure_reason[int(index)] = "static_preclassified"
 
-        # Static background is resolved point-wise before this stage. Only the
-        # remaining measurements may form moving-object clusters.
-        clusters = self._clusters(detections, excluded_mask=excluded)
+        # Every reliable RPC point participates in cross-frame association.
+        # Wrapped Doppler is not used as a static pre-gate because aliasing can
+        # wrap fast radial motion close to zero.
+        clusters = self._clusters(detections)
         pose = np.asarray(ego_motion.pose_lidar_to_world, dtype=np.float64)
         observations = []
         for indices in clusters:
@@ -307,10 +278,6 @@ class RangeDifferenceUnwrapper:
             "failure_reason": failure_reason,
             "resolved_count": int(np.count_nonzero(np.isfinite(output))),
             "unresolved_count": int(np.count_nonzero(~np.isfinite(output))),
-            "static_preclassified_count": int(np.count_nonzero(excluded)),
-            "range_difference_resolved_count": int(np.count_nonzero(
-                np.isfinite(output) & ~excluded
-            )),
         }
         return output, None
 
@@ -348,7 +315,7 @@ def save_velocity_diagnostics(path, unwrapper, analysis_summary=None):
     import json
     payload = dict(unwrapper.last_diagnostics)
     if analysis_summary is not None:
-        payload["visualization_static_prefilter"] = analysis_summary
+        payload["visualization_velocity_summary"] = analysis_summary
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(payload, allow_nan=False),
@@ -356,82 +323,9 @@ def save_velocity_diagnostics(path, unwrapper, analysis_summary=None):
     )
 
 
-class WorldStaticPreclassifier:
-    """Confirm static points before any moving-object clustering.
-
-    A point is a static candidate when its ego-compensated wrapped residual is
-    near zero. It becomes confirmed only when similar candidates repeatedly
-    occur at the same world location. Raw radar scatterers need not keep an ID.
-    """
-
-    def __init__(
-        self, window_size=5, min_support=3, match_radius_m=0.60,
-        wrapped_threshold_mps=0.50, enabled=True,
-    ):
-        if window_size < 2:
-            raise ValueError("static prefilter window_size must be >= 2")
-        if not 2 <= min_support <= window_size:
-            raise ValueError(
-                "static prefilter min_support must be in [2, window_size]"
-            )
-        if match_radius_m <= 0.0 or wrapped_threshold_mps < 0.0:
-            raise ValueError(
-                "static prefilter radii/thresholds must be non-negative"
-            )
-        self.window_size = int(window_size)
-        self.min_support = int(min_support)
-        self.match_radius_m = float(match_radius_m)
-        self.wrapped_threshold_mps = float(wrapped_threshold_mps)
-        self.enabled = bool(enabled)
-        self.history = deque(maxlen=self.window_size - 1)
-
-    def update(self, detections, ego_motion, wrapped_residuals):
-        wrapped = np.asarray(wrapped_residuals, dtype=np.float64)
-        if wrapped.shape != (len(detections),):
-            raise ValueError("Wrapped residuals must match detections.")
-        xyz_lidar = np.asarray(
-            [det.xyz_lidar_m for det in detections], dtype=np.float64
-        ).reshape(-1, 3)
-        pose = np.asarray(ego_motion.pose_lidar_to_world, dtype=np.float64)
-        world_xyz = xyz_lidar @ pose[:3, :3].T + pose[:3, 3]
-        static_candidate = (
-            np.isfinite(wrapped)
-            & (np.abs(wrapped) <= self.wrapped_threshold_mps)
-        )
-        support = np.zeros(len(detections), dtype=np.int16)
-        finite_current = np.all(np.isfinite(world_xyz), axis=1)
-        current_candidate = finite_current & static_candidate
-        support[current_candidate] = 1
-        for previous_world in self.history:
-            if not len(previous_world) or not np.any(current_candidate):
-                continue
-            distances, _ = cKDTree(previous_world).query(
-                world_xyz[current_candidate], k=1
-            )
-            support[current_candidate] += (
-                distances <= self.match_radius_m
-            ).astype(np.int16)
-        static_mask = (
-            self.enabled
-            & current_candidate
-            & (support >= self.min_support)
-        )
-        # Store only static-Doppler candidates. Moving returns must not provide
-        # future world-persistence support to guardrails or other background.
-        self.history.append(world_xyz[current_candidate].copy())
-        return static_mask, support
-
-
-# Compatibility for external scripts that imported the previous name.
-WorldStaticFallback = WorldStaticPreclassifier
-
-
-def velocity_source_summary(
-    unwrapper, temporal_residuals, static_mask, support,
-):
+def velocity_source_summary(unwrapper, temporal_residuals):
     diagnostics = unwrapper.last_diagnostics
     temporal = np.asarray(temporal_residuals, dtype=np.float64)
-    static = np.asarray(static_mask, dtype=bool)
     reasons = np.asarray(diagnostics["failure_reason"], dtype=object)
     reason_counts = {
         str(reason): int(count)
@@ -439,17 +333,12 @@ def velocity_source_summary(
     }
     return {
         "range_difference_resolved_count": int(
-            np.count_nonzero(np.isfinite(temporal) & ~static)
+            np.count_nonzero(np.isfinite(temporal))
         ),
-        "static_preclassified_count": int(np.count_nonzero(static)),
-        "unresolved_after_both_branches_count": int(
+        "unresolved_count": int(
             np.count_nonzero(~np.isfinite(temporal))
         ),
         "range_difference_failure_reasons": reason_counts,
-        "world_support_histogram": {
-            str(value): int(count)
-            for value, count in zip(*np.unique(support, return_counts=True))
-        },
     }
 
 
@@ -640,7 +529,6 @@ def plot_bev(
     ax,
     xy: np.ndarray,
     residuals: np.ndarray,
-    fallback_mask: np.ndarray,
     threshold: float,
     grid: GridConfig,
     all_point_size: float,
@@ -648,8 +536,6 @@ def plot_bev(
 ) -> tuple[int, int, float]:
     absolute = np.abs(residuals)
     static_mask = np.isfinite(absolute) & (absolute <= threshold)
-    fallback_static_mask = static_mask & np.asarray(fallback_mask, dtype=bool)
-    temporal_static_mask = static_mask & ~fallback_static_mask
 
     total = int(len(xy))
     selected = int(np.count_nonzero(static_mask))
@@ -693,30 +579,18 @@ def plot_bev(
         )
 
     # 蓝色：距离差分估速成功解折叠后判定为 Static 的点
-    if np.any(temporal_static_mask):
+    if np.any(static_mask):
         ax.scatter(
-            display_x[temporal_static_mask],
-            display_y[temporal_static_mask],
+            display_x[static_mask],
+            display_y[static_mask],
             s=static_point_size,
             c="tab:blue",
             alpha=0.95,
             linewidths=0,
-            label=r"Range-difference static: $|r|\leq\tau_s$",
+            label=r"Range-difference + Doppler-unwrapped static: $|r|\leq\tau_s$",
             rasterized=True,
         )
 
-    # 青色：距离差分未解出，但世界坐标稳定且 wrapped residual 接近零。
-    if np.any(fallback_static_mask):
-        ax.scatter(
-            display_x[fallback_static_mask],
-            display_y[fallback_static_mask],
-            s=static_point_size,
-            c="tab:cyan",
-            alpha=0.95,
-            linewidths=0,
-            label="World-stable static prefilter",
-            rasterized=True,
-        )
 
     # 横轴现在是 -y：
     # 左边 = vehicle left
@@ -743,7 +617,6 @@ def plot_bev(
     ax.set_title(
         rf"$\tau_s$ = {threshold:.2f} m/s"
         f"\nStatic: {selected}/{total} ({100.0 * ratio:.1f}%)"
-        f" | prefilter {int(np.count_nonzero(fallback_static_mask))}"
         f" | unresolved {int(np.count_nonzero(unknown_mask))}"
     )
 
@@ -867,22 +740,15 @@ def main() -> None:
     unwrapper = build_velocity_unwrapper(
         args, radar_cfg, doppler_classifier.motion_cfg,
     )
-    static_prefilter = WorldStaticPreclassifier(
-        window_size=args.fallback_static_window,
-        min_support=args.fallback_static_min_support,
-        match_radius_m=args.fallback_static_match_radius_m,
-        wrapped_threshold_mps=max(args.thresholds),
-        enabled=not args.disable_static_prefilter,
-    )
     wrapped_residuals_all = doppler_classifier.residuals_with_velocity(
         reliable_detections, ego_motion.linear_velocity_radar_mps,
     )
     analysis_summary = None
     if unwrapper is None:
         residuals_all = wrapped_residuals_all
-        fallback_mask_all = np.zeros(len(reliable_detections), dtype=bool)
-        world_support_all = np.ones(len(reliable_detections), dtype=np.int16)
     else:
+        # Warm up the cross-frame tracker with every preceding reliable frame.
+        # No wrapped-Doppler static gate is applied before association.
         target_index = pose_reader.frame_index(str(args.token))
         for history_info in ordered_scene_infos(infos, args.scene):
             history_token = str(history_info["lidar_token"])
@@ -898,28 +764,15 @@ def main() -> None:
                 pose_reader, pose_estimator, str(args.scene),
                 history_token, args.pose_dt_s,
             )
-            history_wrapped = doppler_classifier.residuals_with_velocity(
-                history_detections, history_motion.linear_velocity_radar_mps,
-            )
-            history_static, _ = static_prefilter.update(
-                history_detections, history_motion, history_wrapped,
-            )
             unwrapper.update(
                 history_detections, history_motion, history_token,
-                excluded_mask=history_static,
             )
-        static_mask_all, world_support_all = static_prefilter.update(
-            reliable_detections, ego_motion, wrapped_residuals_all,
-        )
         temporal_residuals_all, _ = unwrapper.update(
             reliable_detections, ego_motion, str(args.token),
-            excluded_mask=static_mask_all,
         )
         residuals_all = temporal_residuals_all
-        fallback_mask_all = static_mask_all
         analysis_summary = velocity_source_summary(
             unwrapper, temporal_residuals_all,
-            static_mask_all, world_support_all,
         )
 
     xyz = np.asarray(
@@ -941,8 +794,6 @@ def main() -> None:
 
     xyz_roi = xyz[in_roi]
     residuals = residuals_all[in_roi]
-    fallback_mask = fallback_mask_all[in_roi]
-    world_support = world_support_all[in_roi]
     xy = xyz_roi[:, :2]
 
     camera_dir = resolve_camera_dir(camera_root, str(args.scene))
@@ -973,7 +824,6 @@ def main() -> None:
             ax=ax,
             xy=xy,
             residuals=residuals,
-            fallback_mask=fallback_mask,
             threshold=float(threshold),
             grid=grid_cfg,
             all_point_size=args.all_point_size,
@@ -1012,13 +862,6 @@ def main() -> None:
     print("Static-threshold qualitative visualization")
     print(f"  velocity mode: {args.velocity_unwrapping}")
     print(f"  unresolved ROI: {int(np.count_nonzero(~np.isfinite(residuals)))}")
-    print(f"  prefilter ROI : {int(np.count_nonzero(fallback_mask))}")
-    if len(world_support):
-        print(
-            "  world support : "
-            f"median={float(np.median(world_support)):.1f}, "
-            f"max={int(np.max(world_support))}"
-        )
     print(f"  scene       : {args.scene}")
     print(f"  token       : {args.token}")
     print(f"  radar       : {radar_path}")
