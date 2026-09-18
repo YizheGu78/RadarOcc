@@ -49,6 +49,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--unwrap-cluster-radius-m", type=float, default=1.5)
     parser.add_argument("--annotation", type=Path, required=True)
     parser.add_argument("--radar-root", type=Path, required=True)
+    parser.add_argument(
+        "--calib-root",
+        type=Path,
+        default=Path("data/K-Radar_calib"),
+        help="Root containing each scene's info_calib/calib_radar_lidar.txt.",
+    )
     parser.add_argument("--pose-root", type=Path, required=True)
     parser.add_argument("--output-model", type=Path, required=True)
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
@@ -109,6 +115,12 @@ def main() -> None:
     ) if args.velocity_unwrapping == "range-kalman" else None)
     repo_root = args.repo_root.expanduser().resolve()
     radar_root = args.radar_root.expanduser().resolve()
+    calib_root = args.calib_root.expanduser()
+    calib_root = (
+        calib_root.resolve()
+        if calib_root.is_absolute()
+        else (repo_root / calib_root).resolve()
+    )
     gt_root = args.gt_root.expanduser().resolve() if args.gt_root else None
     motion_cfg = MotionConfig(
         static_residual_threshold_mps=args.static_residual_threshold_mps,
@@ -182,7 +194,9 @@ def main() -> None:
             if unwrapper is not None:
                 unwrapper.reset()
             active_scene = scene
-        radar_path = _resolve_rpc_radar(info, repo_root, radar_root)
+        radar_path = _resolve_rpc_radar(
+            info, repo_root, radar_root, calib_root
+        )
         gt_path = _resolve_gt(info, repo_root, gt_root)
         ego = _ego_motion(pose_reader, pose_estimator, scene, token)
         raw = detector.detect(reader.read(radar_path))
