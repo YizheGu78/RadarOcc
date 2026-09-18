@@ -37,12 +37,18 @@ from tradition.motion.pose_ego_motion import PoseEgoMotionEstimator
 
 def add_velocity_arguments(parser):
     parser.add_argument(
-        "--velocity-unwrapping", choices=("off", "range-kalman"),
-        default="range-kalman",
-        help="Use range-only KF history by default; off shows wrapped residuals.",
+        "--velocity-unwrapping", choices=("off", "range-difference"),
+        default="range-difference",
+        help=(
+            "Estimate target velocity from cross-frame world-position "
+            "differences and solve integer k; off shows wrapped residuals."
+        ),
     )
-    parser.add_argument("--unwrap-range-std-m", type=float, default=0.20)
     parser.add_argument("--unwrap-cluster-radius-m", type=float, default=1.5)
+    parser.add_argument("--range-difference-association-radius-m", type=float, default=1.0)
+    parser.add_argument("--range-difference-history", type=int, default=3)
+    parser.add_argument("--range-difference-max-speed-mps", type=float, default=40.0)
+    parser.add_argument("--range-difference-max-error-mps", type=float, default=0.80)
     parser.add_argument("--fallback-static-window", type=int, default=5)
     parser.add_argument("--fallback-static-min-support", type=int, default=3)
     parser.add_argument("--fallback-static-match-radius-m", type=float, default=0.60)
@@ -53,18 +59,247 @@ def add_velocity_arguments(parser):
     )
 
 
+class RangeDifferenceUnwrapper:
+    """Non-Kalman ambiguity resolution from cross-frame cluster displacement."""
+
+    def __init__(
+        self, radar_cfg, motion_cfg, frame_dt_s=0.10,
+        cluster_radius_m=1.5, association_radius_m=1.0,
+        history_size=3, min_cluster_points=2,
+        max_speed_mps=40.0, max_doppler_error_mps=0.80,
+    ):
+        if frame_dt_s <= 0.0:
+            raise ValueError("frame_dt_s must be positive")
+        if cluster_radius_m <= 0.0 or association_radius_m <= 0.0:
+            raise ValueError("cluster/association radii must be positive")
+        if history_size < 2:
+            raise ValueError("range-difference history must be >= 2")
+        if max_speed_mps <= 0.0 or max_doppler_error_mps <= 0.0:
+            raise ValueError("speed/error gates must be positive")
+        self.radar_cfg = radar_cfg
+        self.motion_cfg = motion_cfg
+        self.frame_dt_s = float(frame_dt_s)
+        self.cluster_radius_m = float(cluster_radius_m)
+        self.association_radius_m = float(association_radius_m)
+        self.history_size = int(history_size)
+        self.min_cluster_points = int(min_cluster_points)
+        self.max_speed_mps = float(max_speed_mps)
+        self.max_doppler_error_mps = float(max_doppler_error_mps)
+        self.max_gap_s = max(0.5, 2.5 * self.frame_dt_s)
+        self.radar_to_lidar_rotation = np.asarray(
+            PoseConfig().radar_to_lidar_rotation, dtype=np.float64
+        )
+        self.doppler = EgoCompensatedDopplerClassifier(radar_cfg, motion_cfg)
+        self.reset()
+
+    def reset(self):
+        self.tracks = []
+        self.next_id = 0
+        self.last_time = None
+        self.scene = None
+        self.last_diagnostics = {}
+
+    def _clusters(self, detections):
+        xyz = np.asarray(
+            [det.xyz_lidar_m for det in detections], dtype=np.float64
+        ).reshape(-1, 3)
+        valid = np.flatnonzero(np.all(np.isfinite(xyz), axis=1))
+        if not len(valid):
+            return []
+        tree = cKDTree(xyz[valid])
+        unseen = set(range(len(valid)))
+        clusters = []
+        while unseen:
+            seed = min(unseen)
+            unseen.remove(seed)
+            pending, component = [seed], []
+            while pending:
+                local_index = pending.pop()
+                component.append(int(valid[local_index]))
+                for neighbour in tree.query_ball_point(
+                    xyz[valid[local_index]], self.cluster_radius_m
+                ):
+                    if neighbour in unseen:
+                        unseen.remove(neighbour)
+                        pending.append(neighbour)
+            if len(component) >= self.min_cluster_points:
+                clusters.append(np.asarray(sorted(component), dtype=np.int64))
+        return clusters
+
+    @staticmethod
+    def _track_velocity_world(track):
+        history = track["history"]
+        if len(history) < 2:
+            return None
+        times = np.asarray([item[0] for item in history], dtype=np.float64)
+        centers = np.asarray([item[1] for item in history], dtype=np.float64)
+        centered = times - float(np.mean(times))
+        denominator = float(centered @ centered)
+        if denominator <= 1e-9:
+            return None
+        return (centered[:, None] * centers).sum(axis=0) / denominator
+
+    def _predicted_center(self, track, time):
+        previous_time, previous_center = track["history"][-1]
+        velocity = self._track_velocity_world(track)
+        if velocity is None:
+            return previous_center
+        return previous_center + velocity * (time - previous_time)
+
+    def update(self, detections, ego_motion, token):
+        time = RadarOccPoseReader.frame_index(str(token)) * self.frame_dt_s
+        scene = str(token).rsplit("_", 1)[0]
+        if self.scene != scene or (
+            self.last_time is not None and time <= self.last_time
+        ):
+            self.reset()
+        self.scene, self.last_time = scene, time
+        self.tracks = [
+            track for track in self.tracks
+            if time - track["history"][-1][0] <= self.max_gap_s
+        ]
+
+        wrapped = self.doppler.residuals_with_velocity(
+            detections, ego_motion.linear_velocity_radar_mps
+        )
+        output = np.full(len(detections), np.nan, dtype=np.float64)
+        track_ids = np.full(len(detections), -1, dtype=np.int64)
+        ambiguity = [None] * len(detections)
+        temporal_prediction = [None] * len(detections)
+        failure_reason = ["no_cluster"] * len(detections)
+
+        clusters = self._clusters(detections)
+        pose = np.asarray(ego_motion.pose_lidar_to_world, dtype=np.float64)
+        observations = []
+        for indices in clusters:
+            center_lidar = np.median(
+                [detections[index].xyz_lidar_m for index in indices], axis=0
+            )
+            observations.append(
+                pose[:3, :3] @ center_lidar + pose[:3, 3]
+            )
+
+        distances = np.full(
+            (len(self.tracks), len(clusters)), np.inf, dtype=np.float64
+        )
+        for track_index, track in enumerate(self.tracks):
+            dt = time - track["history"][-1][0]
+            predicted_center = self._predicted_center(track, time)
+            gate = self.association_radius_m + self.max_speed_mps * max(dt, 0.0)
+            for cluster_index, center_world in enumerate(observations):
+                distance = float(np.linalg.norm(center_world - predicted_center))
+                if distance <= gate:
+                    distances[track_index, cluster_index] = distance
+
+        assignments = {}
+        if distances.size:
+            nearest_track = np.argmin(distances, axis=0)
+            nearest_cluster = np.argmin(distances, axis=1)
+            for cluster_index, track_index in enumerate(nearest_track):
+                if (
+                    np.isfinite(distances[track_index, cluster_index])
+                    and nearest_cluster[track_index] == cluster_index
+                ):
+                    assignments[cluster_index] = self.tracks[track_index]
+
+        for cluster_index, (indices, center_world) in enumerate(
+            zip(clusters, observations)
+        ):
+            track = assignments.get(cluster_index)
+            had_candidate = (
+                distances.shape[0] > 0
+                and np.any(np.isfinite(distances[:, cluster_index]))
+            )
+            if track is None:
+                track = {"identifier": self.next_id, "history": []}
+                self.next_id += 1
+                self.tracks.append(track)
+                reason = (
+                    "association_ambiguous_or_unmatched"
+                    if had_candidate else "new_track"
+                )
+            else:
+                reason = "insufficient_history"
+
+            track["history"].append((time, center_world.copy()))
+            track["history"] = track["history"][-self.history_size:]
+            track_ids[indices] = track["identifier"]
+            for index in indices:
+                failure_reason[index] = reason
+
+            velocity_world = self._track_velocity_world(track)
+            if velocity_world is None:
+                continue
+            speed = float(np.linalg.norm(velocity_world))
+            if not np.isfinite(speed) or speed > self.max_speed_mps:
+                for index in indices:
+                    failure_reason[index] = "temporal_speed_gate_failed"
+                continue
+
+            velocity_lidar = pose[:3, :3].T @ velocity_world
+            velocity_radar = self.radar_to_lidar_rotation.T @ velocity_lidar
+            for index in indices:
+                point_radar = np.asarray(
+                    detections[index].xyz_radar_m, dtype=np.float64
+                )
+                distance = float(np.linalg.norm(point_radar))
+                if distance <= 1e-9:
+                    failure_reason[index] = "invalid_line_of_sight"
+                    continue
+                line_of_sight = point_radar / distance
+                predicted = -self.motion_cfg.stationary_velocity_sign * float(
+                    velocity_radar @ line_of_sight
+                )
+                temporal_prediction[index] = predicted
+                value = wrapped[index]
+                if not np.isfinite(value):
+                    failure_reason[index] = "invalid_wrapped_residual"
+                    continue
+                period = self.radar_cfg.doppler_period_mps
+                k = int(np.rint((predicted - value) / period))
+                candidate = value + k * period
+                if (
+                    abs(candidate) > self.max_speed_mps
+                    or abs(candidate - predicted) > self.max_doppler_error_mps
+                ):
+                    failure_reason[index] = "doppler_gate_failed"
+                    continue
+                output[index] = candidate
+                ambiguity[index] = k
+                failure_reason[index] = "resolved"
+
+        self.last_diagnostics = {
+            "method": "range_difference_position_history",
+            "token": str(token),
+            "doppler_period_mps": self.radar_cfg.doppler_period_mps,
+            "track_ids": track_ids.tolist(),
+            "ambiguity_k": ambiguity,
+            "wrapped_residual_mps": [
+                float(value) if np.isfinite(value) else None for value in wrapped
+            ],
+            "temporal_prediction_mps": temporal_prediction,
+            "unwrapped_residual_mps": [
+                float(value) if np.isfinite(value) else None for value in output
+            ],
+            "failure_reason": failure_reason,
+            "resolved_count": int(np.count_nonzero(np.isfinite(output))),
+            "unresolved_count": int(np.count_nonzero(~np.isfinite(output))),
+        }
+        return output, None
+
+
 def build_velocity_unwrapper(args, radar_cfg, motion_cfg):
     if args.velocity_unwrapping == "off":
         return None
-    from tradition.core.config import UnwrappingConfig
-    from tradition.motion.range_kalman import RangeKalmanUnwrapper
-    return RangeKalmanUnwrapper(
-        radar_cfg=radar_cfg, motion_cfg=motion_cfg,
-        config=UnwrappingConfig(
-            frame_dt_s=args.pose_dt_s,
-            range_std_m=args.unwrap_range_std_m,
-            cluster_radius_m=args.unwrap_cluster_radius_m,
-        ),
+    return RangeDifferenceUnwrapper(
+        radar_cfg=radar_cfg,
+        motion_cfg=motion_cfg,
+        frame_dt_s=args.pose_dt_s,
+        cluster_radius_m=args.unwrap_cluster_radius_m,
+        association_radius_m=args.range_difference_association_radius_m,
+        history_size=args.range_difference_history,
+        max_speed_mps=args.range_difference_max_speed_mps,
+        max_doppler_error_mps=args.range_difference_max_error_mps,
     )
 
 
@@ -95,15 +330,11 @@ def save_velocity_diagnostics(path, unwrapper, analysis_summary=None):
 
 
 class WorldStaticFallback:
-    """Causal fallback for stable structure when Range-Kalman is unresolved."""
+    """Preserve world-stable structure when temporal unwrapping is unresolved."""
 
     def __init__(
-        self,
-        window_size=5,
-        min_support=3,
-        match_radius_m=0.60,
-        wrapped_threshold_mps=0.50,
-        enabled=True,
+        self, window_size=5, min_support=3, match_radius_m=0.60,
+        wrapped_threshold_mps=0.50, enabled=True,
     ):
         if window_size < 2:
             raise ValueError("fallback window_size must be >= 2")
@@ -118,18 +349,16 @@ class WorldStaticFallback:
         self.enabled = bool(enabled)
         self.history = deque(maxlen=self.window_size - 1)
 
-    def update(self, detections, ego_motion, wrapped_residuals, kalman_residuals):
+    def update(self, detections, ego_motion, wrapped_residuals, temporal_residuals):
         wrapped = np.asarray(wrapped_residuals, dtype=np.float64)
-        kalman = np.asarray(kalman_residuals, dtype=np.float64)
-        if wrapped.shape != kalman.shape or wrapped.shape != (len(detections),):
+        temporal = np.asarray(temporal_residuals, dtype=np.float64)
+        if wrapped.shape != temporal.shape or wrapped.shape != (len(detections),):
             raise ValueError("Fallback residual arrays must match detections.")
-
         xyz_lidar = np.asarray(
             [det.xyz_lidar_m for det in detections], dtype=np.float64
         ).reshape(-1, 3)
         pose = np.asarray(ego_motion.pose_lidar_to_world, dtype=np.float64)
         world_xyz = xyz_lidar @ pose[:3, :3].T + pose[:3, 3]
-
         support = np.ones(len(detections), dtype=np.int16)
         finite_current = np.all(np.isfinite(world_xyz), axis=1)
         for previous_world in self.history:
@@ -141,60 +370,44 @@ class WorldStaticFallback:
             support[finite_current] += (
                 distances <= self.match_radius_m
             ).astype(np.int16)
-
         stable_world = finite_current & (support >= self.min_support)
         fallback_mask = (
             self.enabled
-            & ~np.isfinite(kalman)
+            & ~np.isfinite(temporal)
             & stable_world
             & np.isfinite(wrapped)
             & (np.abs(wrapped) <= self.wrapped_threshold_mps)
         )
-        combined = kalman.copy()
+        combined = temporal.copy()
         combined[fallback_mask] = wrapped[fallback_mask]
-
         self.history.append(world_xyz[finite_current].copy())
         return combined, fallback_mask, support
 
 
 def velocity_source_summary(
-    unwrapper,
-    kalman_residuals,
-    fallback_mask,
-    support,
+    unwrapper, temporal_residuals, fallback_mask, support,
 ):
     diagnostics = unwrapper.last_diagnostics
-    kalman = np.asarray(kalman_residuals, dtype=np.float64)
+    temporal = np.asarray(temporal_residuals, dtype=np.float64)
     fallback = np.asarray(fallback_mask, dtype=bool)
-    track_ids = np.asarray(diagnostics["track_ids"], dtype=np.int64)
-    has_prediction = np.asarray(
-        [value is not None for value in diagnostics["kf_residual_mps"]],
-        dtype=bool,
-    )
-    kalman_resolved = np.isfinite(kalman)
-    no_cluster = track_ids < 0
-    no_prediction = (track_ids >= 0) & ~has_prediction & ~kalman_resolved
-    doppler_gate_failed = has_prediction & ~kalman_resolved
+    reasons = np.asarray(diagnostics["failure_reason"], dtype=object)
+    reason_counts = {
+        str(reason): int(count)
+        for reason, count in zip(*np.unique(reasons, return_counts=True))
+    }
     return {
-        "kalman_resolved_count": int(np.count_nonzero(kalman_resolved)),
+        "range_difference_resolved_count": int(
+            np.count_nonzero(np.isfinite(temporal))
+        ),
         "stable_wrapped_fallback_count": int(np.count_nonzero(fallback)),
         "unresolved_after_fallback_count": int(
-            np.count_nonzero(~kalman_resolved & ~fallback)
+            np.count_nonzero(~np.isfinite(temporal) & ~fallback)
         ),
-        "no_cluster_count": int(np.count_nonzero(no_cluster)),
-        "track_not_ready_or_range_check_or_reassociation_count": int(
-            np.count_nonzero(no_prediction)
-        ),
-        "doppler_gate_failed_count": int(np.count_nonzero(doppler_gate_failed)),
+        "range_difference_failure_reasons": reason_counts,
         "world_support_histogram": {
             str(value): int(count)
             for value, count in zip(*np.unique(support, return_counts=True))
         },
-        "note": (
-            "The current RangeKalman diagnostics cannot separate immature "
-            "tracks, range-check rejection, and ambiguous reassociation; "
-            "those cases share the combined count above."
-        ),
     }
 
 
@@ -394,7 +607,7 @@ def plot_bev(
     absolute = np.abs(residuals)
     static_mask = np.isfinite(absolute) & (absolute <= threshold)
     fallback_static_mask = static_mask & np.asarray(fallback_mask, dtype=bool)
-    kalman_static_mask = static_mask & ~fallback_static_mask
+    temporal_static_mask = static_mask & ~fallback_static_mask
 
     total = int(len(xy))
     selected = int(np.count_nonzero(static_mask))
@@ -437,20 +650,20 @@ def plot_bev(
             linewidths=0.7, label="Unresolved velocity", rasterized=True,
         )
 
-    # 蓝色：Range-Kalman 成功解折叠后判定为 Static 的点
-    if np.any(kalman_static_mask):
+    # 蓝色：距离差分估速成功解折叠后判定为 Static 的点
+    if np.any(temporal_static_mask):
         ax.scatter(
-            display_x[kalman_static_mask],
-            display_y[kalman_static_mask],
+            display_x[temporal_static_mask],
+            display_y[temporal_static_mask],
             s=static_point_size,
             c="tab:blue",
             alpha=0.95,
             linewidths=0,
-            label=r"Kalman static: $|r|\leq\tau_s$",
+            label=r"Range-difference static: $|r|\leq\tau_s$",
             rasterized=True,
         )
 
-    # 青色：Kalman 未解出，但世界坐标稳定且 wrapped residual 接近零。
+    # 青色：距离差分未解出，但世界坐标稳定且 wrapped residual 接近零。
     if np.any(fallback_static_mask):
         ax.scatter(
             display_x[fallback_static_mask],
@@ -646,22 +859,22 @@ def main() -> None:
             history_wrapped = doppler_classifier.residuals_with_velocity(
                 history_detections, history_motion.linear_velocity_radar_mps,
             )
-            history_kalman, _ = unwrapper.update(
+            history_temporal, _ = unwrapper.update(
                 history_detections, history_motion, history_token
             )
             static_fallback.update(
                 history_detections, history_motion,
-                history_wrapped, history_kalman,
+                history_wrapped, history_temporal,
             )
-        kalman_residuals_all, _ = unwrapper.update(
+        temporal_residuals_all, _ = unwrapper.update(
             reliable_detections, ego_motion, str(args.token),
         )
         residuals_all, fallback_mask_all, world_support_all = static_fallback.update(
             reliable_detections, ego_motion,
-            wrapped_residuals_all, kalman_residuals_all,
+            wrapped_residuals_all, temporal_residuals_all,
         )
         analysis_summary = velocity_source_summary(
-            unwrapper, kalman_residuals_all,
+            unwrapper, temporal_residuals_all,
             fallback_mask_all, world_support_all,
         )
 
