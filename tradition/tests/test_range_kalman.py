@@ -3,7 +3,7 @@ from dataclasses import replace
 
 import numpy as np
 
-from tradition.core.config import MotionConfig, UnwrappingConfig
+from tradition.core.config import MotionConfig, TemporalConfig, UnwrappingConfig
 from tradition.core.geometry import wrapped_velocity_residual
 from tradition.core.types import DopplerEvidence, EgoMotion, MotionLabel, TemporalDetectionFrame
 from tradition.motion.range_kalman import RangeKalmanUnwrapper
@@ -85,13 +85,29 @@ class RangeKalmanTests(unittest.TestCase):
         self.assertEqual(evidence.tolist(), [0, 0])
 
     def test_uncertain_and_dynamic_not_overridden_by_static_neighbours(self):
-        temporal = PoseAlignedTemporalClassifier()
+        temporal = PoseAlignedTemporalClassifier(
+            temporal_cfg=TemporalConfig(min_dynamic_support=1)
+        )
         detections = [_detection((10., 0., 0.)), _detection((10., .1, 0.)), _detection((10., .2, 0.))]
         frame = TemporalDetectionFrame('3_00000', _pose(), detections,
                                       np.array([0., np.nan, -19.6]), np.array([1, 0, -1]))
         result = temporal.update(frame)
-        self.assertEqual(result.current_indices.tolist(), [0, 2])
-        self.assertEqual(result.current_motion_labels, [MotionLabel.STATIC, MotionLabel.DYNAMIC])
+        self.assertEqual(result.current_indices.tolist(), [2])
+        self.assertEqual(result.current_motion_labels, [MotionLabel.MOTION])
+        self.assertEqual(result.unknown_indices.tolist(), [0, 1])
+
+    def test_persistent_points_are_excluded_from_velocity_tracking(self):
+        tracker = RangeKalmanUnwrapper()
+        detections, ego = observation(0)
+        values, evidence = tracker.update(
+            detections,
+            ego,
+            "3_00000",
+            excluded_mask=np.array([True, False]),
+        )
+        self.assertEqual(values[0], 0.0)
+        self.assertEqual(evidence[0], 1)
+        self.assertEqual(tracker.last_diagnostics["persistent_excluded_count"], 1)
 
     def test_high_uncertainty_does_not_force_an_alias(self):
         tracker = RangeKalmanUnwrapper(config=UnwrappingConfig(velocity_floor_std_mps=2.))

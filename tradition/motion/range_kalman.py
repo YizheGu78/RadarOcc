@@ -42,11 +42,19 @@ class RangeKalmanUnwrapper:
         self.scene = None
         self.last_diagnostics = {}
 
-    def _clusters(self, detections):
-        # Spatial connected components; every reliable point participates,
-        # including points with small wrapped residual. No Doppler pre-gate.
+    def _clusters(self, detections, excluded_mask=None):
+        # Spatial connected components for the non-persistent complement.
+        # Persistent occupancy is established before this velocity stage and
+        # must not bias cluster centres or create stationary KF tracks.
         xyz = np.asarray([d.xyz_lidar_m for d in detections]).reshape(-1, 3)
-        valid = np.flatnonzero(np.all(np.isfinite(xyz), axis=1))
+        excluded = (
+            np.zeros(len(detections), dtype=bool)
+            if excluded_mask is None
+            else np.asarray(excluded_mask, dtype=bool)
+        )
+        if excluded.shape != (len(detections),):
+            raise ValueError("excluded_mask must match detections.")
+        valid = np.flatnonzero(np.all(np.isfinite(xyz), axis=1) & ~excluded)
         if not len(valid):
             return []
         tree = cKDTree(xyz[valid])
@@ -101,7 +109,13 @@ class RangeKalmanUnwrapper:
             track.covariance[:2, :2] = cfg.range_std_m**2 * np.linalg.inv(design.T @ design)
             track.covariance[2, 2] = cfg.initial_acceleration_std_mps2**2
 
-    def update(self, detections: list[RadarDetection], ego: EgoMotion, token: str):
+    def update(
+        self,
+        detections: list[RadarDetection],
+        ego: EgoMotion,
+        token: str,
+        excluded_mask=None,
+    ):
         cfg = self.config
         time = RadarOccPoseReader.frame_index(token) * cfg.frame_dt_s
         scene = str(token).rsplit('_', 1)[0]
@@ -115,7 +129,16 @@ class RangeKalmanUnwrapper:
         ids = np.full(len(detections), -1, dtype=int)
         ambiguity = [None] * len(detections)
         kf_prediction = [None] * len(detections)
-        clusters = self._clusters(detections)
+        excluded = (
+            np.zeros(len(detections), dtype=bool)
+            if excluded_mask is None
+            else np.asarray(excluded_mask, dtype=bool)
+        )
+        if excluded.shape != (len(detections),):
+            raise ValueError("excluded_mask must match detections.")
+        output[excluded] = 0.0
+        evidence[excluded] = int(DopplerEvidence.STATIC)
+        clusters = self._clusters(detections, excluded)
         observations = []
         for indices in clusters:
             center_lidar = np.median([detections[i].xyz_lidar_m for i in indices], axis=0)
@@ -202,6 +225,9 @@ class RangeKalmanUnwrapper:
             'wrapped_residual_mps': [float(x) if np.isfinite(x) else None for x in wrapped],
             'kf_residual_mps': kf_prediction,
             'unwrapped_residual_mps': [float(x) if np.isfinite(x) else None for x in output],
+            'persistent_excluded_count': int(excluded.sum()),
+            'resolved_motion_count': int(np.isfinite(output[~excluded]).sum()),
+            'unresolved_motion_count': int((~np.isfinite(output[~excluded])).sum()),
             'resolved_count': int(np.isfinite(output).sum()),
             'unresolved_count': int((~np.isfinite(output)).sum()),
         }

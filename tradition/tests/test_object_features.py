@@ -19,7 +19,7 @@ from tradition.semantics.cluster_geometry import (
 
 
 LEGACY_FEATURE_NAMES = (
-    "branch_dynamic", "point_count", "log_point_count", "unique_xy_cells",
+    "source_motion", "point_count", "log_point_count", "unique_xy_cells",
     "extent_x_m", "extent_y_m", "extent_z_m", "xy_diagonal_m",
     "bbox_area_m2", "bbox_volume_m3", "hull_area_m2", "hull_perimeter_m",
     "point_density_m2", "cov_major_m2", "cov_minor_m2", "linearity",
@@ -27,7 +27,7 @@ LEGACY_FEATURE_NAMES = (
     "doppler_residual_mean_mps", "doppler_residual_std_mps",
     "doppler_residual_min_mps", "doppler_residual_max_mps",
     "doppler_residual_abs_mean_mps", "range_mean_m", "range_std_m",
-    "dynamic_fraction",
+    "motion_fraction",
 )
 
 ADDED_FEATURE_NAMES = (
@@ -67,8 +67,8 @@ def _rectangle():
     ]
 
 
-def _features(detections, branch="static"):
-    motion = MotionLabel.DYNAMIC if branch == "dynamic" else MotionLabel.STATIC
+def _features(detections, branch="persistent"):
+    motion = MotionLabel.MOTION if branch == "motion" else MotionLabel.PERSISTENT
     features = RadarObjectFeatureExtractor().extract(
         detections, [motion] * len(detections), np.arange(len(detections)), branch
     )
@@ -214,7 +214,10 @@ def test_both_candidate_branches_use_the_same_42_feature_extractor():
         (0, 0), (0.4, 0), (0, 0.4), (0.4, 0.4)
     )]
     extractor = DualBranchCandidateExtractor(ObjectClusteringConfig())
-    for motion, branch in ((MotionLabel.STATIC, "static"), (MotionLabel.DYNAMIC, "dynamic")):
+    for motion, branch in (
+        (MotionLabel.PERSISTENT, "persistent"),
+        (MotionLabel.MOTION, "motion"),
+    ):
         labels = [motion] * len(base)
         candidates = extractor.extract(base, labels)
         assert len(candidates) == 1

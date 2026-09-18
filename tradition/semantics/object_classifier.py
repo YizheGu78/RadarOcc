@@ -16,7 +16,7 @@ from tradition.semantics.cluster_geometry import (
 
 
 FEATURE_NAMES = (
-    "branch_dynamic",
+    "source_motion",
     "point_count",
     "log_point_count",
     "unique_xy_cells",
@@ -43,7 +43,7 @@ FEATURE_NAMES = (
     "doppler_residual_abs_mean_mps",
     "range_mean_m",
     "range_std_m",
-    "dynamic_fraction",
+    "motion_fraction",
     "range_compensated_point_count",
     "power_span",
     "oriented_bbox_perimeter_m",
@@ -77,7 +77,7 @@ def _safe_correlation(first: np.ndarray, second: np.ndarray) -> float:
 
 @dataclass(frozen=True)
 class ObjectCandidate:
-    """One stationary-OGM or moving-DBSCAN object proposal."""
+    """One persistent-grid or motion-confirmed DBSCAN proposal."""
 
     indices: np.ndarray
     branch: str
@@ -126,7 +126,7 @@ class RadarObjectFeatureExtractor:
 
     Callers supply ego-compensated wrapped residuals in ``radial_velocity_mps``.
     Geometry/height use pose-aligned ``xyz_lidar_m``. Range and elevation remain
-    each point's original radar measurement, also for aligned static history.
+    each point's original radar measurement, also for aligned persistent history.
     """
 
     feature_names = FEATURE_NAMES
@@ -176,8 +176,8 @@ class RadarObjectFeatureExtractor:
             principal_spreads = np.zeros(2)
         linearity = 0.0 if major <= 1e-9 else 1.0 - minor / major
         density_area = max(hull_area, self.cell_size_m**2)
-        dynamic_fraction = sum(
-            label == MotionLabel.DYNAMIC for label in labels
+        motion_fraction = sum(
+            label == MotionLabel.MOTION for label in labels
         ) / len(labels)
         residual_spread = float(np.ptp(residual)) + DOPPLER_SPREAD_EPS_MPS
         center = np.mean(xy, axis=0)
@@ -185,7 +185,7 @@ class RadarObjectFeatureExtractor:
 
         features = np.asarray(
             [
-                float(branch == "dynamic"),
+                float(branch in {"motion", "dynamic"}),
                 float(len(selected)),
                 float(np.log1p(len(selected))),
                 float(unique_cells),
@@ -212,7 +212,7 @@ class RadarObjectFeatureExtractor:
                 float(np.mean(np.abs(residual))),
                 float(np.mean(ranges)),
                 float(np.std(ranges)),
-                float(dynamic_fraction),
+                float(motion_fraction),
                 float(len(selected) * np.mean(ranges)),
                 float(np.ptp(power)),
                 minimum_area_bbox_perimeter(hull),
@@ -235,8 +235,8 @@ class RadarObjectFeatureExtractor:
         return np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
 
 
-class DualBranchCandidateExtractor:
-    """Stationary OGM connected components plus moving XYZ DBSCAN."""
+class OccupancyFirstCandidateExtractor:
+    """Persistent OGM components plus motion-confirmed XYZ DBSCAN."""
 
     def __init__(self, config: ObjectClusteringConfig | None = None) -> None:
         self.config = config or ObjectClusteringConfig()
@@ -249,17 +249,17 @@ class DualBranchCandidateExtractor:
     ) -> list[ObjectCandidate]:
         if len(detections) != len(motion_labels):
             raise ValueError("detections and motion_labels must have equal length.")
-        return self._static_candidates(detections, motion_labels) + self._dynamic_candidates(
+        return self._persistent_candidates(detections, motion_labels) + self._motion_candidates(
             detections, motion_labels
         )
 
-    def _static_candidates(
+    def _persistent_candidates(
         self,
         detections: Sequence[RadarDetection],
         motion_labels: Sequence[MotionLabel],
     ) -> list[ObjectCandidate]:
         indices = np.asarray(
-            [i for i, label in enumerate(motion_labels) if label == MotionLabel.STATIC],
+            [i for i, label in enumerate(motion_labels) if label == MotionLabel.PERSISTENT],
             dtype=np.int64,
         )
         if indices.size == 0:
@@ -317,21 +317,21 @@ class DualBranchCandidateExtractor:
             candidates.append(
                 ObjectCandidate(
                     indices=member_array,
-                    branch="static",
+                    branch="persistent",
                     features=self.features.extract(
-                        detections, motion_labels, member_array, "static"
+                        detections, motion_labels, member_array, "persistent"
                     ),
                 )
             )
         return candidates
 
-    def _dynamic_candidates(
+    def _motion_candidates(
         self,
         detections: Sequence[RadarDetection],
         motion_labels: Sequence[MotionLabel],
     ) -> list[ObjectCandidate]:
         indices = np.asarray(
-            [i for i, label in enumerate(motion_labels) if label == MotionLabel.DYNAMIC],
+            [i for i, label in enumerate(motion_labels) if label == MotionLabel.MOTION],
             dtype=np.int64,
         )
         if indices.size < self.config.dynamic_min_points:
@@ -351,9 +351,9 @@ class DualBranchCandidateExtractor:
             candidates.append(
                 ObjectCandidate(
                     indices=members,
-                    branch="dynamic",
+                    branch="motion",
                     features=self.features.extract(
-                        detections, motion_labels, members, "dynamic"
+                        detections, motion_labels, members, "motion"
                     ),
                 )
             )
@@ -403,7 +403,7 @@ class ObjectAwareSemanticClassifier(SemanticClassifier):
     def __init__(self, estimator: Any, config: ObjectClusteringConfig | None = None) -> None:
         self.estimator = estimator
         self.config = config or ObjectClusteringConfig()
-        self.candidates = DualBranchCandidateExtractor(self.config)
+        self.candidates = OccupancyFirstCandidateExtractor(self.config)
         self.last_diagnostics: dict[str, Any] = {}
 
     @classmethod
@@ -462,23 +462,23 @@ class ObjectAwareSemanticClassifier(SemanticClassifier):
             raise ValueError("detections and motion_labels must have equal length.")
         labels = [SemanticLabel.BACKGROUND] * len(detections)
         accepted = np.asarray(
-            [label == MotionLabel.STATIC for label in motion_labels], dtype=bool
+            [label == MotionLabel.PERSISTENT for label in motion_labels], dtype=bool
         )
         candidates = self.candidates.extract(detections, motion_labels)
         probabilities: list[float] = []
         foreground_clusters = 0
-        dynamic_background_fallback_clusters = 0
-        dynamic_background_fallback_points = 0
+        motion_background_fallback_clusters = 0
+        motion_background_fallback_points = 0
         for candidate in candidates:
             probability = self._foreground_probability(candidate.features)
             probabilities.append(probability)
             # Every RF-evaluated proposal participates in occupancy mapping.
-            # A dynamic proposal that is not foreground falls back to background.
+            # A motion proposal that is not foreground falls back to background.
             accepted[candidate.indices] = True
             if probability < self.config.foreground_probability_threshold:
-                if candidate.branch == "dynamic":
-                    dynamic_background_fallback_clusters += 1
-                    dynamic_background_fallback_points += len(candidate.indices)
+                if candidate.branch == "motion":
+                    motion_background_fallback_clusters += 1
+                    motion_background_fallback_points += len(candidate.indices)
                 continue
             foreground_clusters += 1
             for index in candidate.indices:
@@ -491,13 +491,20 @@ class ObjectAwareSemanticClassifier(SemanticClassifier):
         self.last_diagnostics = {
             **persistent,
             "candidate_count": len(candidates),
-            "static_candidate_count": sum(c.branch == "static" for c in candidates),
-            "dynamic_candidate_count": sum(c.branch == "dynamic" for c in candidates),
-            "foreground_cluster_count": foreground_clusters,
-            "dynamic_background_fallback_cluster_count": (
-                dynamic_background_fallback_clusters
+            "persistent_candidate_count": sum(
+                c.branch == "persistent" for c in candidates
             ),
-            "dynamic_background_fallback_point_count": dynamic_background_fallback_points,
+            "motion_candidate_count": sum(c.branch == "motion" for c in candidates),
+            "foreground_cluster_count": foreground_clusters,
+            "motion_background_fallback_cluster_count": (
+                motion_background_fallback_clusters
+            ),
+            "motion_background_fallback_point_count": motion_background_fallback_points,
+            # Legacy diagnostic aliases for existing experiment parsers.
+            "dynamic_background_fallback_cluster_count": (
+                motion_background_fallback_clusters
+            ),
+            "dynamic_background_fallback_point_count": motion_background_fallback_points,
             "mean_foreground_probability": (
                 float(np.mean(probabilities)) if probabilities else float("nan")
             ),
@@ -512,3 +519,8 @@ class ObjectAwareSemanticClassifier(SemanticClassifier):
         if 1 not in classes:
             return 0.0
         return float(probabilities[0, classes.index(1)])
+
+
+# Backward-compatible import name for notebooks/tests. The implementation is
+# occupancy-first; callers should migrate to OccupancyFirstCandidateExtractor.
+DualBranchCandidateExtractor = OccupancyFirstCandidateExtractor

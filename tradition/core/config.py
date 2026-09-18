@@ -133,13 +133,24 @@ class ReliabilityConfig:
 
 @dataclass(frozen=True)
 class TemporalConfig:
-    """Causal temporal consistency settings for pose-aligned RPC frames."""
+    """Occupancy-first temporal classification for pose-aligned RPC frames.
 
-    window_size: int = 3
-    min_static_support: int = 2
+    ``window_size`` is the number of *previous* frames retained. A current
+    return becomes persistent only when its world XY cell was occupied in at
+    least ``min_static_support`` prior frames. Velocity evidence is evaluated
+    only for the complementary, non-persistent points.
+
+    ``static_match_radius_m`` remains as a deprecated constructor field for
+    old experiment configs; persistence now uses the explicit grid settings.
+    """
+
+    window_size: int = 5
+    min_static_support: int = 3
     min_dynamic_support: int = 2
     static_match_radius_m: float = 0.60
     dynamic_match_radius_m: float = 2.00
+    occupancy_cell_size_m: float = 0.40
+    occupancy_dilation_cells: int = 1
 
     def __post_init__(self) -> None:
         if self.window_size < 1:
@@ -154,6 +165,10 @@ class TemporalConfig:
             raise ValueError(
                 "Dynamic match radius must not be smaller than static radius."
             )
+        if self.occupancy_cell_size_m <= 0.0:
+            raise ValueError("Occupancy persistence cell size must be positive.")
+        if self.occupancy_dilation_cells < 0:
+            raise ValueError("Occupancy persistence dilation must be non-negative.")
 
 
 @dataclass(frozen=True)

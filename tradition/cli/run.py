@@ -26,8 +26,15 @@ def parse_args() -> argparse.Namespace:
             "RadarOcc-style metrics and optional video."
         )
     )
-    parser.add_argument("--velocity-unwrapping", choices=("off", "range-kalman"), default="off",
-                        help="Range-only tracking before motion classification; requires RPC poses.")
+    parser.add_argument(
+        "--velocity-unwrapping",
+        choices=("off", "range-kalman"),
+        default="off",
+        help=(
+            "Optional range-only tracking for non-persistent points; "
+            "range-kalman requires RPC poses."
+        ),
+    )
     parser.add_argument("--unwrap-range-std-m", type=float, default=0.20)
     parser.add_argument("--unwrap-cluster-radius-m", type=float, default=1.5)
     parser.add_argument("--annotation", type=Path, required=True)
@@ -119,20 +126,33 @@ def parse_args() -> argparse.Namespace:
             "The supplied K-Radar RPC uses +1. Default: +1."
         ),
     )
-    parser.add_argument("--temporal-window", type=int, default=3)
-    parser.add_argument("--min-static-support", type=int, default=2)
-    parser.add_argument("--min-dynamic-support", type=int, default=2)
+    parser.add_argument("--temporal-window", type=int, default=5)
+    parser.add_argument(
+        "--min-persistent-support",
+        "--min-static-support",
+        dest="min_persistent_support",
+        type=int,
+        default=3,
+    )
+    parser.add_argument(
+        "--min-motion-support",
+        "--min-dynamic-support",
+        dest="min_motion_support",
+        type=int,
+        default=2,
+    )
     parser.add_argument("--static-match-radius-m", type=float, default=0.60)
     parser.add_argument("--dynamic-match-radius-m", type=float, default=2.00)
+    parser.add_argument("--occupancy-cell-size-m", type=float, default=0.40)
+    parser.add_argument("--occupancy-dilation-cells", type=int, default=1)
     parser.add_argument("--min-local-power-ratio", type=float, default=0.25)
     parser.add_argument("--min-local-neighbors", type=int, default=1)
     parser.add_argument(
         "--object-model",
         type=Path,
         help=(
-            "Joblib Random-Forest objectness bundle. When supplied, static "
-            "OGM components and dynamic DBSCAN clusters replace the direct "
-            "static/background, dynamic/foreground semantic rule."
+            "Joblib Random-Forest objectness bundle trained with the current "
+            "persistent-OGM and motion-confirmed DBSCAN feature schema."
         ),
     )
     parser.add_argument("--object-probability-threshold", type=float, default=0.50)
@@ -146,7 +166,12 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--video-scene",
-        help="Also render this scene using the existing RadarOcc overlay style.",
+        help="Also render this scene; branch-comparison is the default layout.",
+    )
+    parser.add_argument(
+        "--video-layout",
+        choices=("branch-comparison", "semantic-overlay"),
+        default="branch-comparison",
     )
     parser.add_argument("--camera-dir", type=Path)
     parser.add_argument("--camera-offset", type=int, default=0)
@@ -189,10 +214,12 @@ def main() -> None:
     )
     temporal_cfg = TemporalConfig(
         window_size=args.temporal_window,
-        min_static_support=args.min_static_support,
-        min_dynamic_support=args.min_dynamic_support,
+        min_static_support=args.min_persistent_support,
+        min_dynamic_support=args.min_motion_support,
         static_match_radius_m=args.static_match_radius_m,
         dynamic_match_radius_m=args.dynamic_match_radius_m,
+        occupancy_cell_size_m=args.occupancy_cell_size_m,
+        occupancy_dilation_cells=args.occupancy_dilation_cells,
     )
     object_cfg = ObjectClusteringConfig(
         static_cell_size_m=args.static_object_cell_size_m,
@@ -236,6 +263,7 @@ def main() -> None:
         ego_speed_mps=args.ego_speed_mps,
         max_frames=args.max_frames,
         video_scene=args.video_scene,
+        video_layout=args.video_layout,
         camera_dir=args.camera_dir,
         camera_offset=args.camera_offset,
         video_background_prediction_root=args.video_background_prediction_root,
@@ -254,4 +282,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

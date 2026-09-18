@@ -10,10 +10,15 @@ ANNOTATION="${ANNOTATION:-$REPO_ROOT/data/annotations/kradar_dict_train_official
 RADAR_ROOT="${RADAR_ROOT:-$REPO_ROOT/data/K-Radar_rpc}"
 CALIB_ROOT="${CALIB_ROOT:-$REPO_ROOT/data/K-Radar_calib}"
 POSE_ROOT="${POSE_ROOT:-$REPO_ROOT/data/K-RadarOcc}"
-OUTPUT_MODEL="${OUTPUT_MODEL:-$REPO_ROOT/work_dirs/traditional_object_classifier/object_random_forest_42d.joblib}"
+OUTPUT_MODEL="${OUTPUT_MODEL:-$REPO_ROOT/work_dirs/traditional_object_classifier/object_random_forest_occupancy_first_42d.joblib}"
 MAX_FRAMES="${MAX_FRAMES:-}"
 POSE_DT_S="${POSE_DT_S:-0.10}"
 TEMPORAL_WINDOW="${TEMPORAL_WINDOW:-5}"
+MIN_PERSISTENT_SUPPORT="${MIN_PERSISTENT_SUPPORT:-3}"
+MIN_MOTION_SUPPORT="${MIN_MOTION_SUPPORT:-2}"
+OCCUPANCY_CELL_SIZE_M="${OCCUPANCY_CELL_SIZE_M:-0.40}"
+OCCUPANCY_DILATION_CELLS="${OCCUPANCY_DILATION_CELLS:-1}"
+VELOCITY_UNWRAPPING="${VELOCITY_UNWRAPPING:-range-kalman}"
 N_ESTIMATORS="${N_ESTIMATORS:-200}"
 
 fail() {
@@ -61,6 +66,11 @@ PYTHONPATH="$REPO_ROOT" python -u -m tradition.cli.train_object_classifier \
     --pose-dt-s "$POSE_DT_S" \
     --output-model "$OUTPUT_MODEL" \
     --temporal-window "$TEMPORAL_WINDOW" \
+    --min-persistent-support "$MIN_PERSISTENT_SUPPORT" \
+    --min-motion-support "$MIN_MOTION_SUPPORT" \
+    --occupancy-cell-size-m "$OCCUPANCY_CELL_SIZE_M" \
+    --occupancy-dilation-cells "$OCCUPANCY_DILATION_CELLS" \
+    --velocity-unwrapping "$VELOCITY_UNWRAPPING" \
     --n-estimators "$N_ESTIMATORS" \
     "${FRAME_ARGS[@]}"
 

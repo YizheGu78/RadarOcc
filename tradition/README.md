@@ -22,11 +22,12 @@ indices follow `lidar_token`, not the differently numbered aligned RPC file.
 ```text
 RPC [N,11]
     -> local polar-neighbour power/reliability filtering
-    -> adjacent LiDAR poses produce vx, vy and yaw rate
-    -> full-vector ego-motion-compensated wrapped Doppler residual
-    -> pose-align a causal five-frame window
-    -> persistent stationary points: 2D OGM + 8-connected components
-       persistent moving points: scaled XYZ DBSCAN
+    -> pose-align prior frames into a fixed world grid
+    -> occupancy persistence first: 3 of the previous 5 frames by default
+    -> persistent points: no target-speed calculation; 2D OGM components
+    -> non-persistent points: selective range-Kalman/Doppler motion evidence
+       confirmed motion: current-frame scaled XYZ DBSCAN
+       unresolved evidence: Unknown, not forced into either branch
     -> cluster geometry/power/compensated-residual features
     -> trained classical Random Forest objectness
     -> object cluster: foreground; other occupied structure: background
@@ -55,7 +56,7 @@ for training and video inference so the serialized estimator stays compatible.
 The default model is written to:
 
 ```text
-work_dirs/traditional_object_classifier/object_random_forest_42d.joblib
+work_dirs/traditional_object_classifier/object_random_forest_occupancy_first_42d.joblib
 ```
 
 The default is `kradar_dict_train_official_doppler8.pkl`. Do not train on
@@ -72,7 +73,7 @@ OUTPUT_MODEL=$PWD/work_dirs/traditional_object_classifier/smoke.joblib \
 ## 42-D cluster features and retraining
 
 Training and inference both call `RadarObjectFeatureExtractor.extract` through
-`DualBranchCandidateExtractor`. `FEATURE_NAMES` is the ordered schema: the
+`OccupancyFirstCandidateExtractor`. `FEATURE_NAMES` is the ordered schema: the
 original 28 entries retain their positions and the following 14 are appended.
 These are cluster-level inputs to the binary objectness Random Forest, not
 new output classes; occupancy output remains free/background/foreground.
@@ -116,11 +117,13 @@ The descriptors are adaptations of feature ideas, not an exact reproduction
 of a published 50-D schema. Additional inputs are not guaranteed to improve
 accuracy; compare with the 28-D baseline on the same held-out sequences.
 
-**Old 28-D model files cannot be used with the 42-D extractor.** Loading an old
-schema raises an explicit retraining error. The training command regenerates
+**Models trained before the occupancy-first change cannot be reused.** The
+first feature is now `source_motion` and the former `dynamic_fraction` is now
+`motion_fraction`; loading an old schema raises an explicit retraining error.
+The training command regenerates
 features from RPC inputs, logs the dimension, and stores `feature_names` plus
 `metadata.feature_count` in the new bundle. The training and video scripts
-default to `object_random_forest_42d.joblib`, leaving the old 28-D file intact
+default to `object_random_forest_occupancy_first_42d.joblib`, leaving old files intact
 for baseline comparisons.
 
 For the video script, select it with `OBJECT_MODEL`; for the Python inference
@@ -143,18 +146,21 @@ python -m tradition.cli.run \
   --output-dir work_dirs/tradition_rpc_pose_smoke \
   --scene 3 \
   --max-frames 3 \
-  --object-model work_dirs/traditional_object_classifier/object_random_forest_42d.joblib \
+  --object-model work_dirs/traditional_object_classifier/object_random_forest_occupancy_first_42d.joblib \
+  --velocity-unwrapping range-kalman \
   --static-residual-threshold-mps 0.50 \
   --dynamic-residual-threshold-mps 0.80 \
   --temporal-window 5 \
-  --min-static-support 2 \
-  --min-dynamic-support 2
+  --min-persistent-support 3 \
+  --min-motion-support 2 \
+  --occupancy-cell-size-m 0.40 \
+  --occupancy-dilation-cells 1
 ```
 
 Complete official-test metrics over **all scenes**, while rendering only Scene 3:
 
 ```bash
-OBJECT_MODEL=$PWD/work_dirs/traditional_object_classifier/object_random_forest_42d.joblib \
+OBJECT_MODEL=$PWD/work_dirs/traditional_object_classifier/object_random_forest_occupancy_first_42d.joblib \
 ./run_traditional_scene3_video.sh
 ```
 
@@ -169,9 +175,14 @@ Three-frame Scene-3-only video smoke test:
 ```bash
 OUTPUT_DIR=$PWD/work_dirs/tradition_scene3_pose_smoke \
 EVAL_SCENE=3 MAX_FRAMES=3 MAX_VIDEO_FRAMES=3 KEEP_FRAMES=1 \
-OBJECT_MODEL=$PWD/work_dirs/traditional_object_classifier/object_random_forest_42d.joblib \
+OBJECT_MODEL=$PWD/work_dirs/traditional_object_classifier/object_random_forest_occupancy_first_42d.joblib \
 ./run_traditional_scene3_video.sh
 ```
+
+The default video layout is three panels: persistent branch on the left,
+motion-confirmed branch in the middle, and the synchronized RGB image on the
+right. Blue voxels are persistent points (including aligned supporting
+history); red voxels are current-frame motion-confirmed points.
 
 The RPC resolver treats the annotation frame as the synchronized LiDAR/RadarOcc
 index. For every scene it reads

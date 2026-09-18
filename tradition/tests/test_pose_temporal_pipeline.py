@@ -95,7 +95,7 @@ def test_full_vector_doppler_compensation_wraps_aliases():
 
 def test_pose_alignment_confirms_static_background_over_two_frames():
     classifier = PoseAlignedTemporalClassifier(
-        temporal_cfg=TemporalConfig(window_size=3, min_static_support=2)
+        temporal_cfg=TemporalConfig(window_size=3, min_static_support=1)
     )
     # The world point is at x=10.  After the ego vehicle moves +1 m, its
     # current-frame coordinate becomes x=9; pose alignment restores the match.
@@ -110,7 +110,7 @@ def test_pose_alignment_confirms_static_background_over_two_frames():
 
     assert result.current_indices.tolist() == [0]
     assert result.current_motion_labels == [MotionLabel.STATIC]
-    assert result.static_support.tolist() == [2]
+    assert result.static_support.tolist() == [1]
     np.testing.assert_allclose(
         result.historic_background_lidar_m, [[9.0, 0.0, 0.0]], atol=1e-9
     )
@@ -119,6 +119,25 @@ def test_pose_alignment_confirms_static_background_over_two_frames():
         result.historic_detections[0].xyz_lidar_m, [9.0, 0.0, 0.0], atol=1e-9
     )
     assert result.historic_detections[0].radial_velocity_mps == 0.1
+
+
+def test_current_frame_cannot_self_confirm_persistence():
+    classifier = PoseAlignedTemporalClassifier(
+        temporal_cfg=TemporalConfig(window_size=5, min_static_support=1)
+    )
+    result = classifier.update(
+        _frame(
+            "3_00000",
+            _pose(),
+            (10.0, 0.0, 0.0),
+            0.0,
+            DopplerEvidence.STATIC,
+        )
+    )
+
+    assert result.persistent_indices.size == 0
+    assert result.motion_indices.size == 0
+    assert result.unknown_indices.tolist() == [0]
 
 
 def test_persistent_large_residual_becomes_foreground_without_clustering():

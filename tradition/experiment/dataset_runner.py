@@ -419,6 +419,7 @@ class TraditionalDatasetRunner:
         ego_speed_mps: float | None = None,
         max_frames: int | None = None,
         video_scene: str | None = None,
+        video_layout: str = "branch-comparison",
         camera_dir: str | Path | None = None,
         camera_offset: int = 0,
         video_background_prediction_root: str | Path | None = None,
@@ -487,14 +488,16 @@ class TraditionalDatasetRunner:
         camera_by_token: dict[str, Path] = {}
         renderer = None
         if video_scene is not None:
-            # Keep video-only Mayavi/Qt dependencies out of metrics-only runs.
-            from tradition.visualization.radarocc_video import (
-                RadarOccStyleVideoRenderer,
-            )
-
             if camera_dir is None:
                 raise ValueError(
                     "--camera-dir is required when --video-scene is used."
+                )
+            if video_layout not in {"branch-comparison", "semantic-overlay"}:
+                raise ValueError("Unsupported video layout.")
+            if video_layout == "branch-comparison" and pose_reader is None:
+                raise ValueError(
+                    "Branch-comparison video requires temporal RPC processing "
+                    "with --pose-root."
                 )
             camera_by_token = _camera_map(
                 _load_infos(annotation),
@@ -502,14 +505,32 @@ class TraditionalDatasetRunner:
                 Path(camera_dir).expanduser().resolve(),
                 camera_offset,
             )
-            renderer = RadarOccStyleVideoRenderer(
-                output_dir=output_dir,
-                scene=str(video_scene),
-                fps=fps,
-                no_rotate=no_rotate,
-                keep_frames=keep_frames,
-                background_prediction_root=video_background_prediction_root,
-            )
+            # Keep video-only Mayavi/Qt dependencies out of metrics-only runs.
+            if video_layout == "branch-comparison":
+                from tradition.visualization.branch_comparison_video import (
+                    BranchComparisonVideoRenderer,
+                )
+
+                renderer = BranchComparisonVideoRenderer(
+                    output_dir=output_dir,
+                    scene=str(video_scene),
+                    fps=fps,
+                    no_rotate=no_rotate,
+                    keep_frames=keep_frames,
+                )
+            else:
+                from tradition.visualization.radarocc_video import (
+                    RadarOccStyleVideoRenderer,
+                )
+
+                renderer = RadarOccStyleVideoRenderer(
+                    output_dir=output_dir,
+                    scene=str(video_scene),
+                    fps=fps,
+                    no_rotate=no_rotate,
+                    keep_frames=keep_frames,
+                    background_prediction_root=video_background_prediction_root,
+                )
 
         accumulator = RadarOccMetricAccumulator()
         rendered = 0
@@ -571,6 +592,27 @@ class TraditionalDatasetRunner:
                     json.dumps(prediction.metadata["velocity_unwrapping"], allow_nan=False),
                     encoding="utf-8",
                 )
+            if pose_reader is not None:
+                diagnostics_dir = output_dir / "branch_diagnostics"
+                diagnostics_dir.mkdir(parents=True, exist_ok=True)
+                (diagnostics_dir / f"{token}.json").write_text(
+                    json.dumps(
+                        {
+                            "occupancy_persistence": prediction.metadata[
+                                "occupancy_persistence"
+                            ],
+                            "persistent_current_count": prediction.metadata[
+                                "persistent_current_count"
+                            ],
+                            "motion_confirmed_count": prediction.metadata[
+                                "motion_confirmed_count"
+                            ],
+                            "unknown_count": prediction.metadata["unknown_count"],
+                        },
+                        allow_nan=False,
+                    ),
+                    encoding="utf-8",
+                )
             gt = load_gt_sparse_xyz(gt_path, coordinate_order=gt_order)
             accumulator.update(prediction.dense_labels_xyz, gt)
 
@@ -580,12 +622,21 @@ class TraditionalDatasetRunner:
                 and token in camera_by_token
                 and rendered < max_video_frames
             ):
-                renderer.add_frame(
-                    prediction.dense_labels_xyz,
-                    gt,
-                    camera_by_token[token],
-                    token,
-                )
+                if video_layout == "branch-comparison":
+                    branches = prediction.branch_points_lidar_m or {}
+                    renderer.add_frame(
+                        branches.get("persistent", np.empty((0, 3))),
+                        branches.get("motion", np.empty((0, 3))),
+                        camera_by_token[token],
+                        token,
+                    )
+                else:
+                    renderer.add_frame(
+                        prediction.dense_labels_xyz,
+                        gt,
+                        camera_by_token[token],
+                        token,
+                    )
                 rendered += 1
 
             background_count = sum(
@@ -603,12 +654,16 @@ class TraditionalDatasetRunner:
                     f"raw={prediction.metadata['raw_detection_count']} "
                     f"reliable={prediction.metadata['reliable_detection_count']} "
                     f"temporal={prediction.metadata.get('temporal_accepted_detection_count', prediction.metadata['accepted_detection_count'])} "
+                    f"persistent/motion/unknown="
+                    f"{prediction.metadata.get('persistent_current_count', 0)}/"
+                    f"{prediction.metadata.get('motion_confirmed_count', 0)}/"
+                    f"{prediction.metadata.get('unknown_count', 0)} "
                     f"accepted={prediction.metadata['accepted_detection_count']} "
                     f"history_bg={prediction.metadata['historic_background_count']} "
                     f"history_fg={prediction.metadata.get('historic_foreground_count', 0)} "
                     f"objects={prediction.metadata.get('object_classifier', {}).get('candidate_count', 0)} "
-                    f"fallback_bg={prediction.metadata.get('object_classifier', {}).get('dynamic_background_fallback_point_count', 0)} "
-                    f"doppler_s/u/d="
+                    f"fallback_bg={prediction.metadata.get('object_classifier', {}).get('motion_background_fallback_point_count', 0)} "
+                    f"velocity_s/u/d="
                     f"{prediction.metadata['doppler_static_evidence_count']}/"
                     f"{prediction.metadata['doppler_uncertain_evidence_count']}/"
                     f"{prediction.metadata['doppler_dynamic_evidence_count']} "
@@ -633,6 +688,6 @@ class TraditionalDatasetRunner:
         if renderer is not None:
             video = renderer.finish()
             if video is not None:
-                outputs["mp4"], outputs["gif"] = video
+                prefix = "branches" if video_layout == "branch-comparison" else "overlay"
+                outputs[f"{prefix}_mp4"], outputs[f"{prefix}_gif"] = video
         return outputs
-

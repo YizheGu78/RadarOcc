@@ -90,7 +90,7 @@ def test_dynamic_dbscan_is_only_a_proposal_and_model_decides_semantics():
         ObjectClusteringConfig(dynamic_min_points=2)
     ).extract(detections, motion)
     assert len(candidates) == 1
-    assert candidates[0].branch == "dynamic"
+    assert candidates[0].branch == "motion"
 
 
 def test_dynamic_rf_rejection_falls_back_to_mapped_background():
@@ -207,7 +207,7 @@ def test_historic_static_object_can_be_mapped_as_foreground():
 def _candidate(detections):
     return ObjectCandidate(
         indices=np.arange(len(detections), dtype=np.int64),
-        branch="static",
+        branch="persistent",
         features=np.zeros(len(FEATURE_NAMES), dtype=np.float64),
     )
 
