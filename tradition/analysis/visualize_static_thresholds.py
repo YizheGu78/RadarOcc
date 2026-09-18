@@ -102,6 +102,12 @@ def parse_args() -> argparse.Namespace:
         help="Enhanced K-Radar RPC root.",
     )
     parser.add_argument(
+        "--calib-root",
+        type=Path,
+        default=Path("data/K-Radar_calib"),
+        help="Per-scene frame-difference calibration root.",
+    )
+    parser.add_argument(
         "--pose-root",
         type=Path,
         default=Path("data/K-RadarOcc"),
@@ -398,6 +404,7 @@ def main() -> None:
     repo_root = args.repo_root.expanduser().resolve()
     annotation = args.annotation.expanduser()
     radar_root = args.radar_root.expanduser()
+    calib_root = args.calib_root.expanduser()
     pose_root = args.pose_root.expanduser()
     camera_root = args.camera_root.expanduser()
 
@@ -409,6 +416,10 @@ def main() -> None:
         radar_root = (repo_root / radar_root).resolve()
     else:
         radar_root = radar_root.resolve()
+    if not calib_root.is_absolute():
+        calib_root = (repo_root / calib_root).resolve()
+    else:
+        calib_root = calib_root.resolve()
     if not pose_root.is_absolute():
         pose_root = (repo_root / pose_root).resolve()
     else:
@@ -422,7 +433,9 @@ def main() -> None:
     info = find_info(infos, str(args.scene), str(args.token))
 
     # Resolve exactly the same RPC representation used by the traditional runner.
-    radar_path = _resolve_rpc_radar(info, repo_root, radar_root)
+    radar_path = _resolve_rpc_radar(
+        info, repo_root, radar_root, calib_root
+    )
 
     radar_cfg = KRadarConfig()
     grid_cfg = GridConfig()
@@ -477,7 +490,9 @@ def main() -> None:
             history_token = str(history_info["lidar_token"])
             if pose_reader.frame_index(history_token) >= target_index:
                 break
-            history_path = _resolve_rpc_radar(history_info, repo_root, radar_root)
+            history_path = _resolve_rpc_radar(
+                history_info, repo_root, radar_root, calib_root
+            )
             history_detections = reliability_filter.filter(
                 detector.detect(reader.read(history_path))
             )
@@ -578,6 +593,7 @@ def main() -> None:
     print(f"  scene       : {args.scene}")
     print(f"  token       : {args.token}")
     print(f"  radar       : {radar_path}")
+    print(f"  calib root  : {calib_root}")
     print(f"  pose        : {pose_path}")
     print(f"  camera      : {camera_path}")
     print(
