@@ -52,7 +52,6 @@ def add_velocity_arguments(parser):
     parser.add_argument("--fallback-static-window", type=int, default=5)
     parser.add_argument("--fallback-static-min-support", type=int, default=2)
     parser.add_argument("--fallback-static-match-radius-m", type=float, default=0.60)
-    parser.add_argument("--fallback-wrapped-threshold-mps", type=float, default=0.50)
     parser.add_argument(
         "--disable-static-fallback", "--disable-static-prefilter",
         dest="disable_static_prefilter", action="store_true",
@@ -872,7 +871,7 @@ def main() -> None:
         window_size=args.fallback_static_window,
         min_support=args.fallback_static_min_support,
         match_radius_m=args.fallback_static_match_radius_m,
-        wrapped_threshold_mps=args.fallback_wrapped_threshold_mps,
+        wrapped_threshold_mps=max(args.thresholds),
         enabled=not args.disable_static_prefilter,
     )
     wrapped_residuals_all = doppler_classifier.residuals_with_velocity(
