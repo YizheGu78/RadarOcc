@@ -49,6 +49,15 @@ def parse_args() -> argparse.Namespace:
             "Input root: data/K-Radar_rpc for rpc, or the K-Radar root for raw."
         ),
     )
+    parser.add_argument(
+        "--calib-root",
+        type=Path,
+        default=Path("data/K-Radar_calib"),
+        help=(
+            "Per-scene K-Radar calibration root. calib_radar_lidar.txt supplies "
+            "the aligned-frame to original-RPC frame difference."
+        ),
+    )
     parser.add_argument("--gt-root", type=Path)
     parser.add_argument("--gt-order", choices=("xyz", "zyx"), default="xyz")
     parser.add_argument("--scene", help="Evaluate only one scene/sequence.")
@@ -220,6 +229,7 @@ def main() -> None:
         output_dir=args.output_dir,
         repo_root=args.repo_root,
         radar_root=args.radar_root,
+        calib_root=args.calib_root,
         gt_root=args.gt_root,
         gt_order=args.gt_order,
         scene=args.scene,
