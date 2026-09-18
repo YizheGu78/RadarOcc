@@ -14,6 +14,7 @@ CONDA_ENV="${CONDA_ENV:-radarocc-vis}"
 
 ANNOTATION="${ANNOTATION:-$REPO_ROOT/data/annotations/kradar_dict_test_official_doppler8.pkl}"
 RADAR_ROOT="${RADAR_ROOT:-$REPO_ROOT/data/K-Radar_rpc}"
+CALIB_ROOT="${CALIB_ROOT:-$REPO_ROOT/data/K-Radar_calib}"
 POSE_ROOT="${POSE_ROOT:-$REPO_ROOT/data/K-RadarOcc}"
 CAMERA_DIR="${CAMERA_DIR:-$REPO_ROOT/data/K-Radar-RGB/K-Radar/K-Radar-RGB/3/images_rb_switched}"
 OUTPUT_DIR="${OUTPUT_DIR:-$REPO_ROOT/work_dirs/tradition_rpc_test_official_all_video_scene3}"
@@ -76,6 +77,7 @@ activate_conda_env
 
 [[ -f "$ANNOTATION" ]] || fail "Annotation not found: $ANNOTATION"
 [[ -d "$RADAR_ROOT" ]] || fail "RPC radar root not found: $RADAR_ROOT"
+[[ -d "$CALIB_ROOT" ]] || fail "Calibration root not found: $CALIB_ROOT"
 [[ -d "$POSE_ROOT" ]] || fail "RadarOcc pose root not found: $POSE_ROOT"
 [[ -d "$CAMERA_DIR" ]] || fail "Camera directory not found: $CAMERA_DIR"
 [[ -f "$OBJECT_MODEL" ]] || fail \
@@ -112,6 +114,7 @@ echo "Object-aware dual-branch traditional RPC OGM + video"
 echo "  conda env : $CONDA_ENV"
 echo "  annotation: $ANNOTATION"
 echo "  radar root: $RADAR_ROOT"
+echo "  calib root: $CALIB_ROOT"
 echo "  pose root : $POSE_ROOT"
 echo "  camera dir: $CAMERA_DIR"
 if [[ -n "$EVAL_SCENE" ]]; then
@@ -139,6 +142,7 @@ xvfb-run -a -s "-screen 0 1920x1080x24" \
     python -u -m tradition.cli.run \
     --annotation "$ANNOTATION" \
     --radar-root "$RADAR_ROOT" \
+    --calib-root "$CALIB_ROOT" \
     --pose-root "$POSE_ROOT" \
     --pose-dt-s "$POSE_DT_S" \
     --output-dir "$OUTPUT_DIR" \
