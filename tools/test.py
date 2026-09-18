@@ -8,6 +8,12 @@ import mmcv
 import os
 import torch
 import warnings
+# Compatibility with PyTorch >= 2.6 and legacy MMCV checkpoints.
+# Checkpoints used here are locally trained/trusted.
+os.environ.setdefault(
+    'TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD',
+    '1'
+)
 from mmcv import Config, DictAction
 from mmcv.cnn import fuse_conv_bn
 from mmcv.parallel import MMDataParallel, MMDistributedDataParallel
@@ -93,7 +99,7 @@ def parse_args():
         choices=['none', 'pytorch', 'slurm', 'mpi'],
         default='none',
         help='job launcher')
-    parser.add_argument('--local_rank', type=int, default=0)
+    parser.add_argument('--local_rank', '--local-rank', dest='local_rank', type=int, default=0)
     args = parser.parse_args()
     if 'LOCAL_RANK' not in os.environ:
         os.environ['LOCAL_RANK'] = str(args.local_rank)
