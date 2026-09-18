@@ -63,6 +63,12 @@ def parse_args() -> argparse.Namespace:
         default=Path("data/K-Radar_rpc"),
     )
     parser.add_argument(
+        "--calib-root",
+        type=Path,
+        default=Path("data/K-Radar_calib"),
+        help="Per-scene frame-difference calibration root.",
+    )
+    parser.add_argument(
         "--pose-root",
         type=Path,
         default=Path("data/K-RadarOcc"),
@@ -481,6 +487,10 @@ def main() -> None:
         args.radar_root,
         repo_root,
     )
+    calib_root = resolve_repo_path(
+        args.calib_root,
+        repo_root,
+    )
     pose_root = resolve_repo_path(
         args.pose_root,
         repo_root,
@@ -588,6 +598,7 @@ def main() -> None:
     print(f"  fps         : {args.fps}")
     print(f"  annotation  : {annotation}")
     print(f"  radar root  : {radar_root}")
+    print(f"  calib root  : {calib_root}")
     print(f"  pose root   : {pose_root}")
     print(f"  camera dir  : {camera_dir}")
     print(f"  output dir  : {output_dir}")
@@ -604,6 +615,7 @@ def main() -> None:
             info,
             repo_root,
             radar_root,
+            calib_root,
         )
 
         raw_detections = detector.detect(
