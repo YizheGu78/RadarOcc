@@ -173,14 +173,19 @@ OBJECT_MODEL=$PWD/work_dirs/traditional_object_classifier/object_random_forest_4
 ./run_traditional_scene3_video.sh
 ```
 
-The RPC resolver uses `radar_frame_idx` from the aligned annotation first,
-then the frame number in `radar_path`. Common layouts include:
+The RPC resolver treats the annotation frame as the synchronized LiDAR/RadarOcc
+index. For every scene it reads
+`data/K-Radar_calib/<scene>/info_calib/calib_radar_lidar.txt` and applies:
 
 ```text
-data/K-Radar_rpc/3/rpc_00042.npy
-data/K-Radar_rpc/3/pc01p/rpc_00042.npy
-data/K-Radar_rpc/3/pc01p_00042.npy
+original RPC frame = aligned annotation frame + frame difference
 ```
+
+For example, Scene 3 has `frame difference=30`, so aligned
+`EAsparse_00001.npz` resolves to `rpc_00031.npy`, while LiDAR pose lookup
+continues to use token `3_00001`. The calibration file's x/y fields are not
+used for this temporal filename mapping. Override the calibration root with
+`--calib-root` or the shell scripts' `CALIB_ROOT` environment variable.
 
 The pose resolver accepts a sequence pose directory, a split root, or the
 whole K-RadarOcc root, for example:
