@@ -54,8 +54,12 @@ def add_velocity_arguments(parser):
     parser.add_argument("--fallback-static-match-radius-m", type=float, default=0.60)
     parser.add_argument("--fallback-wrapped-threshold-mps", type=float, default=0.50)
     parser.add_argument(
-        "--disable-static-fallback", action="store_true",
-        help="Disable world-stable wrapped-static fallback for comparison.",
+        "--disable-static-fallback", "--disable-static-prefilter",
+        dest="disable_static_prefilter", action="store_true",
+        help=(
+            "Disable the world-stable point-wise static prefilter. The old "
+            "--disable-static-fallback spelling remains as a compatibility alias."
+        ),
     )
 
 
@@ -99,11 +103,17 @@ class RangeDifferenceUnwrapper:
         self.scene = None
         self.last_diagnostics = {}
 
-    def _clusters(self, detections):
+    def _clusters(self, detections, excluded_mask=None):
         xyz = np.asarray(
             [det.xyz_lidar_m for det in detections], dtype=np.float64
         ).reshape(-1, 3)
-        valid = np.flatnonzero(np.all(np.isfinite(xyz), axis=1))
+        valid_mask = np.all(np.isfinite(xyz), axis=1)
+        if excluded_mask is not None:
+            excluded = np.asarray(excluded_mask, dtype=bool)
+            if excluded.shape != (len(detections),):
+                raise ValueError("excluded_mask must match detections")
+            valid_mask &= ~excluded
+        valid = np.flatnonzero(valid_mask)
         if not len(valid):
             return []
         tree = cKDTree(xyz[valid])
@@ -146,7 +156,7 @@ class RangeDifferenceUnwrapper:
             return previous_center
         return previous_center + velocity * (time - previous_time)
 
-    def update(self, detections, ego_motion, token):
+    def update(self, detections, ego_motion, token, excluded_mask=None):
         time = RadarOccPoseReader.frame_index(str(token)) * self.frame_dt_s
         scene = str(token).rsplit("_", 1)[0]
         if self.scene != scene or (
@@ -167,8 +177,22 @@ class RangeDifferenceUnwrapper:
         ambiguity = [None] * len(detections)
         temporal_prediction = [None] * len(detections)
         failure_reason = ["no_cluster"] * len(detections)
+        if excluded_mask is None:
+            excluded = np.zeros(len(detections), dtype=bool)
+        else:
+            excluded = np.asarray(excluded_mask, dtype=bool)
+            if excluded.shape != (len(detections),):
+                raise ValueError("excluded_mask must match detections")
+            for index in np.flatnonzero(excluded):
+                # The static branch has already resolved this point. Preserve
+                # its near-zero wrapped residual as the final residual and do
+                # not send it through moving-object clustering.
+                output[int(index)] = wrapped[int(index)]
+                failure_reason[int(index)] = "static_preclassified"
 
-        clusters = self._clusters(detections)
+        # Static background is resolved point-wise before this stage. Only the
+        # remaining measurements may form moving-object clusters.
+        clusters = self._clusters(detections, excluded_mask=excluded)
         pose = np.asarray(ego_motion.pose_lidar_to_world, dtype=np.float64)
         observations = []
         for indices in clusters:
@@ -284,6 +308,10 @@ class RangeDifferenceUnwrapper:
             "failure_reason": failure_reason,
             "resolved_count": int(np.count_nonzero(np.isfinite(output))),
             "unresolved_count": int(np.count_nonzero(~np.isfinite(output))),
+            "static_preclassified_count": int(np.count_nonzero(excluded)),
+            "range_difference_resolved_count": int(np.count_nonzero(
+                np.isfinite(output) & ~excluded
+            )),
         }
         return output, None
 
@@ -321,7 +349,7 @@ def save_velocity_diagnostics(path, unwrapper, analysis_summary=None):
     import json
     payload = dict(unwrapper.last_diagnostics)
     if analysis_summary is not None:
-        payload["visualization_static_fallback"] = analysis_summary
+        payload["visualization_static_prefilter"] = analysis_summary
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(payload, allow_nan=False),
@@ -329,19 +357,28 @@ def save_velocity_diagnostics(path, unwrapper, analysis_summary=None):
     )
 
 
-class WorldStaticFallback:
-    """Preserve world-stable structure when temporal unwrapping is unresolved."""
+class WorldStaticPreclassifier:
+    """Confirm static points before any moving-object clustering.
+
+    A point is a static candidate when its ego-compensated wrapped residual is
+    near zero. It becomes confirmed only when similar candidates repeatedly
+    occur at the same world location. Raw radar scatterers need not keep an ID.
+    """
 
     def __init__(
         self, window_size=5, min_support=3, match_radius_m=0.60,
         wrapped_threshold_mps=0.50, enabled=True,
     ):
         if window_size < 2:
-            raise ValueError("fallback window_size must be >= 2")
+            raise ValueError("static prefilter window_size must be >= 2")
         if not 2 <= min_support <= window_size:
-            raise ValueError("fallback min_support must be in [2, window_size]")
+            raise ValueError(
+                "static prefilter min_support must be in [2, window_size]"
+            )
         if match_radius_m <= 0.0 or wrapped_threshold_mps < 0.0:
-            raise ValueError("fallback radii/thresholds must be non-negative")
+            raise ValueError(
+                "static prefilter radii/thresholds must be non-negative"
+            )
         self.window_size = int(window_size)
         self.min_support = int(min_support)
         self.match_radius_m = float(match_radius_m)
@@ -349,47 +386,53 @@ class WorldStaticFallback:
         self.enabled = bool(enabled)
         self.history = deque(maxlen=self.window_size - 1)
 
-    def update(self, detections, ego_motion, wrapped_residuals, temporal_residuals):
+    def update(self, detections, ego_motion, wrapped_residuals):
         wrapped = np.asarray(wrapped_residuals, dtype=np.float64)
-        temporal = np.asarray(temporal_residuals, dtype=np.float64)
-        if wrapped.shape != temporal.shape or wrapped.shape != (len(detections),):
-            raise ValueError("Fallback residual arrays must match detections.")
+        if wrapped.shape != (len(detections),):
+            raise ValueError("Wrapped residuals must match detections.")
         xyz_lidar = np.asarray(
             [det.xyz_lidar_m for det in detections], dtype=np.float64
         ).reshape(-1, 3)
         pose = np.asarray(ego_motion.pose_lidar_to_world, dtype=np.float64)
         world_xyz = xyz_lidar @ pose[:3, :3].T + pose[:3, 3]
-        support = np.ones(len(detections), dtype=np.int16)
-        finite_current = np.all(np.isfinite(world_xyz), axis=1)
-        for previous_world in self.history:
-            if not len(previous_world) or not np.any(finite_current):
-                continue
-            distances, _ = cKDTree(previous_world).query(
-                world_xyz[finite_current], k=1
-            )
-            support[finite_current] += (
-                distances <= self.match_radius_m
-            ).astype(np.int16)
-        stable_world = finite_current & (support >= self.min_support)
-        fallback_mask = (
-            self.enabled
-            & ~np.isfinite(temporal)
-            & stable_world
-            & np.isfinite(wrapped)
+        static_candidate = (
+            np.isfinite(wrapped)
             & (np.abs(wrapped) <= self.wrapped_threshold_mps)
         )
-        combined = temporal.copy()
-        combined[fallback_mask] = wrapped[fallback_mask]
-        self.history.append(world_xyz[finite_current].copy())
-        return combined, fallback_mask, support
+        support = np.zeros(len(detections), dtype=np.int16)
+        finite_current = np.all(np.isfinite(world_xyz), axis=1)
+        current_candidate = finite_current & static_candidate
+        support[current_candidate] = 1
+        for previous_world in self.history:
+            if not len(previous_world) or not np.any(current_candidate):
+                continue
+            distances, _ = cKDTree(previous_world).query(
+                world_xyz[current_candidate], k=1
+            )
+            support[current_candidate] += (
+                distances <= self.match_radius_m
+            ).astype(np.int16)
+        static_mask = (
+            self.enabled
+            & current_candidate
+            & (support >= self.min_support)
+        )
+        # Store only static-Doppler candidates. Moving returns must not provide
+        # future world-persistence support to guardrails or other background.
+        self.history.append(world_xyz[current_candidate].copy())
+        return static_mask, support
+
+
+# Compatibility for external scripts that imported the previous name.
+WorldStaticFallback = WorldStaticPreclassifier
 
 
 def velocity_source_summary(
-    unwrapper, temporal_residuals, fallback_mask, support,
+    unwrapper, temporal_residuals, static_mask, support,
 ):
     diagnostics = unwrapper.last_diagnostics
     temporal = np.asarray(temporal_residuals, dtype=np.float64)
-    fallback = np.asarray(fallback_mask, dtype=bool)
+    static = np.asarray(static_mask, dtype=bool)
     reasons = np.asarray(diagnostics["failure_reason"], dtype=object)
     reason_counts = {
         str(reason): int(count)
@@ -397,11 +440,11 @@ def velocity_source_summary(
     }
     return {
         "range_difference_resolved_count": int(
-            np.count_nonzero(np.isfinite(temporal))
+            np.count_nonzero(np.isfinite(temporal) & ~static)
         ),
-        "stable_wrapped_fallback_count": int(np.count_nonzero(fallback)),
-        "unresolved_after_fallback_count": int(
-            np.count_nonzero(~np.isfinite(temporal) & ~fallback)
+        "static_preclassified_count": int(np.count_nonzero(static)),
+        "unresolved_after_both_branches_count": int(
+            np.count_nonzero(~np.isfinite(temporal))
         ),
         "range_difference_failure_reasons": reason_counts,
         "world_support_histogram": {
@@ -672,7 +715,7 @@ def plot_bev(
             c="tab:cyan",
             alpha=0.95,
             linewidths=0,
-            label="World-stable wrapped fallback",
+            label="World-stable static prefilter",
             rasterized=True,
         )
 
@@ -701,7 +744,7 @@ def plot_bev(
     ax.set_title(
         rf"$\tau_s$ = {threshold:.2f} m/s"
         f"\nStatic: {selected}/{total} ({100.0 * ratio:.1f}%)"
-        f" | fallback {int(np.count_nonzero(fallback_static_mask))}"
+        f" | prefilter {int(np.count_nonzero(fallback_static_mask))}"
         f" | unresolved {int(np.count_nonzero(unknown_mask))}"
     )
 
@@ -825,12 +868,12 @@ def main() -> None:
     unwrapper = build_velocity_unwrapper(
         args, radar_cfg, doppler_classifier.motion_cfg,
     )
-    static_fallback = WorldStaticFallback(
+    static_prefilter = WorldStaticPreclassifier(
         window_size=args.fallback_static_window,
         min_support=args.fallback_static_min_support,
         match_radius_m=args.fallback_static_match_radius_m,
         wrapped_threshold_mps=args.fallback_wrapped_threshold_mps,
-        enabled=not args.disable_static_fallback,
+        enabled=not args.disable_static_prefilter,
     )
     wrapped_residuals_all = doppler_classifier.residuals_with_velocity(
         reliable_detections, ego_motion.linear_velocity_radar_mps,
@@ -859,23 +902,25 @@ def main() -> None:
             history_wrapped = doppler_classifier.residuals_with_velocity(
                 history_detections, history_motion.linear_velocity_radar_mps,
             )
-            history_temporal, _ = unwrapper.update(
-                history_detections, history_motion, history_token
+            history_static, _ = static_prefilter.update(
+                history_detections, history_motion, history_wrapped,
             )
-            static_fallback.update(
-                history_detections, history_motion,
-                history_wrapped, history_temporal,
+            unwrapper.update(
+                history_detections, history_motion, history_token,
+                excluded_mask=history_static,
             )
+        static_mask_all, world_support_all = static_prefilter.update(
+            reliable_detections, ego_motion, wrapped_residuals_all,
+        )
         temporal_residuals_all, _ = unwrapper.update(
             reliable_detections, ego_motion, str(args.token),
+            excluded_mask=static_mask_all,
         )
-        residuals_all, fallback_mask_all, world_support_all = static_fallback.update(
-            reliable_detections, ego_motion,
-            wrapped_residuals_all, temporal_residuals_all,
-        )
+        residuals_all = temporal_residuals_all
+        fallback_mask_all = static_mask_all
         analysis_summary = velocity_source_summary(
             unwrapper, temporal_residuals_all,
-            fallback_mask_all, world_support_all,
+            static_mask_all, world_support_all,
         )
 
     xyz = np.asarray(
@@ -968,7 +1013,7 @@ def main() -> None:
     print("Static-threshold qualitative visualization")
     print(f"  velocity mode: {args.velocity_unwrapping}")
     print(f"  unresolved ROI: {int(np.count_nonzero(~np.isfinite(residuals)))}")
-    print(f"  fallback ROI  : {int(np.count_nonzero(fallback_mask))}")
+    print(f"  prefilter ROI : {int(np.count_nonzero(fallback_mask))}")
     if len(world_support):
         print(
             "  world support : "
