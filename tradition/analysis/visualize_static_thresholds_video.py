@@ -269,7 +269,7 @@ def draw_bev(
     absolute = np.abs(residuals)
     static_mask = np.isfinite(absolute) & (absolute <= threshold)
     fallback_static_mask = static_mask & np.asarray(fallback_mask, dtype=bool)
-    kalman_static_mask = static_mask & ~fallback_static_mask
+    temporal_static_mask = static_mask & ~fallback_static_mask
 
     total = int(len(xy))
     selected = int(np.count_nonzero(static_mask))
@@ -298,16 +298,16 @@ def draw_bev(
             linewidths=0.7, label="Unresolved velocity", rasterized=True,
         )
 
-    if np.any(kalman_static_mask):
+    if np.any(temporal_static_mask):
         ax.scatter(
-            display_x[kalman_static_mask],
-            display_y[kalman_static_mask],
+            display_x[temporal_static_mask],
+            display_y[temporal_static_mask],
             s=static_point_size,
             c="tab:blue",
             alpha=0.95,
             linewidths=0,
             rasterized=True,
-            label=r"Kalman static: $|r|\leq\tau_s$",
+            label=r"Range-difference static: $|r|\leq\tau_s$",
         )
 
     if np.any(fallback_static_mask):
@@ -632,7 +632,7 @@ def main() -> None:
     print(f"  output dir  : {output_dir}")
     print()
 
-    # Even when --start is nonzero, process preceding observations to warm KF.
+    # Even when --start is nonzero, process preceding observations to build displacement history.
     processing_start = 0 if unwrapper is not None else args.start
     for scene_index in range(processing_start, stop):
         info = scene_infos[scene_index]
@@ -669,15 +669,15 @@ def main() -> None:
             residuals_all = wrapped_residuals_all
             fallback_mask_all = np.zeros(len(reliable_detections), dtype=bool)
         else:
-            kalman_residuals_all, _ = unwrapper.update(
+            temporal_residuals_all, _ = unwrapper.update(
                 reliable_detections, ego_motion, token,
             )
             residuals_all, fallback_mask_all, world_support_all = static_fallback.update(
                 reliable_detections, ego_motion,
-                wrapped_residuals_all, kalman_residuals_all,
+                wrapped_residuals_all, temporal_residuals_all,
             )
             analysis_summary = velocity_source_summary(
-                unwrapper, kalman_residuals_all,
+                unwrapper, temporal_residuals_all,
                 fallback_mask_all, world_support_all,
             )
         if output_index < 0:
