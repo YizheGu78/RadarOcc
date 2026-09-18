@@ -597,6 +597,14 @@ def main() -> None:
     print(f"  scene total : {len(scene_infos)}")
     print(f"  start       : {args.start}")
     print(f"  thresholds  : {thresholds}")
+    print(f"  cluster r   : {args.unwrap_cluster_radius_m:.2f} m")
+    print(f"  patch extent: {args.unwrap_max_cluster_extent_m:.2f} m")
+    print(
+        f"  association : {args.range_difference_association_radius_m:.2f} m "
+        "(track-speed adaptive)"
+    )
+    print(f"  history     : {args.range_difference_history} frames")
+    print(f"  max error   : {args.range_difference_max_error_mps:.2f} m/s")
     print(f"  fps         : {args.fps}")
     print(f"  annotation  : {annotation}")
     print(f"  radar root  : {radar_root}")
