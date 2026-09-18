@@ -613,7 +613,7 @@ def main() -> None:
         window_size=args.fallback_static_window,
         min_support=args.fallback_static_min_support,
         match_radius_m=args.fallback_static_match_radius_m,
-        wrapped_threshold_mps=args.fallback_wrapped_threshold_mps,
+        wrapped_threshold_mps=max(thresholds),
         enabled=not args.disable_static_prefilter,
     )
     print(f"Velocity mode: {args.velocity_unwrapping}")
