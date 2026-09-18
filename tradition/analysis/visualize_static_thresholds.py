@@ -33,6 +33,54 @@ from tradition.motion.doppler_classifier import EgoCompensatedDopplerClassifier
 from tradition.motion.pose_ego_motion import PoseEgoMotionEstimator
 
 
+def add_velocity_arguments(parser):
+    parser.add_argument(
+        "--velocity-unwrapping", choices=("off", "range-kalman"),
+        default="range-kalman",
+        help="Use range-only KF history by default; off shows wrapped residuals.",
+    )
+    parser.add_argument("--unwrap-range-std-m", type=float, default=0.20)
+    parser.add_argument("--unwrap-cluster-radius-m", type=float, default=1.5)
+
+
+def build_velocity_unwrapper(args, radar_cfg, motion_cfg):
+    if args.velocity_unwrapping == "off":
+        return None
+    from tradition.core.config import UnwrappingConfig
+    from tradition.motion.range_kalman import RangeKalmanUnwrapper
+    return RangeKalmanUnwrapper(
+        radar_cfg=radar_cfg, motion_cfg=motion_cfg,
+        config=UnwrappingConfig(
+            frame_dt_s=args.pose_dt_s,
+            range_std_m=args.unwrap_range_std_m,
+            cluster_radius_m=args.unwrap_cluster_radius_m,
+        ),
+    )
+
+
+def ordered_scene_infos(infos, scene):
+    selected = sorted(
+        (info for info in infos if str(info.get("scene_token")) == str(scene)),
+        key=lambda info: RadarOccPoseReader.frame_index(str(info["lidar_token"])),
+    )
+    indices = [RadarOccPoseReader.frame_index(str(info["lidar_token"]))
+               for info in selected]
+    if len(indices) != len(set(indices)):
+        raise ValueError("Duplicate pose indices in the selected scene.")
+    return selected
+
+
+def save_velocity_diagnostics(path, unwrapper):
+    if unwrapper is None:
+        return
+    import json
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(unwrapper.last_diagnostics, allow_nan=False),
+        encoding="utf-8",
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -115,6 +163,7 @@ def parse_args() -> argparse.Namespace:
         help="Marker size for points selected as static.",
     )
     parser.add_argument("--dpi", type=int, default=180)
+    add_velocity_arguments(parser)
     return parser.parse_args()
 
 
@@ -254,6 +303,14 @@ def plot_bev(
             rasterized=True,
         )
 
+    unknown_mask = ~np.isfinite(absolute)
+    if np.any(unknown_mask):
+        ax.scatter(
+            display_x[unknown_mask], display_y[unknown_mask],
+            s=static_point_size, c="tab:orange", marker="x",
+            linewidths=0.7, label="Unresolved velocity", rasterized=True,
+        )
+
     # 蓝色：当前 threshold 下判定为 Static 的点
     if selected:
         ax.scatter(
@@ -292,6 +349,7 @@ def plot_bev(
     ax.set_title(
         rf"$\tau_s$ = {threshold:.2f} m/s"
         f"\nStatic: {selected}/{total} ({100.0 * ratio:.1f}%)"
+        f" | unresolved {int(np.count_nonzero(unknown_mask))}"
     )
 
     # Ego 位置
@@ -334,7 +392,7 @@ def main() -> None:
             "This four-panel visualization expects exactly three thresholds, "
             "for example: --thresholds 0.3 0.5 0.7"
         )
-    if any(value < 0.0 for value in args.thresholds):
+    if any(not np.isfinite(value) or value < 0.0 for value in args.thresholds):
         raise ValueError("Thresholds must be non-negative.")
 
     repo_root = args.repo_root.expanduser().resolve()
@@ -404,10 +462,33 @@ def main() -> None:
             stationary_velocity_sign=args.stationary_velocity_sign,
         ),
     )
-    residuals_all = doppler_classifier.residuals_with_velocity(
-        reliable_detections,
-        ego_motion.linear_velocity_radar_mps,
+    unwrapper = build_velocity_unwrapper(
+        args, radar_cfg, doppler_classifier.motion_cfg,
     )
+    if unwrapper is None:
+        residuals_all = doppler_classifier.residuals_with_velocity(
+            reliable_detections, ego_motion.linear_velocity_radar_mps,
+        )
+    else:
+        # Replay all available preceding scene observations, in pose-index order.
+        # Never use future detections and never initialize from just the target.
+        target_index = pose_reader.frame_index(str(args.token))
+        for history_info in ordered_scene_infos(infos, args.scene):
+            history_token = str(history_info["lidar_token"])
+            if pose_reader.frame_index(history_token) >= target_index:
+                break
+            history_path = _resolve_rpc_radar(history_info, repo_root, radar_root)
+            history_detections = reliability_filter.filter(
+                detector.detect(reader.read(history_path))
+            )
+            history_motion, _ = estimate_ego_motion(
+                pose_reader, pose_estimator, str(args.scene),
+                history_token, args.pose_dt_s,
+            )
+            unwrapper.update(history_detections, history_motion, history_token)
+        residuals_all, _ = unwrapper.update(
+            reliable_detections, ego_motion, str(args.token),
+        )
 
     xyz = np.asarray(
         [det.xyz_lidar_m for det in reliable_detections],
@@ -475,7 +556,7 @@ def main() -> None:
     velocity = ego_motion.linear_velocity_radar_mps
     speed = float(np.linalg.norm(velocity[:2]))
     fig.suptitle(
-        "Qualitative static Doppler residual threshold comparison"
+        f"Static threshold comparison | velocity mode: {args.velocity_unwrapping}"
         f"\nScene {args.scene} | token {args.token} | "
         f"ego speed = {speed:.2f} m/s | "
         f"reliable RPC: {len(reliable_detections)} | "
@@ -489,8 +570,11 @@ def main() -> None:
     save_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(save_path, dpi=args.dpi, bbox_inches="tight")
     plt.close(fig)
+    save_velocity_diagnostics(save_path.with_suffix(".velocity.json"), unwrapper)
 
     print("Static-threshold qualitative visualization")
+    print(f"  velocity mode: {args.velocity_unwrapping}")
+    print(f"  unresolved ROI: {int(np.count_nonzero(~np.isfinite(residuals)))}")
     print(f"  scene       : {args.scene}")
     print(f"  token       : {args.token}")
     print(f"  radar       : {radar_path}")

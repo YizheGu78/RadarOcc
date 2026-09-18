@@ -267,3 +267,77 @@ tradition/
   background means occupied environment structure, not simply a static return.
 - Unobserved cells are class 0/free because the requested evaluation has only
   three output classes and no unknown class.
+
+
+## Experimental range-Kalman Doppler unwrapping
+
+Enable on the pose-temporal RPC evaluation command with:
+
+```bash
+--velocity-unwrapping range-kalman --pose-root /path/to/poses --pose-dt-s 0.10
+```
+
+`--velocity-unwrapping off` is the default for baseline comparisons. The new
+mode is also available in `tradition.cli.train_object_classifier`. Use the same
+mode, frame interval and tuning for RF training and inference; existing RF
+weights were trained on wrapped velocity features and should be retrained for
+this experiment. `tradition.cli.predict` remains a single-frame interface and
+does not perform unwrapping. Python callers pass `UnwrappingConfig(...)` as
+`unwrapping_cfg` to `build_rpc_pipeline` and use `predict_temporal_file`.
+
+Processing order:
+
+1. Reliability filtering, then spatial connected components on **all** reliable
+   points; there is no static/Doppler pre-filter.
+2. Conservative world-coordinate association. Multiple plausible matches start
+   new tracks. Position history predicts the next association center.
+3. At least four associated observations initialize `[range, range_rate, 0]`
+   from a least-squares distance slope. A constant-acceleration KF updates only
+   with the raw sensor distance of the robust cluster centroid. It never uses
+   folded or unwrapped Doppler as a KF measurement.
+4. Convert KF range rate to the compensated Doppler residual convention:
+   `predicted_residual = -s * (range_rate + ego_velocity · LOS)`, where
+   `s = stationary_velocity_sign`. Select
+   `k = round((predicted_residual - wrapped_residual) / period)`.
+5. Accept the alias only if its discrepancy plus the configured uncertainty
+   margin remains below half a Doppler period. Range-history consistency is a
+   gate, not an independent weighted observation: it shares data with the KF.
+6. Generate static/dynamic evidence from the accepted unwrapped residual.
+   Unresolved tracks have NaN residual and UNCERTAIN evidence. Nearby static
+   returns cannot override a current dynamic or uncertain observation.
+
+With the repository's `s=+1`, ego `23 m/s` and an ahead, same-direction truck
+at `19.6 m/s`, relative range rate is `-3.4 m/s`; compensated residual is
+`-19.6 m/s`, folded to `-0.4 m/s`, and the residual ambiguity integer is `-5`.
+The magnitude determines motion classification. This integer describes the
+**compensated residual**, not necessarily the raw Doppler ambiguity integer.
+
+Elapsed time comes from LiDAR pose token index differences times `pose_dt_s`,
+not RPC filename indices or number of processed frames. Sequence changes,
+non-increasing tokens, long gaps, and range innovation outliers reset/restart
+tracks. Inputs must use synchronized poses and the correct Doppler sign and
+period. The current repository period is 3.84 m/s; it is configurable in
+`KRadarConfig` and is not inferred from an arbitrary RPC file.
+
+Per-frame diagnostics are saved by `tradition.cli.run` under
+`OUTPUT/velocity_unwrapping/TOKEN.json`: reliable-point indices, track IDs,
+wrapped residuals, KF predictions, ambiguity integers, unwrapped residuals,
+and resolved/unresolved counts. Null values mean unresolved. The arrays refer
+to reliable detections **before** temporal/RF rejection.
+
+`UnwrappingConfig` contains the experimental thresholds. The CLI exposes
+`--unwrap-range-std-m` and `--unwrap-cluster-radius-m`; these defaults are
+engineering starting values, not fitted or paper-validated K-Radar parameters.
+KF covariance does not fully model centroid switches, pose error or incorrect
+association. Wide/merged clusters can contain multiple motions; a centroid
+radial prior is only an approximation across their points. Purely transverse
+motion with near-zero radial velocity remains a limitation. Unknown points are
+currently excluded from occupancy evidence, so startup/association losses can
+reduce occupancy recall. Validate on continuous real sequences before using
+this as the replacement baseline; short sparse clips may never converge.
+
+Validation without pytest:
+
+```bash
+python -m unittest tradition.tests.test_range_kalman -v
+```

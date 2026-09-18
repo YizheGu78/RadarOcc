@@ -35,6 +35,13 @@ from tradition.motion.doppler_classifier import EgoCompensatedDopplerClassifier
 from tradition.motion.pose_ego_motion import PoseEgoMotionEstimator
 
 
+from tradition.analysis.visualize_static_thresholds import (
+    add_velocity_arguments,
+    build_velocity_unwrapper,
+    ordered_scene_infos,
+    save_velocity_diagnostics,
+)
+
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
 
 
@@ -150,6 +157,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Keep intermediate PNG frames after MP4 encoding.",
     )
+    add_velocity_arguments(parser)
     return parser.parse_args()
 
 
@@ -271,6 +279,14 @@ def draw_bev(
             label="Reliable RPC in ROI",
         )
 
+    unknown_mask = ~np.isfinite(absolute)
+    if np.any(unknown_mask):
+        ax.scatter(
+            display_x[unknown_mask], display_y[unknown_mask],
+            s=static_point_size, c="tab:orange", marker="x",
+            linewidths=0.7, label="Unresolved velocity", rasterized=True,
+        )
+
     if selected:
         ax.scatter(
             display_x[static_mask],
@@ -294,6 +310,7 @@ def draw_bev(
     ax.set_title(
         rf"$\tau_s$ = {threshold:.2f} m/s"
         f"\nStatic {selected}/{total} ({100.0 * ratio:.1f}%)"
+        f" | unresolved {int(np.count_nonzero(unknown_mask))}"
     )
 
     ax.scatter(
@@ -332,6 +349,7 @@ def render_frame(
     all_point_size: float,
     static_point_size: float,
     dpi: int,
+    velocity_mode: str = "off",
 ) -> None:
     image = mpimg.imread(image_path)
 
@@ -373,7 +391,7 @@ def render_frame(
     )
 
     fig.suptitle(
-        "Static Doppler residual threshold comparison"
+        f"Static threshold comparison | velocity mode: {velocity_mode}"
         f"   |   scene {token.split('_')[0]}"
         f"   |   token {token}"
         f"   |   frame {frame_ordinal}"
@@ -420,6 +438,8 @@ def encode_mp4(
         "medium",
         "-crf",
         "18",
+        "-vf",
+        "pad=ceil(iw/2)*2:ceil(ih/2)*2",
         "-pix_fmt",
         "yuv420p",
         "-movflags",
@@ -448,6 +468,8 @@ def main() -> None:
         raise ValueError("--pose-dt-s must be > 0")
 
     thresholds = [float(value) for value in args.thresholds]
+    if any(not np.isfinite(value) or value < 0.0 for value in thresholds):
+        raise ValueError("Thresholds must be finite and non-negative.")
 
     repo_root = args.repo_root.expanduser().resolve()
 
@@ -481,11 +503,7 @@ def main() -> None:
 
     infos_all = _load_infos(annotation)
 
-    scene_infos = [
-        info
-        for info in infos_all
-        if str(info.get("scene_token")) == str(args.scene)
-    ]
+    scene_infos = ordered_scene_infos(infos_all, args.scene)
 
     if not scene_infos:
         raise RuntimeError(
@@ -557,6 +575,10 @@ def main() -> None:
         ),
     )
 
+    unwrapper = build_velocity_unwrapper(
+        args, radar_cfg, doppler_classifier.motion_cfg,
+    )
+    print(f"Velocity mode: {args.velocity_unwrapping}")
     print("Static-threshold video")
     print(f"  scene       : {args.scene}")
     print(f"  frames      : {len(selected_infos)}")
@@ -571,14 +593,12 @@ def main() -> None:
     print(f"  output dir  : {output_dir}")
     print()
 
-    for output_index, info in enumerate(selected_infos):
+    # Even when --start is nonzero, process preceding observations to warm KF.
+    processing_start = 0 if unwrapper is not None else args.start
+    for scene_index in range(processing_start, stop):
+        info = scene_infos[scene_index]
+        output_index = scene_index - args.start
         token = str(info["lidar_token"])
-
-        camera_path = camera_by_token.get(token)
-        if camera_path is None:
-            raise FileNotFoundError(
-                f"No RGB image mapped for token={token}"
-            )
 
         radar_path = _resolve_rpc_radar(
             info,
@@ -601,9 +621,21 @@ def main() -> None:
             dt_s=args.pose_dt_s,
         )
 
-        residuals_all = doppler_classifier.residuals_with_velocity(
-            reliable_detections,
-            ego_motion.linear_velocity_radar_mps,
+        if unwrapper is None:
+            residuals_all = doppler_classifier.residuals_with_velocity(
+                reliable_detections, ego_motion.linear_velocity_radar_mps,
+            )
+        else:
+            residuals_all, _ = unwrapper.update(
+                reliable_detections, ego_motion, token,
+            )
+        if output_index < 0:
+            continue  # Warmup needs no RGB image and produces no video frame.
+        camera_path = camera_by_token.get(token)
+        if camera_path is None:
+            raise FileNotFoundError(f"No RGB image mapped for token={token}")
+        save_velocity_diagnostics(
+            output_dir / "velocity_unwrapping" / f"{token}.json", unwrapper,
         )
 
         xyz = np.asarray(
@@ -642,6 +674,7 @@ def main() -> None:
             all_point_size=args.all_point_size,
             static_point_size=args.static_point_size,
             dpi=args.dpi,
+            velocity_mode=args.velocity_unwrapping,
         )
 
         if (
@@ -667,6 +700,7 @@ def main() -> None:
                 f"{token} | "
                 f"reliable={len(reliable_detections):4d} | "
                 f"ROI={len(xy):4d} | "
+                f"unresolved={int(np.count_nonzero(~np.isfinite(residuals_roi)))} | "
                 f"static={counts}"
             )
 

@@ -10,6 +10,7 @@ from tradition.core.config import (
     PoseConfig,
     ReliabilityConfig,
     TemporalConfig,
+    UnwrappingConfig,
 )
 from tradition.experiment.dataset_runner import TraditionalDatasetRunner
 from tradition.pipeline.traditional_radar_pipeline import (
@@ -25,6 +26,10 @@ def parse_args() -> argparse.Namespace:
             "RadarOcc-style metrics and optional video."
         )
     )
+    parser.add_argument("--velocity-unwrapping", choices=("off", "range-kalman"), default="off",
+                        help="Range-only tracking before motion classification; requires RPC poses.")
+    parser.add_argument("--unwrap-range-std-m", type=float, default=0.20)
+    parser.add_argument("--unwrap-cluster-radius-m", type=float, default=1.5)
     parser.add_argument("--annotation", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
@@ -157,11 +162,17 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    unwrapping_cfg = (UnwrappingConfig(
+        frame_dt_s=args.pose_dt_s, range_std_m=args.unwrap_range_std_m,
+        cluster_radius_m=args.unwrap_cluster_radius_m,
+    ) if args.velocity_unwrapping == "range-kalman" else None)
     motion_cfg = MotionConfig(
         static_residual_threshold_mps=args.static_residual_threshold_mps,
         dynamic_residual_threshold_mps=args.dynamic_residual_threshold_mps,
         stationary_velocity_sign=args.stationary_velocity_sign,
     )
+    if unwrapping_cfg is not None and (args.input_mode != "rpc" or args.pose_root is None):
+        raise ValueError("--velocity-unwrapping range-kalman requires RPC and --pose-root.")
     pose_cfg = PoseConfig(frame_dt_s=args.pose_dt_s)
     reliability_cfg = ReliabilityConfig(
         min_local_power_ratio=args.min_local_power_ratio,
@@ -192,6 +203,7 @@ def main() -> None:
             temporal_cfg=temporal_cfg,
             object_cfg=object_cfg,
             object_model_path=args.object_model,
+            unwrapping_cfg=unwrapping_cfg,
         )
     else:
         if args.pose_root is not None:
@@ -232,3 +244,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

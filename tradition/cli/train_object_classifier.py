@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +14,7 @@ from tradition.core.config import (
     PoseConfig,
     ReliabilityConfig,
     TemporalConfig,
+    UnwrappingConfig,
 )
 from tradition.core.types import MotionLabel, TemporalDetectionFrame
 from tradition.detection.rpc_reliability_filter import LocalPowerRPCFilter
@@ -22,6 +23,7 @@ from tradition.evaluation.radarocc_metrics import load_gt_sparse_xyz
 from tradition.experiment.dataset_runner import _load_infos, _resolve_gt, _resolve_rpc_radar
 from tradition.io.pose_reader import RadarOccPoseReader
 from tradition.io.rpc_radar_reader import KRadarRPCReader
+from tradition.motion.range_kalman import RangeKalmanUnwrapper
 from tradition.motion.doppler_classifier import EgoCompensatedDopplerClassifier
 from tradition.motion.pose_ego_motion import PoseEgoMotionEstimator
 from tradition.motion.temporal_consistency import PoseAlignedTemporalClassifier
@@ -41,6 +43,10 @@ def parse_args() -> argparse.Namespace:
             "RadarOcc training GT. GT is used only here, never at inference."
         )
     )
+    parser.add_argument("--velocity-unwrapping", choices=("off", "range-kalman"), default="off",
+                        help="Range-only tracking before motion classification; requires RPC poses.")
+    parser.add_argument("--unwrap-range-std-m", type=float, default=0.20)
+    parser.add_argument("--unwrap-cluster-radius-m", type=float, default=1.5)
     parser.add_argument("--annotation", type=Path, required=True)
     parser.add_argument("--radar-root", type=Path, required=True)
     parser.add_argument("--pose-root", type=Path, required=True)
@@ -97,6 +103,10 @@ def _ego_motion(
 
 def main() -> None:
     args = parse_args()
+    unwrapping_cfg = (UnwrappingConfig(
+        frame_dt_s=args.pose_dt_s, range_std_m=args.unwrap_range_std_m,
+        cluster_radius_m=args.unwrap_cluster_radius_m,
+    ) if args.velocity_unwrapping == "range-kalman" else None)
     repo_root = args.repo_root.expanduser().resolve()
     radar_root = args.radar_root.expanduser().resolve()
     gt_root = args.gt_root.expanduser().resolve() if args.gt_root else None
@@ -130,6 +140,8 @@ def main() -> None:
             min_local_neighbors=args.min_local_neighbors,
         )
     )
+    unwrapper = (RangeKalmanUnwrapper(motion_cfg=motion_cfg, config=unwrapping_cfg)
+                 if unwrapping_cfg is not None else None)
     doppler = EgoCompensatedDopplerClassifier(motion_cfg=motion_cfg)
     temporal = PoseAlignedTemporalClassifier(temporal_cfg, motion_cfg)
     pose_reader = RadarOccPoseReader(args.pose_root)
@@ -167,15 +179,20 @@ def main() -> None:
         token = str(info["lidar_token"])
         if scene != active_scene:
             temporal.reset()
+            if unwrapper is not None:
+                unwrapper.reset()
             active_scene = scene
         radar_path = _resolve_rpc_radar(info, repo_root, radar_root)
         gt_path = _resolve_gt(info, repo_root, gt_root)
         ego = _ego_motion(pose_reader, pose_estimator, scene, token)
         raw = detector.detect(reader.read(radar_path))
         reliable = reliability.filter(raw)
-        residuals, evidence = doppler.evidence_with_velocity(
-            reliable, ego.linear_velocity_radar_mps
-        )
+        if unwrapper is None:
+            residuals, evidence = doppler.evidence_with_velocity(
+                reliable, ego.linear_velocity_radar_mps
+            )
+        else:
+            residuals, evidence = unwrapper.update(reliable, ego, token)
         result = temporal.update(
             TemporalDetectionFrame(
                 token=token,
@@ -234,6 +251,8 @@ def main() -> None:
         n_estimators=args.n_estimators,
         random_state=args.random_state,
         metadata={
+            "velocity_unwrapping": args.velocity_unwrapping,
+            "unwrapping_config": asdict(unwrapping_cfg) if unwrapping_cfg is not None else None,
             "annotation": str(args.annotation.expanduser().resolve()),
             "frame_count": len(infos),
             "foreground_candidates": outcome_counts[
@@ -258,3 +277,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

@@ -16,6 +16,7 @@ from tradition.core.config import (
     ObjectClusteringConfig,
     ReliabilityConfig,
     TemporalConfig,
+    UnwrappingConfig,
 )
 from tradition.core.interfaces import (
     DetectionReliabilityFilter,
@@ -50,6 +51,7 @@ from tradition.mapping.temporal_occupancy_grid_3d import (
 )
 from tradition.motion.doppler_classifier import EgoCompensatedDopplerClassifier
 from tradition.motion.ego_speed_estimator import RobustDopplerEgoSpeedEstimator
+from tradition.motion.range_kalman import RangeKalmanUnwrapper
 from tradition.motion.temporal_consistency import PoseAlignedTemporalClassifier
 from tradition.semantics.classical_classifier import DopplerSemanticClassifier
 from tradition.semantics.object_classifier import ObjectAwareSemanticClassifier
@@ -69,6 +71,7 @@ class TraditionalRadarPipeline:
         writer: PredictionWriter,
         reliability_filter: DetectionReliabilityFilter | None = None,
         temporal_classifier: TemporalMotionClassifier | None = None,
+        velocity_unwrapper: RangeKalmanUnwrapper | None = None,
     ) -> None:
         self.reader = reader
         self.detector = detector
@@ -79,8 +82,11 @@ class TraditionalRadarPipeline:
         self.writer = writer
         self.reliability_filter = reliability_filter
         self.temporal_classifier = temporal_classifier
+        self.velocity_unwrapper = velocity_unwrapper
 
     def reset_sequence(self) -> None:
+        if self.velocity_unwrapper is not None:
+            self.velocity_unwrapper.reset()
         if self.temporal_classifier is not None:
             self.temporal_classifier.reset()
 
@@ -89,6 +95,8 @@ class TraditionalRadarPipeline:
         measurement: Any,
         ego_speed_mps: float | None = None,
     ) -> FramePrediction:
+        if self.velocity_unwrapper is not None:
+            raise ValueError("Range-Kalman unwrapping requires temporal RPC with poses.")
         detections = self.detector.detect(measurement)
         resolved_ego_speed_mps = (
             self.ego_speed_estimator.estimate(detections)
@@ -163,10 +171,14 @@ class TraditionalRadarPipeline:
         measurement = self.reader.read(radar_path)
         raw_detections = self.detector.detect(measurement)
         reliable_detections = self.reliability_filter.filter(raw_detections)
-        residuals, evidence = self.motion_classifier.evidence_with_velocity(
-            reliable_detections,
-            ego_motion.linear_velocity_radar_mps,
-        )
+        if self.velocity_unwrapper is None:
+            residuals, evidence = self.motion_classifier.evidence_with_velocity(
+                reliable_detections, ego_motion.linear_velocity_radar_mps,
+            )
+        else:
+            residuals, evidence = self.velocity_unwrapper.update(
+                reliable_detections, ego_motion, token,
+            )
         temporal_frame = TemporalDetectionFrame(
             token=str(token),
             pose_lidar_to_world=ego_motion.pose_lidar_to_world,
@@ -256,6 +268,8 @@ class TraditionalRadarPipeline:
             motion_labels=motion_labels,
             semantic_labels=semantic_labels,
             metadata={
+                "velocity_unwrapping": (dict(self.velocity_unwrapper.last_diagnostics)
+                    if self.velocity_unwrapper is not None else {"method": "disabled"}),
                 "radar_path": str(radar_path),
                 "ego_speed_mps": float(
                     np.linalg.norm(ego_motion.linear_velocity_lidar_mps[:2])
@@ -417,6 +431,7 @@ def build_rpc_pipeline(
     temporal_cfg: TemporalConfig | None = None,
     object_cfg: ObjectClusteringConfig | None = None,
     object_model_path: str | Path | None = None,
+    unwrapping_cfg: UnwrappingConfig | None = None,
 ) -> TraditionalRadarPipeline:
     """Build the default Enhanced K-Radar RPC point-cloud baseline.
 
@@ -466,9 +481,12 @@ def build_rpc_pipeline(
         semantic_classifier=semantic_classifier,
         mapper=mapper,
         writer=writer,
+        velocity_unwrapper=(RangeKalmanUnwrapper(radar_cfg, motion_cfg, unwrapping_cfg)
+                            if unwrapping_cfg is not None else None),
         reliability_filter=LocalPowerRPCFilter(reliability_cfg),
         temporal_classifier=PoseAlignedTemporalClassifier(
             temporal_cfg=temporal_cfg,
             motion_cfg=motion_cfg,
         ),
     )
+
