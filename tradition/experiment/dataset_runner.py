@@ -445,11 +445,15 @@ class TraditionalDatasetRunner:
         radar_root_p = (
             Path(radar_root).expanduser().resolve() if radar_root else None
         )
-        calib_root_p = (
-            Path(calib_root).expanduser().resolve()
-            if calib_root
-            else (repo_root / "data" / "K-Radar_calib").resolve()
-        )
+        if calib_root:
+            calib_root_path = Path(calib_root).expanduser()
+            calib_root_p = (
+                calib_root_path.resolve()
+                if calib_root_path.is_absolute()
+                else (repo_root / calib_root_path).resolve()
+            )
+        else:
+            calib_root_p = (repo_root / "data" / "K-Radar_calib").resolve()
         gt_root_p = Path(gt_root).expanduser().resolve() if gt_root else None
         pose_root_p = (
             Path(pose_root).expanduser().resolve() if pose_root else None
