@@ -37,7 +37,7 @@ from tradition.motion.pose_ego_motion import PoseEgoMotionEstimator
 
 from tradition.analysis.visualize_static_thresholds import (
     add_velocity_arguments,
-    WorldStaticFallback,
+    WorldStaticPreclassifier,
     build_velocity_unwrapper,
     ordered_scene_infos,
     save_velocity_diagnostics,
@@ -319,7 +319,7 @@ def draw_bev(
             alpha=0.95,
             linewidths=0,
             rasterized=True,
-            label="World-stable wrapped fallback",
+            label="World-stable static prefilter",
         )
 
     ax.set_xlim(-grid.max_xyz[1], -grid.min_xyz[1])
@@ -333,7 +333,7 @@ def draw_bev(
     ax.set_title(
         rf"$\tau_s$ = {threshold:.2f} m/s"
         f"\nStatic {selected}/{total} ({100.0 * ratio:.1f}%)"
-        f" | fallback {int(np.count_nonzero(fallback_static_mask))}"
+        f" | prefilter {int(np.count_nonzero(fallback_static_mask))}"
         f" | unresolved {int(np.count_nonzero(unknown_mask))}"
     )
 
@@ -424,7 +424,7 @@ def render_frame(
         f"   |   ego speed {horizontal_speed:.2f} m/s"
         f"   |   reliable RPC {reliable_count}"
         f"   |   ROI {len(xy)}"
-        f"   |   fallback {int(np.count_nonzero(fallback_mask))}",
+        f"   |   prefilter {int(np.count_nonzero(fallback_mask))}",
         fontsize=12,
     )
 
@@ -609,12 +609,12 @@ def main() -> None:
     unwrapper = build_velocity_unwrapper(
         args, radar_cfg, doppler_classifier.motion_cfg,
     )
-    static_fallback = WorldStaticFallback(
+    static_prefilter = WorldStaticPreclassifier(
         window_size=args.fallback_static_window,
         min_support=args.fallback_static_min_support,
         match_radius_m=args.fallback_static_match_radius_m,
         wrapped_threshold_mps=args.fallback_wrapped_threshold_mps,
-        enabled=not args.disable_static_fallback,
+        enabled=not args.disable_static_prefilter,
     )
     print(f"Velocity mode: {args.velocity_unwrapping}")
     print("Static-threshold video")
@@ -669,16 +669,18 @@ def main() -> None:
             residuals_all = wrapped_residuals_all
             fallback_mask_all = np.zeros(len(reliable_detections), dtype=bool)
         else:
+            static_mask_all, world_support_all = static_prefilter.update(
+                reliable_detections, ego_motion, wrapped_residuals_all,
+            )
             temporal_residuals_all, _ = unwrapper.update(
                 reliable_detections, ego_motion, token,
+                excluded_mask=static_mask_all,
             )
-            residuals_all, fallback_mask_all, world_support_all = static_fallback.update(
-                reliable_detections, ego_motion,
-                wrapped_residuals_all, temporal_residuals_all,
-            )
+            residuals_all = temporal_residuals_all
+            fallback_mask_all = static_mask_all
             analysis_summary = velocity_source_summary(
                 unwrapper, temporal_residuals_all,
-                fallback_mask_all, world_support_all,
+                static_mask_all, world_support_all,
             )
         if output_index < 0:
             continue  # Warmup needs no RGB image and produces no video frame.
@@ -756,7 +758,7 @@ def main() -> None:
                 f"reliable={len(reliable_detections):4d} | "
                 f"ROI={len(xy):4d} | "
                 f"unresolved={int(np.count_nonzero(~np.isfinite(residuals_roi)))} | "
-                f"fallback={int(np.count_nonzero(fallback_mask_roi))} | "
+                f"prefilter={int(np.count_nonzero(fallback_mask_roi))} | "
                 f"static={counts}"
             )
 
