@@ -37,9 +37,11 @@ from tradition.motion.pose_ego_motion import PoseEgoMotionEstimator
 
 from tradition.analysis.visualize_static_thresholds import (
     add_velocity_arguments,
+    WorldStaticFallback,
     build_velocity_unwrapper,
     ordered_scene_infos,
     save_velocity_diagnostics,
+    velocity_source_summary,
 )
 
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
@@ -247,6 +249,7 @@ def draw_bev(
     ax,
     xy: np.ndarray,
     residuals: np.ndarray,
+    fallback_mask: np.ndarray,
     threshold: float,
     grid: GridConfig,
     all_point_size: float,
@@ -265,6 +268,8 @@ def draw_bev(
     """
     absolute = np.abs(residuals)
     static_mask = np.isfinite(absolute) & (absolute <= threshold)
+    fallback_static_mask = static_mask & np.asarray(fallback_mask, dtype=bool)
+    kalman_static_mask = static_mask & ~fallback_static_mask
 
     total = int(len(xy))
     selected = int(np.count_nonzero(static_mask))
@@ -293,16 +298,28 @@ def draw_bev(
             linewidths=0.7, label="Unresolved velocity", rasterized=True,
         )
 
-    if selected:
+    if np.any(kalman_static_mask):
         ax.scatter(
-            display_x[static_mask],
-            display_y[static_mask],
+            display_x[kalman_static_mask],
+            display_y[kalman_static_mask],
             s=static_point_size,
             c="tab:blue",
             alpha=0.95,
             linewidths=0,
             rasterized=True,
-            label=r"Static: $|r|\leq\tau_s$",
+            label=r"Kalman static: $|r|\leq\tau_s$",
+        )
+
+    if np.any(fallback_static_mask):
+        ax.scatter(
+            display_x[fallback_static_mask],
+            display_y[fallback_static_mask],
+            s=static_point_size,
+            c="tab:cyan",
+            alpha=0.95,
+            linewidths=0,
+            rasterized=True,
+            label="World-stable wrapped fallback",
         )
 
     ax.set_xlim(-grid.max_xyz[1], -grid.min_xyz[1])
@@ -316,6 +333,7 @@ def draw_bev(
     ax.set_title(
         rf"$\tau_s$ = {threshold:.2f} m/s"
         f"\nStatic {selected}/{total} ({100.0 * ratio:.1f}%)"
+        f" | fallback {int(np.count_nonzero(fallback_static_mask))}"
         f" | unresolved {int(np.count_nonzero(unknown_mask))}"
     )
 
@@ -348,6 +366,7 @@ def render_frame(
     frame_ordinal: int,
     xy: np.ndarray,
     residuals: np.ndarray,
+    fallback_mask: np.ndarray,
     thresholds: list[float],
     grid: GridConfig,
     ego_velocity_radar: np.ndarray,
@@ -374,6 +393,7 @@ def render_frame(
             ax=ax,
             xy=xy,
             residuals=residuals,
+            fallback_mask=fallback_mask,
             threshold=float(threshold),
             grid=grid,
             all_point_size=all_point_size,
@@ -403,7 +423,8 @@ def render_frame(
         f"   |   frame {frame_ordinal}"
         f"   |   ego speed {horizontal_speed:.2f} m/s"
         f"   |   reliable RPC {reliable_count}"
-        f"   |   ROI {len(xy)}",
+        f"   |   ROI {len(xy)}"
+        f"   |   fallback {int(np.count_nonzero(fallback_mask))}",
         fontsize=12,
     )
 
@@ -588,6 +609,13 @@ def main() -> None:
     unwrapper = build_velocity_unwrapper(
         args, radar_cfg, doppler_classifier.motion_cfg,
     )
+    static_fallback = WorldStaticFallback(
+        window_size=args.fallback_static_window,
+        min_support=args.fallback_static_min_support,
+        match_radius_m=args.fallback_static_match_radius_m,
+        wrapped_threshold_mps=args.fallback_wrapped_threshold_mps,
+        enabled=not args.disable_static_fallback,
+    )
     print(f"Velocity mode: {args.velocity_unwrapping}")
     print("Static-threshold video")
     print(f"  scene       : {args.scene}")
@@ -633,13 +661,24 @@ def main() -> None:
             dt_s=args.pose_dt_s,
         )
 
+        wrapped_residuals_all = doppler_classifier.residuals_with_velocity(
+            reliable_detections, ego_motion.linear_velocity_radar_mps,
+        )
+        analysis_summary = None
         if unwrapper is None:
-            residuals_all = doppler_classifier.residuals_with_velocity(
-                reliable_detections, ego_motion.linear_velocity_radar_mps,
-            )
+            residuals_all = wrapped_residuals_all
+            fallback_mask_all = np.zeros(len(reliable_detections), dtype=bool)
         else:
-            residuals_all, _ = unwrapper.update(
+            kalman_residuals_all, _ = unwrapper.update(
                 reliable_detections, ego_motion, token,
+            )
+            residuals_all, fallback_mask_all, world_support_all = static_fallback.update(
+                reliable_detections, ego_motion,
+                wrapped_residuals_all, kalman_residuals_all,
+            )
+            analysis_summary = velocity_source_summary(
+                unwrapper, kalman_residuals_all,
+                fallback_mask_all, world_support_all,
             )
         if output_index < 0:
             continue  # Warmup needs no RGB image and produces no video frame.
@@ -647,7 +686,9 @@ def main() -> None:
         if camera_path is None:
             raise FileNotFoundError(f"No RGB image mapped for token={token}")
         save_velocity_diagnostics(
-            output_dir / "velocity_unwrapping" / f"{token}.json", unwrapper,
+            output_dir / "velocity_unwrapping" / f"{token}.json",
+            unwrapper,
+            analysis_summary,
         )
 
         xyz = np.asarray(
@@ -665,6 +706,7 @@ def main() -> None:
 
         xyz_roi = xyz[roi_mask]
         residuals_roi = residuals_all[roi_mask]
+        fallback_mask_roi = fallback_mask_all[roi_mask]
         xy = xyz_roi[:, :2]
 
         save_path = (
@@ -679,6 +721,7 @@ def main() -> None:
             frame_ordinal=args.start + output_index,
             xy=xy,
             residuals=residuals_roi,
+            fallback_mask=fallback_mask_roi,
             thresholds=thresholds,
             grid=grid_cfg,
             ego_velocity_radar=ego_motion.linear_velocity_radar_mps,
@@ -713,6 +756,7 @@ def main() -> None:
                 f"reliable={len(reliable_detections):4d} | "
                 f"ROI={len(xy):4d} | "
                 f"unresolved={int(np.count_nonzero(~np.isfinite(residuals_roi)))} | "
+                f"fallback={int(np.count_nonzero(fallback_mask_roi))} | "
                 f"static={counts}"
             )
 
