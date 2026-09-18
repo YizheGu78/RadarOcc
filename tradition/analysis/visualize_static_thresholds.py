@@ -50,7 +50,7 @@ def add_velocity_arguments(parser):
     parser.add_argument("--range-difference-max-speed-mps", type=float, default=40.0)
     parser.add_argument("--range-difference-max-error-mps", type=float, default=0.80)
     parser.add_argument("--fallback-static-window", type=int, default=5)
-    parser.add_argument("--fallback-static-min-support", type=int, default=3)
+    parser.add_argument("--fallback-static-min-support", type=int, default=2)
     parser.add_argument("--fallback-static-match-radius-m", type=float, default=0.60)
     parser.add_argument("--fallback-wrapped-threshold-mps", type=float, default=0.50)
     parser.add_argument(
