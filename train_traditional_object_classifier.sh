@@ -8,6 +8,7 @@ CONDA_ENV="${CONDA_ENV:-radarocc-vis}"
 
 ANNOTATION="${ANNOTATION:-$REPO_ROOT/data/annotations/kradar_dict_train_official_doppler8.pkl}"
 RADAR_ROOT="${RADAR_ROOT:-$REPO_ROOT/data/K-Radar_rpc}"
+CALIB_ROOT="${CALIB_ROOT:-$REPO_ROOT/data/K-Radar_calib}"
 POSE_ROOT="${POSE_ROOT:-$REPO_ROOT/data/K-RadarOcc}"
 OUTPUT_MODEL="${OUTPUT_MODEL:-$REPO_ROOT/work_dirs/traditional_object_classifier/object_random_forest_42d.joblib}"
 MAX_FRAMES="${MAX_FRAMES:-}"
@@ -41,6 +42,7 @@ activate_conda_env
 
 [[ -f "$ANNOTATION" ]] || fail "Training annotation not found: $ANNOTATION"
 [[ -d "$RADAR_ROOT" ]] || fail "RPC radar root not found: $RADAR_ROOT"
+[[ -d "$CALIB_ROOT" ]] || fail "Calibration root not found: $CALIB_ROOT"
 [[ -d "$POSE_ROOT" ]] || fail "Pose root not found: $POSE_ROOT"
 python -c "import sklearn, joblib" >/dev/null 2>&1 || fail \
     "Install scikit-learn and joblib in '$CONDA_ENV'."
@@ -54,6 +56,7 @@ cd "$REPO_ROOT"
 PYTHONPATH="$REPO_ROOT" python -u -m tradition.cli.train_object_classifier \
     --annotation "$ANNOTATION" \
     --radar-root "$RADAR_ROOT" \
+    --calib-root "$CALIB_ROOT" \
     --pose-root "$POSE_ROOT" \
     --pose-dt-s "$POSE_DT_S" \
     --output-model "$OUTPUT_MODEL" \
