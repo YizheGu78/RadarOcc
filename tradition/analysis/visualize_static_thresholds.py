@@ -43,9 +43,18 @@ def add_velocity_arguments(parser):
             "differences and solve integer k; off shows wrapped residuals."
         ),
     )
-    parser.add_argument("--unwrap-cluster-radius-m", type=float, default=1.5)
+    parser.add_argument("--unwrap-cluster-radius-m", type=float, default=0.8)
+    parser.add_argument(
+        "--unwrap-max-cluster-extent-m",
+        type=float,
+        default=4.0,
+        help=(
+            "Maximum XY diameter of a world-anchored local patch. "
+            "Prevents long guardrails from becoming one cluster."
+        ),
+    )
     parser.add_argument("--range-difference-association-radius-m", type=float, default=1.0)
-    parser.add_argument("--range-difference-history", type=int, default=3)
+    parser.add_argument("--range-difference-history", type=int, default=5)
     parser.add_argument("--range-difference-max-speed-mps", type=float, default=40.0)
     parser.add_argument("--range-difference-max-error-mps", type=float, default=0.80)
 
@@ -55,14 +64,21 @@ class RangeDifferenceUnwrapper:
 
     def __init__(
         self, radar_cfg, motion_cfg, frame_dt_s=0.10,
-        cluster_radius_m=1.5, association_radius_m=1.0,
-        history_size=3, min_cluster_points=2,
+        cluster_radius_m=0.8, max_cluster_extent_m=4.0,
+        association_radius_m=1.0, history_size=5, min_cluster_points=2,
         max_speed_mps=40.0, max_doppler_error_mps=0.80,
     ):
         if frame_dt_s <= 0.0:
             raise ValueError("frame_dt_s must be positive")
-        if cluster_radius_m <= 0.0 or association_radius_m <= 0.0:
-            raise ValueError("cluster/association radii must be positive")
+        if (
+            cluster_radius_m <= 0.0
+            or max_cluster_extent_m <= 0.0
+            or association_radius_m <= 0.0
+        ):
+            raise ValueError(
+                "cluster radius, maximum extent, and association radius "
+                "must be positive"
+            )
         if history_size < 2:
             raise ValueError("range-difference history must be >= 2")
         if max_speed_mps <= 0.0 or max_doppler_error_mps <= 0.0:
@@ -71,6 +87,7 @@ class RangeDifferenceUnwrapper:
         self.motion_cfg = motion_cfg
         self.frame_dt_s = float(frame_dt_s)
         self.cluster_radius_m = float(cluster_radius_m)
+        self.max_cluster_extent_m = float(max_cluster_extent_m)
         self.association_radius_m = float(association_radius_m)
         self.history_size = int(history_size)
         self.min_cluster_points = int(min_cluster_points)
@@ -90,45 +107,84 @@ class RangeDifferenceUnwrapper:
         self.scene = None
         self.last_diagnostics = {}
 
-    def _clusters(self, detections):
-        xyz = np.asarray(
+    def _clusters(self, detections, pose):
+        """Build compact patches in a fixed world-coordinate grid.
+
+        Radius connectivity is evaluated only inside one world-anchored patch.
+        This removes single-linkage chaining along guardrails while keeping
+        patch boundaries stable as the ego vehicle moves.
+        """
+        xyz_lidar = np.asarray(
             [det.xyz_lidar_m for det in detections], dtype=np.float64
         ).reshape(-1, 3)
-        valid = np.flatnonzero(np.all(np.isfinite(xyz), axis=1))
+        valid = np.flatnonzero(np.all(np.isfinite(xyz_lidar), axis=1))
         if not len(valid):
             return []
-        tree = cKDTree(xyz[valid])
-        unseen = set(range(len(valid)))
+
+        xyz_world = (
+            pose[:3, :3] @ xyz_lidar.T
+        ).T + pose[:3, 3]
+
+        # A square cell with this side length has an XY diagonal no larger
+        # than max_cluster_extent_m.
+        patch_width = self.max_cluster_extent_m / np.sqrt(2.0)
+        patch_keys = np.floor(
+            xyz_world[valid, :2] / patch_width
+        ).astype(np.int64)
+        patches = {}
+        for detection_index, key in zip(valid, patch_keys):
+            patches.setdefault(tuple(key.tolist()), []).append(
+                int(detection_index)
+            )
+
         clusters = []
-        while unseen:
-            seed = min(unseen)
-            unseen.remove(seed)
-            pending, component = [seed], []
-            while pending:
-                local_index = pending.pop()
-                component.append(int(valid[local_index]))
-                for neighbour in tree.query_ball_point(
-                    xyz[valid[local_index]], self.cluster_radius_m
-                ):
-                    if neighbour in unseen:
-                        unseen.remove(neighbour)
-                        pending.append(neighbour)
-            if len(component) >= self.min_cluster_points:
-                clusters.append(np.asarray(sorted(component), dtype=np.int64))
+        for key in sorted(patches):
+            member_indices = np.asarray(
+                patches[key], dtype=np.int64
+            )
+            tree = cKDTree(xyz_world[member_indices])
+            unseen = set(range(len(member_indices)))
+
+            while unseen:
+                seed = min(unseen)
+                unseen.remove(seed)
+                pending, component = [seed], []
+                while pending:
+                    local_index = pending.pop()
+                    component.append(int(member_indices[local_index]))
+                    for neighbour in tree.query_ball_point(
+                        xyz_world[member_indices[local_index]],
+                        self.cluster_radius_m,
+                    ):
+                        if neighbour in unseen:
+                            unseen.remove(neighbour)
+                            pending.append(neighbour)
+
+                if len(component) >= self.min_cluster_points:
+                    clusters.append(
+                        np.asarray(sorted(component), dtype=np.int64)
+                    )
         return clusters
 
     @staticmethod
     def _track_velocity_world(track):
+        """Robust velocity from the median of all pairwise history slopes."""
         history = track["history"]
         if len(history) < 2:
             return None
         times = np.asarray([item[0] for item in history], dtype=np.float64)
         centers = np.asarray([item[1] for item in history], dtype=np.float64)
-        centered = times - float(np.mean(times))
-        denominator = float(centered @ centered)
-        if denominator <= 1e-9:
+        slopes = []
+        for first in range(len(history) - 1):
+            for second in range(first + 1, len(history)):
+                dt = float(times[second] - times[first])
+                if dt > 1e-9:
+                    slopes.append(
+                        (centers[second] - centers[first]) / dt
+                    )
+        if not slopes:
             return None
-        return (centered[:, None] * centers).sum(axis=0) / denominator
+        return np.median(np.asarray(slopes, dtype=np.float64), axis=0)
 
     def _predicted_center(self, track, time):
         previous_time, previous_center = track["history"][-1]
@@ -162,8 +218,8 @@ class RangeDifferenceUnwrapper:
         # Every reliable RPC point participates in cross-frame association.
         # Wrapped Doppler is not used as a static pre-gate because aliasing can
         # wrap fast radial motion close to zero.
-        clusters = self._clusters(detections)
         pose = np.asarray(ego_motion.pose_lidar_to_world, dtype=np.float64)
+        clusters = self._clusters(detections, pose)
         observations = []
         for indices in clusters:
             center_lidar = np.median(
@@ -177,9 +233,17 @@ class RangeDifferenceUnwrapper:
             (len(self.tracks), len(clusters)), np.inf, dtype=np.float64
         )
         for track_index, track in enumerate(self.tracks):
-            dt = time - track["history"][-1][0]
+            dt = max(time - track["history"][-1][0], 0.0)
+            velocity_world = self._track_velocity_world(track)
             predicted_center = self._predicted_center(track, time)
-            gate = self.association_radius_m + self.max_speed_mps * max(dt, 0.0)
+            if velocity_world is None:
+                gate = self.association_radius_m
+            else:
+                track_speed = min(
+                    float(np.linalg.norm(velocity_world)),
+                    self.max_speed_mps,
+                )
+                gate = self.association_radius_m + track_speed * dt
             for cluster_index, center_world in enumerate(observations):
                 distance = float(np.linalg.norm(center_world - predicted_center))
                 if distance <= gate:
@@ -266,6 +330,10 @@ class RangeDifferenceUnwrapper:
             "method": "range_difference_position_history",
             "token": str(token),
             "doppler_period_mps": self.radar_cfg.doppler_period_mps,
+            "cluster_radius_m": self.cluster_radius_m,
+            "max_cluster_extent_m": self.max_cluster_extent_m,
+            "association_radius_m": self.association_radius_m,
+            "history_size": self.history_size,
             "track_ids": track_ids.tolist(),
             "ambiguity_k": ambiguity,
             "wrapped_residual_mps": [
@@ -290,6 +358,7 @@ def build_velocity_unwrapper(args, radar_cfg, motion_cfg):
         motion_cfg=motion_cfg,
         frame_dt_s=args.pose_dt_s,
         cluster_radius_m=args.unwrap_cluster_radius_m,
+        max_cluster_extent_m=args.unwrap_max_cluster_extent_m,
         association_radius_m=args.range_difference_association_radius_m,
         history_size=args.range_difference_history,
         max_speed_mps=args.range_difference_max_speed_mps,
