@@ -4,6 +4,7 @@ import json
 import math
 import pickle
 import re
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,7 @@ _RPC_RADAR_DIRS = (
     "radar_pc",
     "radar_point_cloud",
 )
+_CALIBRATION_FILENAME = "calib_radar_lidar.txt"
 
 
 def _natural_key(path: Path) -> list[object]:
@@ -228,10 +230,86 @@ def _scene_variants(scene: str) -> list[str]:
     return variants
 
 
+def _frame_number_tokens(frame_index: int) -> list[str]:
+    return list(dict.fromkeys(
+        (f"{frame_index:05d}", f"{frame_index:06d}", str(frame_index))
+    ))
+
+
+def _aligned_frame_index(info: dict[str, Any], radar_value: str) -> int:
+    """Return the synchronized annotation/LiDAR frame index."""
+    sources = (
+        str(info.get("radar_frame_idx", "")),
+        Path(radar_value).stem,
+        str(info.get("lidar_token", "")),
+    )
+    for source in sources:
+        groups = re.findall(r"\d+", source)
+        if groups:
+            return int(groups[-1])
+    raise ValueError(
+        "Cannot extract an aligned frame index from radar_frame_idx, "
+        f"radar path, or lidar_token: {info}"
+    )
+
+
+@lru_cache(maxsize=None)
+def _read_frame_difference(calib_root_text: str, scene: str) -> tuple[int, Path]:
+    calib_root = Path(calib_root_text)
+    candidates = [
+        calib_root / scene_name / "info_calib" / _CALIBRATION_FILENAME
+        for scene_name in _scene_variants(scene)
+    ]
+    calib_path = _first_existing(candidates)
+    if calib_path is None:
+        raise FileNotFoundError(
+            f"Cannot resolve {_CALIBRATION_FILENAME} for scene={scene}; "
+            f"tried {candidates}"
+        )
+
+    for line in calib_path.read_text(encoding="utf-8-sig").splitlines():
+        fields = [field for field in re.split(r"[,\s]+", line.strip()) if field]
+        if not fields:
+            continue
+        try:
+            value = float(fields[0])
+        except ValueError:
+            continue
+        if not math.isfinite(value) or not value.is_integer():
+            raise ValueError(
+                f"Invalid frame difference in {calib_path}: {fields[0]!r}"
+            )
+        return int(value), calib_path
+
+    raise ValueError(
+        f"No numeric frame difference found in calibration file: {calib_path}"
+    )
+
+
+def _rpc_frame_mapping(
+    info: dict[str, Any],
+    radar_value: str,
+    calib_root: Path,
+) -> tuple[int, int, int, Path]:
+    scene = str(info.get("scene_token", ""))
+    aligned_frame = _aligned_frame_index(info, radar_value)
+    frame_difference, calib_path = _read_frame_difference(
+        str(calib_root.resolve()), scene
+    )
+    rpc_frame = aligned_frame + frame_difference
+    if rpc_frame < 0:
+        raise ValueError(
+            f"Negative RPC frame for scene={scene}: aligned={aligned_frame}, "
+            f"difference={frame_difference}, calibration={calib_path}"
+        )
+    return aligned_frame, frame_difference, rpc_frame, calib_path
+
+
 def _resolve_rpc_radar(
     info: dict[str, Any],
     repo_root: Path,
     radar_root: Path | None,
+    calib_root: Path | None = None,
 ) -> Path:
     value = _radar_value(info)
     if value is None:
@@ -241,12 +319,22 @@ def _resolve_rpc_radar(
 
     raw = Path(value)
     scene = str(info.get("scene_token", ""))
-    frame_tokens = _frame_tokens(info, value)
-    names = _rpc_names(frame_tokens)
 
+    # A direct NPY is already an explicit RPC path and needs no filename mapping.
     direct = _first_raw_radar([raw, repo_root / raw])
     if direct is not None and direct.suffix.lower() == ".npy":
         return direct
+
+    calibration_root = (
+        Path(calib_root).expanduser().resolve()
+        if calib_root is not None
+        else (repo_root / "data" / "K-Radar_calib").resolve()
+    )
+    aligned_frame, frame_difference, rpc_frame, calib_path = _rpc_frame_mapping(
+        info, value, calibration_root
+    )
+    frame_tokens = _frame_number_tokens(rpc_frame)
+    names = _rpc_names(frame_tokens)
 
     candidates: list[Path] = []
     if radar_root is not None:
@@ -267,6 +355,10 @@ def _resolve_rpc_radar(
         "Cannot resolve Enhanced K-Radar RPC point cloud. Expected an "
         "rpc_*.npy/pc01p_*.npy [N,11] file.\n"
         f"Annotation radar path: {raw}\n"
+        f"Aligned frame: {aligned_frame:05d}\n"
+        f"Frame difference: {frame_difference:+d}\n"
+        f"RPC frame: {rpc_frame:05d}\n"
+        f"Calibration: {calib_path}\n"
         f"Radar frame candidates: {frame_tokens}\n"
         f"Scene: {scene}\n"
         f"Input root: {radar_root}\n"
@@ -320,6 +412,7 @@ class TraditionalDatasetRunner:
         output_dir: str | Path,
         repo_root: str | Path = ".",
         radar_root: str | Path | None = None,
+        calib_root: str | Path | None = None,
         gt_root: str | Path | None = None,
         gt_order: str = "xyz",
         scene: str | None = None,
@@ -351,6 +444,11 @@ class TraditionalDatasetRunner:
         repo_root = Path(repo_root).expanduser().resolve()
         radar_root_p = (
             Path(radar_root).expanduser().resolve() if radar_root else None
+        )
+        calib_root_p = (
+            Path(calib_root).expanduser().resolve()
+            if calib_root
+            else (repo_root / "data" / "K-Radar_calib").resolve()
         )
         gt_root_p = Path(gt_root).expanduser().resolve() if gt_root else None
         pose_root_p = (
@@ -420,7 +518,9 @@ class TraditionalDatasetRunner:
                 self.pipeline.reset_sequence()
                 active_scene = scene_token
             if input_mode == "rpc":
-                radar_path = _resolve_rpc_radar(info, repo_root, radar_root_p)
+                radar_path = _resolve_rpc_radar(
+                    info, repo_root, radar_root_p, calib_root_p
+                )
             else:
                 radar_path = _resolve_raw_radar(info, repo_root, radar_root_p)
 
