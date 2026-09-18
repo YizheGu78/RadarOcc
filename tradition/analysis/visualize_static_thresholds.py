@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import deque
 from pathlib import Path
 
 import matplotlib
@@ -12,6 +13,7 @@ matplotlib.use("Agg")
 import matplotlib.image as mpimg
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy.spatial import cKDTree
 
 from tradition.core.config import (
     GridConfig,
@@ -41,6 +43,14 @@ def add_velocity_arguments(parser):
     )
     parser.add_argument("--unwrap-range-std-m", type=float, default=0.20)
     parser.add_argument("--unwrap-cluster-radius-m", type=float, default=1.5)
+    parser.add_argument("--fallback-static-window", type=int, default=5)
+    parser.add_argument("--fallback-static-min-support", type=int, default=3)
+    parser.add_argument("--fallback-static-match-radius-m", type=float, default=0.60)
+    parser.add_argument("--fallback-wrapped-threshold-mps", type=float, default=0.50)
+    parser.add_argument(
+        "--disable-static-fallback", action="store_true",
+        help="Disable world-stable wrapped-static fallback for comparison.",
+    )
 
 
 def build_velocity_unwrapper(args, radar_cfg, motion_cfg):
@@ -70,15 +80,122 @@ def ordered_scene_infos(infos, scene):
     return selected
 
 
-def save_velocity_diagnostics(path, unwrapper):
+def save_velocity_diagnostics(path, unwrapper, analysis_summary=None):
     if unwrapper is None:
         return
     import json
+    payload = dict(unwrapper.last_diagnostics)
+    if analysis_summary is not None:
+        payload["visualization_static_fallback"] = analysis_summary
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps(unwrapper.last_diagnostics, allow_nan=False),
+        json.dumps(payload, allow_nan=False),
         encoding="utf-8",
     )
+
+
+class WorldStaticFallback:
+    """Causal fallback for stable structure when Range-Kalman is unresolved."""
+
+    def __init__(
+        self,
+        window_size=5,
+        min_support=3,
+        match_radius_m=0.60,
+        wrapped_threshold_mps=0.50,
+        enabled=True,
+    ):
+        if window_size < 2:
+            raise ValueError("fallback window_size must be >= 2")
+        if not 2 <= min_support <= window_size:
+            raise ValueError("fallback min_support must be in [2, window_size]")
+        if match_radius_m <= 0.0 or wrapped_threshold_mps < 0.0:
+            raise ValueError("fallback radii/thresholds must be non-negative")
+        self.window_size = int(window_size)
+        self.min_support = int(min_support)
+        self.match_radius_m = float(match_radius_m)
+        self.wrapped_threshold_mps = float(wrapped_threshold_mps)
+        self.enabled = bool(enabled)
+        self.history = deque(maxlen=self.window_size - 1)
+
+    def update(self, detections, ego_motion, wrapped_residuals, kalman_residuals):
+        wrapped = np.asarray(wrapped_residuals, dtype=np.float64)
+        kalman = np.asarray(kalman_residuals, dtype=np.float64)
+        if wrapped.shape != kalman.shape or wrapped.shape != (len(detections),):
+            raise ValueError("Fallback residual arrays must match detections.")
+
+        xyz_lidar = np.asarray(
+            [det.xyz_lidar_m for det in detections], dtype=np.float64
+        ).reshape(-1, 3)
+        pose = np.asarray(ego_motion.pose_lidar_to_world, dtype=np.float64)
+        world_xyz = xyz_lidar @ pose[:3, :3].T + pose[:3, 3]
+
+        support = np.ones(len(detections), dtype=np.int16)
+        finite_current = np.all(np.isfinite(world_xyz), axis=1)
+        for previous_world in self.history:
+            if not len(previous_world) or not np.any(finite_current):
+                continue
+            distances, _ = cKDTree(previous_world).query(
+                world_xyz[finite_current], k=1
+            )
+            support[finite_current] += (
+                distances <= self.match_radius_m
+            ).astype(np.int16)
+
+        stable_world = finite_current & (support >= self.min_support)
+        fallback_mask = (
+            self.enabled
+            & ~np.isfinite(kalman)
+            & stable_world
+            & np.isfinite(wrapped)
+            & (np.abs(wrapped) <= self.wrapped_threshold_mps)
+        )
+        combined = kalman.copy()
+        combined[fallback_mask] = wrapped[fallback_mask]
+
+        self.history.append(world_xyz[finite_current].copy())
+        return combined, fallback_mask, support
+
+
+def velocity_source_summary(
+    unwrapper,
+    kalman_residuals,
+    fallback_mask,
+    support,
+):
+    diagnostics = unwrapper.last_diagnostics
+    kalman = np.asarray(kalman_residuals, dtype=np.float64)
+    fallback = np.asarray(fallback_mask, dtype=bool)
+    track_ids = np.asarray(diagnostics["track_ids"], dtype=np.int64)
+    has_prediction = np.asarray(
+        [value is not None for value in diagnostics["kf_residual_mps"]],
+        dtype=bool,
+    )
+    kalman_resolved = np.isfinite(kalman)
+    no_cluster = track_ids < 0
+    no_prediction = (track_ids >= 0) & ~has_prediction & ~kalman_resolved
+    doppler_gate_failed = has_prediction & ~kalman_resolved
+    return {
+        "kalman_resolved_count": int(np.count_nonzero(kalman_resolved)),
+        "stable_wrapped_fallback_count": int(np.count_nonzero(fallback)),
+        "unresolved_after_fallback_count": int(
+            np.count_nonzero(~kalman_resolved & ~fallback)
+        ),
+        "no_cluster_count": int(np.count_nonzero(no_cluster)),
+        "track_not_ready_or_range_check_or_reassociation_count": int(
+            np.count_nonzero(no_prediction)
+        ),
+        "doppler_gate_failed_count": int(np.count_nonzero(doppler_gate_failed)),
+        "world_support_histogram": {
+            str(value): int(count)
+            for value, count in zip(*np.unique(support, return_counts=True))
+        },
+        "note": (
+            "The current RangeKalman diagnostics cannot separate immature "
+            "tracks, range-check rejection, and ambiguous reassociation; "
+            "those cases share the combined count above."
+        ),
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -268,6 +385,7 @@ def plot_bev(
     ax,
     xy: np.ndarray,
     residuals: np.ndarray,
+    fallback_mask: np.ndarray,
     threshold: float,
     grid: GridConfig,
     all_point_size: float,
@@ -275,6 +393,8 @@ def plot_bev(
 ) -> tuple[int, int, float]:
     absolute = np.abs(residuals)
     static_mask = np.isfinite(absolute) & (absolute <= threshold)
+    fallback_static_mask = static_mask & np.asarray(fallback_mask, dtype=bool)
+    kalman_static_mask = static_mask & ~fallback_static_mask
 
     total = int(len(xy))
     selected = int(np.count_nonzero(static_mask))
@@ -317,16 +437,29 @@ def plot_bev(
             linewidths=0.7, label="Unresolved velocity", rasterized=True,
         )
 
-    # 蓝色：当前 threshold 下判定为 Static 的点
-    if selected:
+    # 蓝色：Range-Kalman 成功解折叠后判定为 Static 的点
+    if np.any(kalman_static_mask):
         ax.scatter(
-            display_x[static_mask],
-            display_y[static_mask],
+            display_x[kalman_static_mask],
+            display_y[kalman_static_mask],
             s=static_point_size,
             c="tab:blue",
             alpha=0.95,
             linewidths=0,
-            label=r"Static: $|r|\leq\tau_s$",
+            label=r"Kalman static: $|r|\leq\tau_s$",
+            rasterized=True,
+        )
+
+    # 青色：Kalman 未解出，但世界坐标稳定且 wrapped residual 接近零。
+    if np.any(fallback_static_mask):
+        ax.scatter(
+            display_x[fallback_static_mask],
+            display_y[fallback_static_mask],
+            s=static_point_size,
+            c="tab:cyan",
+            alpha=0.95,
+            linewidths=0,
+            label="World-stable wrapped fallback",
             rasterized=True,
         )
 
@@ -355,6 +488,7 @@ def plot_bev(
     ax.set_title(
         rf"$\tau_s$ = {threshold:.2f} m/s"
         f"\nStatic: {selected}/{total} ({100.0 * ratio:.1f}%)"
+        f" | fallback {int(np.count_nonzero(fallback_static_mask))}"
         f" | unresolved {int(np.count_nonzero(unknown_mask))}"
     )
 
@@ -478,13 +612,22 @@ def main() -> None:
     unwrapper = build_velocity_unwrapper(
         args, radar_cfg, doppler_classifier.motion_cfg,
     )
+    static_fallback = WorldStaticFallback(
+        window_size=args.fallback_static_window,
+        min_support=args.fallback_static_min_support,
+        match_radius_m=args.fallback_static_match_radius_m,
+        wrapped_threshold_mps=args.fallback_wrapped_threshold_mps,
+        enabled=not args.disable_static_fallback,
+    )
+    wrapped_residuals_all = doppler_classifier.residuals_with_velocity(
+        reliable_detections, ego_motion.linear_velocity_radar_mps,
+    )
+    analysis_summary = None
     if unwrapper is None:
-        residuals_all = doppler_classifier.residuals_with_velocity(
-            reliable_detections, ego_motion.linear_velocity_radar_mps,
-        )
+        residuals_all = wrapped_residuals_all
+        fallback_mask_all = np.zeros(len(reliable_detections), dtype=bool)
+        world_support_all = np.ones(len(reliable_detections), dtype=np.int16)
     else:
-        # Replay all available preceding scene observations, in pose-index order.
-        # Never use future detections and never initialize from just the target.
         target_index = pose_reader.frame_index(str(args.token))
         for history_info in ordered_scene_infos(infos, args.scene):
             history_token = str(history_info["lidar_token"])
@@ -500,9 +643,26 @@ def main() -> None:
                 pose_reader, pose_estimator, str(args.scene),
                 history_token, args.pose_dt_s,
             )
-            unwrapper.update(history_detections, history_motion, history_token)
-        residuals_all, _ = unwrapper.update(
+            history_wrapped = doppler_classifier.residuals_with_velocity(
+                history_detections, history_motion.linear_velocity_radar_mps,
+            )
+            history_kalman, _ = unwrapper.update(
+                history_detections, history_motion, history_token
+            )
+            static_fallback.update(
+                history_detections, history_motion,
+                history_wrapped, history_kalman,
+            )
+        kalman_residuals_all, _ = unwrapper.update(
             reliable_detections, ego_motion, str(args.token),
+        )
+        residuals_all, fallback_mask_all, world_support_all = static_fallback.update(
+            reliable_detections, ego_motion,
+            wrapped_residuals_all, kalman_residuals_all,
+        )
+        analysis_summary = velocity_source_summary(
+            unwrapper, kalman_residuals_all,
+            fallback_mask_all, world_support_all,
         )
 
     xyz = np.asarray(
@@ -524,6 +684,8 @@ def main() -> None:
 
     xyz_roi = xyz[in_roi]
     residuals = residuals_all[in_roi]
+    fallback_mask = fallback_mask_all[in_roi]
+    world_support = world_support_all[in_roi]
     xy = xyz_roi[:, :2]
 
     camera_dir = resolve_camera_dir(camera_root, str(args.scene))
@@ -554,6 +716,7 @@ def main() -> None:
             ax=ax,
             xy=xy,
             residuals=residuals,
+            fallback_mask=fallback_mask,
             threshold=float(threshold),
             grid=grid_cfg,
             all_point_size=args.all_point_size,
@@ -585,11 +748,20 @@ def main() -> None:
     save_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(save_path, dpi=args.dpi, bbox_inches="tight")
     plt.close(fig)
-    save_velocity_diagnostics(save_path.with_suffix(".velocity.json"), unwrapper)
+    save_velocity_diagnostics(
+        save_path.with_suffix(".velocity.json"), unwrapper, analysis_summary,
+    )
 
     print("Static-threshold qualitative visualization")
     print(f"  velocity mode: {args.velocity_unwrapping}")
     print(f"  unresolved ROI: {int(np.count_nonzero(~np.isfinite(residuals)))}")
+    print(f"  fallback ROI  : {int(np.count_nonzero(fallback_mask))}")
+    if len(world_support):
+        print(
+            "  world support : "
+            f"median={float(np.median(world_support)):.1f}, "
+            f"max={int(np.max(world_support))}"
+        )
     print(f"  scene       : {args.scene}")
     print(f"  token       : {args.token}")
     print(f"  radar       : {radar_path}")
