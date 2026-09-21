@@ -1,10 +1,14 @@
 import math
 
 import numpy as np
+import pytest
 
 from tradition.core.types import MotionLabel, SemanticLabel
 from tradition.detection.rpc_target_detector import RPCPointTargetDetector
-from tradition.experiment.dataset_runner import _resolve_rpc_radar
+from tradition.experiment.dataset_runner import (
+    RPCFrameNotFoundError,
+    _resolve_rpc_radar,
+)
 from tradition.io.rpc_radar_reader import KRadarRPCReader
 from tradition.pipeline.traditional_radar_pipeline import build_rpc_pipeline
 
@@ -75,6 +79,17 @@ def test_rpc_endpoint_outside_grid_still_carves_free_ray(tmp_path):
 
 
 def test_rpc_resolver_prefers_aligned_radar_frame_index(tmp_path):
+    calib_path = (
+        tmp_path
+        / "data"
+        / "K-Radar_calib"
+        / "3"
+        / "info_calib"
+        / "calib_radar_lidar.txt"
+    )
+    calib_path.parent.mkdir(parents=True)
+    calib_path.write_text("0,-2.54,0.3\n", encoding="utf-8")
+
     rpc_path = tmp_path / "3" / "rpc_00042.npy"
     rpc_path.parent.mkdir(parents=True)
     np.save(rpc_path, np.zeros((1, 11), dtype=np.float32))
@@ -87,6 +102,33 @@ def test_rpc_resolver_prefers_aligned_radar_frame_index(tmp_path):
 
     resolved = _resolve_rpc_radar(info, tmp_path, tmp_path)
     assert resolved == rpc_path.resolve()
+
+
+def test_rpc_resolver_marks_missing_aligned_frame_as_skippable(tmp_path):
+    calib_path = (
+        tmp_path
+        / "data"
+        / "K-Radar_calib"
+        / "4"
+        / "info_calib"
+        / "calib_radar_lidar.txt"
+    )
+    calib_path.parent.mkdir(parents=True)
+    calib_path.write_text("41,-2.54,0.3\n", encoding="utf-8")
+    info = {
+        "scene_token": "4",
+        "lidar_token": "4_00589",
+        "radar_path": "/missing/EAsparse_00589.npz",
+    }
+
+    with pytest.raises(RPCFrameNotFoundError) as caught:
+        _resolve_rpc_radar(info, tmp_path, tmp_path)
+
+    error = caught.value
+    assert error.scene == "4"
+    assert error.aligned_frame == 589
+    assert error.frame_difference == 41
+    assert error.rpc_frame == 630
 
 
 def test_rpc_reader_rejects_wrong_schema(tmp_path):
