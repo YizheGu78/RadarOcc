@@ -8,6 +8,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from tradition.core.config import KRadarConfig, PoseConfig
 from tradition.evaluation.radarocc_metrics import (
     RadarOccMetricAccumulator,
