@@ -65,7 +65,7 @@ def _natural_key(path: Path) -> list[object]:
 def _info_sequence_key(info: dict[str, Any]) -> tuple[int, int | float]:
     """Chronological key inside one scene; never used to match cross-sensor IDs."""
     token = str(info.get("lidar_token", ""))
-    groups = re.findall(r"\\d+", token)
+    groups = re.findall(r"\d+", token)
     if groups:
         return 0, int(groups[-1])
     try:
@@ -282,7 +282,7 @@ def _is_rpc_file(path: Path) -> bool:
     if not path.is_file() or path.suffix.lower() != ".npy":
         return False
     return re.fullmatch(
-        r"(?:rpc_|pc01p_|radar_pc_)?\\d+\\.npy",
+        r"(?:rpc_|pc01p_|radar_pc_)?\d+\.npy",
         path.name,
         flags=re.IGNORECASE,
     ) is not None
