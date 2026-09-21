@@ -905,7 +905,8 @@ def plot_bev(
     ax.set_xlabel("Lateral [m]   ← vehicle left | vehicle right →")
     ax.set_ylabel("Forward x [m]")
     ax.set_title(
-        rf"$\tau_s$ = {threshold:.2f} m/s"
+        rf"$\tau_s$ = {threshold:.2f} m/s, "
+        rf"$v_{{max}}$ = {max_speed_mps:.1f} m/s"
         f"\nStatic {selected}/{total} ({100.0 * ratio:.1f}%)"
         f" | persistent {persistent_static_count} + other {motion_static_count}"
         f"\ndynamic {dynamic_count} (persistent→dynamic {persistent_dynamic_count})"
