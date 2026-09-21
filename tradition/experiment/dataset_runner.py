@@ -62,6 +62,18 @@ def _natural_key(path: Path) -> list[object]:
     ]
 
 
+def _info_sequence_key(info: dict[str, Any]) -> tuple[int, int | float]:
+    """Chronological key inside one scene; never used to match cross-sensor IDs."""
+    token = str(info.get("lidar_token", ""))
+    groups = re.findall(r"\\d+", token)
+    if groups:
+        return 0, int(groups[-1])
+    try:
+        return 1, float(info.get("timestamp", 0))
+    except (TypeError, ValueError):
+        return 1, 0.0
+
+
 def _load_infos(annotation: Path) -> list[dict[str, Any]]:
     with annotation.open("rb") as handle:
         content = pickle.load(handle)
@@ -73,7 +85,24 @@ def _load_infos(annotation: Path) -> list[dict[str, Any]]:
         infos = content
     else:
         raise TypeError(f"Unsupported annotation structure in {annotation}")
-    return sorted(infos, key=lambda info: info.get("timestamp", 0))
+
+    infos = sorted(infos, key=lambda info: info.get("timestamp", 0))
+
+    # RPC/RGB file numbers belong to different sensor clocks and are not
+    # comparable to annotation/LiDAR frame numbers.  Store only the ordinal
+    # position of each annotation entry inside its scene.  RPC resolution then
+    # pairs the N-th annotation frame with the N-th RPC file after each side is
+    # independently sorted in chronological filename order.
+    by_scene: dict[str, list[dict[str, Any]]] = {}
+    for info in infos:
+        by_scene.setdefault(str(info.get("scene_token", "")), []).append(info)
+    for scene_infos in by_scene.values():
+        ordered = sorted(scene_infos, key=_info_sequence_key)
+        count = len(ordered)
+        for ordinal, info in enumerate(ordered):
+            info["_rpc_sequence_ordinal"] = ordinal
+            info["_rpc_sequence_count"] = count
+    return infos
 
 
 def _first_existing(candidates: list[Path]) -> Path | None:
@@ -249,79 +278,51 @@ def _scene_variants(scene: str) -> list[str]:
     return variants
 
 
-def _frame_number_tokens(frame_index: int) -> list[str]:
-    return list(dict.fromkeys(
-        (f"{frame_index:05d}", f"{frame_index:06d}", str(frame_index))
-    ))
-
-
-def _aligned_frame_index(info: dict[str, Any], radar_value: str) -> int:
-    """Return the synchronized annotation/LiDAR frame index."""
-    sources = (
-        str(info.get("radar_frame_idx", "")),
-        Path(radar_value).stem,
-        str(info.get("lidar_token", "")),
-    )
-    for source in sources:
-        groups = re.findall(r"\d+", source)
-        if groups:
-            return int(groups[-1])
-    raise ValueError(
-        "Cannot extract an aligned frame index from radar_frame_idx, "
-        f"radar path, or lidar_token: {info}"
-    )
+def _is_rpc_file(path: Path) -> bool:
+    if not path.is_file() or path.suffix.lower() != ".npy":
+        return False
+    return re.fullmatch(
+        r"(?:rpc_|pc01p_|radar_pc_)?\\d+\\.npy",
+        path.name,
+        flags=re.IGNORECASE,
+    ) is not None
 
 
 @lru_cache(maxsize=None)
-def _read_frame_difference(calib_root_text: str, scene: str) -> tuple[int, Path]:
-    calib_root = Path(calib_root_text)
-    candidates = [
-        calib_root / scene_name / "info_calib" / _CALIBRATION_FILENAME
-        for scene_name in _scene_variants(scene)
-    ]
-    calib_path = _first_existing(candidates)
-    if calib_path is None:
-        raise FileNotFoundError(
-            f"Cannot resolve {_CALIBRATION_FILENAME} for scene={scene}; "
-            f"tried {candidates}"
-        )
+def _scene_rpc_files(radar_root_text: str, scene: str) -> tuple[Path, ...]:
+    """Return one scene's RPC files in sensor-local chronological order."""
+    radar_root = Path(radar_root_text).expanduser().resolve()
+    searched: list[Path] = []
 
-    for line in calib_path.read_text(encoding="utf-8-sig").splitlines():
-        fields = [field for field in re.split(r"[,\s]+", line.strip()) if field]
-        if not fields:
+    # Prefer an explicit scene directory (4 before 04), then support callers
+    # that pass a directory already pointing at one scene.
+    bases: list[Path] = []
+    for scene_name in _scene_variants(scene):
+        scene_root = radar_root / scene_name
+        for folder in _RPC_RADAR_DIRS:
+            bases.append(scene_root / folder if folder else scene_root)
+    for folder in _RPC_RADAR_DIRS:
+        bases.append(radar_root / folder if folder else radar_root)
+
+    seen_bases: set[Path] = set()
+    for base in bases:
+        if base in seen_bases:
             continue
-        try:
-            value = float(fields[0])
-        except ValueError:
+        seen_bases.add(base)
+        searched.append(base)
+        if not base.is_dir():
             continue
-        if not math.isfinite(value) or not value.is_integer():
-            raise ValueError(
-                f"Invalid frame difference in {calib_path}: {fields[0]!r}"
-            )
-        return int(value), calib_path
-
-    raise ValueError(
-        f"No numeric frame difference found in calibration file: {calib_path}"
-    )
-
-
-def _rpc_frame_mapping(
-    info: dict[str, Any],
-    radar_value: str,
-    calib_root: Path,
-) -> tuple[int, int, int, Path]:
-    scene = str(info.get("scene_token", ""))
-    aligned_frame = _aligned_frame_index(info, radar_value)
-    frame_difference, calib_path = _read_frame_difference(
-        str(calib_root.resolve()), scene
-    )
-    rpc_frame = aligned_frame + frame_difference
-    if rpc_frame < 0:
-        raise ValueError(
-            f"Negative RPC frame for scene={scene}: aligned={aligned_frame}, "
-            f"difference={frame_difference}, calibration={calib_path}"
+        files = sorted(
+            (path.resolve() for path in base.iterdir() if _is_rpc_file(path)),
+            key=_natural_key,
         )
-    return aligned_frame, frame_difference, rpc_frame, calib_path
+        if files:
+            return tuple(files)
+
+    raise FileNotFoundError(
+        "Cannot find any Enhanced K-Radar RPC files for "
+        f"scene={scene} under {radar_root}. Searched: {searched}"
+    )
 
 
 def _resolve_rpc_radar(
@@ -330,6 +331,14 @@ def _resolve_rpc_radar(
     radar_root: Path | None,
     calib_root: Path | None = None,
 ) -> Path:
+    """Resolve RPC by scene-local order, never by cross-sensor frame number.
+
+    The N-th annotation entry in a scene is paired with the N-th RPC file after
+    the annotation entries and RPC files are independently sorted.  This is
+    intentional: radar, LiDAR/annotation and RGB filenames use different frame
+    numbering/rates, so fixed ID equality or a fixed frame-difference offset is
+    not a valid correspondence rule.
+    """
     value = _radar_value(info)
     if value is None:
         value = str(info.get("radar_frame_idx", ""))
@@ -339,54 +348,52 @@ def _resolve_rpc_radar(
     raw = Path(value)
     scene = str(info.get("scene_token", ""))
 
-    # A direct NPY is already an explicit RPC path and needs no filename mapping.
+    # A direct NPY is already an explicit RPC path and needs no ordinal lookup.
     direct = _first_raw_radar([raw, repo_root / raw])
     if direct is not None and direct.suffix.lower() == ".npy":
         return direct
 
-    calibration_root = (
-        Path(calib_root).expanduser().resolve()
-        if calib_root is not None
-        else (repo_root / "data" / "K-Radar_calib").resolve()
-    )
-    aligned_frame, frame_difference, rpc_frame, calib_path = _rpc_frame_mapping(
-        info, value, calibration_root
-    )
-    frame_tokens = _frame_number_tokens(rpc_frame)
-    names = _rpc_names(frame_tokens)
+    if radar_root is None:
+        raise FileNotFoundError(
+            f"RPC input requires radar_root; scene={scene}, annotation={raw}"
+        )
 
-    candidates: list[Path] = []
-    if radar_root is not None:
-        for scene_name in _scene_variants(scene):
-            scene_root = radar_root / scene_name
-            for folder in _RPC_RADAR_DIRS:
-                base = scene_root / folder if folder else scene_root
-                candidates.extend(base / name for name in names)
-        for folder in _RPC_RADAR_DIRS:
-            base = radar_root / folder if folder else radar_root
-            candidates.extend(base / name for name in names)
+    ordinal_value = info.get("_rpc_sequence_ordinal")
+    count_value = info.get("_rpc_sequence_count")
+    if ordinal_value is None:
+        raise RuntimeError(
+            "RPC sequence ordinal is missing. Load annotation entries with "
+            "_load_infos() before resolving RPC files."
+        )
+    ordinal = int(ordinal_value)
+    annotation_count = int(count_value) if count_value is not None else None
+    rpc_files = _scene_rpc_files(str(radar_root.resolve()), scene)
 
-    resolved = _first_raw_radar(candidates)
-    if resolved is not None and resolved.suffix.lower() == ".npy":
-        return resolved
+    if annotation_count is not None and annotation_count != len(rpc_files):
+        raise RPCFrameNotFoundError(
+            "Scene-local ordered RPC matching requires equal sequence lengths. "
+            f"Scene {scene}: annotation frames={annotation_count}, "
+            f"RPC files={len(rpc_files)}. "
+            "Cross-sensor frame IDs are intentionally ignored.",
+            scene=scene,
+            aligned_frame=ordinal,
+            frame_difference=0,
+            rpc_frame=ordinal,
+        )
 
-    raise RPCFrameNotFoundError(
-        "Cannot resolve Enhanced K-Radar RPC point cloud. Expected an "
-        "rpc_*.npy/pc01p_*.npy [N,11] file.\n"
-        f"Annotation radar path: {raw}\n"
-        f"Aligned frame: {aligned_frame:05d}\n"
-        f"Frame difference: {frame_difference:+d}\n"
-        f"RPC frame: {rpc_frame:05d}\n"
-        f"Calibration: {calib_path}\n"
-        f"Radar frame candidates: {frame_tokens}\n"
-        f"Scene: {scene}\n"
-        f"Input root: {radar_root}\n"
-        f"Tried: {candidates}",
-        scene=scene,
-        aligned_frame=aligned_frame,
-        frame_difference=frame_difference,
-        rpc_frame=rpc_frame,
-    )
+    if ordinal < 0 or ordinal >= len(rpc_files):
+        raise RPCFrameNotFoundError(
+            "Cannot resolve RPC by scene-local order. "
+            f"Scene {scene}: annotation ordinal={ordinal}, "
+            f"RPC files={len(rpc_files)}. "
+            "Cross-sensor frame IDs are intentionally ignored.",
+            scene=scene,
+            aligned_frame=ordinal,
+            frame_difference=0,
+            rpc_frame=ordinal,
+        )
+
+    return rpc_files[ordinal]
 
 
 def _camera_map(
@@ -395,11 +402,14 @@ def _camera_map(
     camera_dir: Path,
     offset: int = 0,
 ) -> dict[str, Path]:
-    scene_infos = [
-        info
-        for info in infos
-        if str(info.get("scene_token")) == str(scene)
-    ]
+    scene_infos = sorted(
+        (
+            info
+            for info in infos
+            if str(info.get("scene_token")) == str(scene)
+        ),
+        key=lambda info: int(info.get("_rpc_sequence_ordinal", 0)),
+    )
     cameras = sorted(
         [
             p.resolve()
