@@ -19,7 +19,17 @@ MIN_MOTION_SUPPORT="${MIN_MOTION_SUPPORT:-2}"
 OCCUPANCY_CELL_SIZE_M="${OCCUPANCY_CELL_SIZE_M:-0.40}"
 OCCUPANCY_DILATION_CELLS="${OCCUPANCY_DILATION_CELLS:-1}"
 VELOCITY_UNWRAPPING="${VELOCITY_UNWRAPPING:-range-kalman}"
+UNWRAP_RANGE_STD_M="${UNWRAP_RANGE_STD_M:-0.20}"
+UNWRAP_CLUSTER_RADIUS_M="${UNWRAP_CLUSTER_RADIUS_M:-1.50}"
+STATIC_RESIDUAL_THRESHOLD_MPS="${STATIC_RESIDUAL_THRESHOLD_MPS:-0.50}"
+DYNAMIC_RESIDUAL_THRESHOLD_MPS="${DYNAMIC_RESIDUAL_THRESHOLD_MPS:-0.80}"
+DOPPLER_SIGN="${DOPPLER_SIGN:-1}"
+STATIC_MATCH_RADIUS_M="${STATIC_MATCH_RADIUS_M:-0.60}"
+MOTION_MATCH_RADIUS_M="${MOTION_MATCH_RADIUS_M:-2.00}"
+MIN_LOCAL_POWER_RATIO="${MIN_LOCAL_POWER_RATIO:-0.25}"
+MIN_LOCAL_NEIGHBORS="${MIN_LOCAL_NEIGHBORS:-1}"
 N_ESTIMATORS="${N_ESTIMATORS:-200}"
+RANDOM_STATE="${RANDOM_STATE:-13}"
 
 fail() {
     echo "ERROR: $*" >&2
@@ -57,6 +67,20 @@ if [[ -n "$MAX_FRAMES" ]]; then
     FRAME_ARGS+=(--max-frames "$MAX_FRAMES")
 fi
 
+mkdir -p "$(dirname "$OUTPUT_MODEL")"
+
+echo "Training occupancy-first traditional object classifier"
+echo "  annotation : $ANNOTATION"
+echo "  radar root : $RADAR_ROOT"
+echo "  calib root : $CALIB_ROOT"
+echo "  pose root  : $POSE_ROOT"
+echo "  output     : $OUTPUT_MODEL"
+echo "  velocity   : $VELOCITY_UNWRAPPING"
+echo "  persistence: $MIN_PERSISTENT_SUPPORT/$TEMPORAL_WINDOW"
+echo "  motion     : $MIN_MOTION_SUPPORT/$TEMPORAL_WINDOW"
+echo "  estimators : $N_ESTIMATORS"
+echo
+
 cd "$REPO_ROOT"
 PYTHONPATH="$REPO_ROOT" python -u -m tradition.cli.train_object_classifier \
     --annotation "$ANNOTATION" \
@@ -71,7 +95,34 @@ PYTHONPATH="$REPO_ROOT" python -u -m tradition.cli.train_object_classifier \
     --occupancy-cell-size-m "$OCCUPANCY_CELL_SIZE_M" \
     --occupancy-dilation-cells "$OCCUPANCY_DILATION_CELLS" \
     --velocity-unwrapping "$VELOCITY_UNWRAPPING" \
+    --unwrap-range-std-m "$UNWRAP_RANGE_STD_M" \
+    --unwrap-cluster-radius-m "$UNWRAP_CLUSTER_RADIUS_M" \
+    --static-residual-threshold-mps "$STATIC_RESIDUAL_THRESHOLD_MPS" \
+    --dynamic-residual-threshold-mps "$DYNAMIC_RESIDUAL_THRESHOLD_MPS" \
+    --stationary-velocity-sign "$DOPPLER_SIGN" \
+    --static-match-radius-m "$STATIC_MATCH_RADIUS_M" \
+    --dynamic-match-radius-m "$MOTION_MATCH_RADIUS_M" \
+    --min-local-power-ratio "$MIN_LOCAL_POWER_RATIO" \
+    --min-local-neighbors "$MIN_LOCAL_NEIGHBORS" \
     --n-estimators "$N_ESTIMATORS" \
+    --random-state "$RANDOM_STATE" \
     "${FRAME_ARGS[@]}"
+
+PYTHONPATH="$REPO_ROOT" python - "$OUTPUT_MODEL" <<'PY'
+import sys
+
+from tradition.semantics.object_classifier import (
+    FEATURE_NAMES,
+    ObjectAwareSemanticClassifier,
+)
+
+model = ObjectAwareSemanticClassifier.from_file(sys.argv[1])
+metadata = model.last_diagnostics.get("training_metadata", {})
+print(
+    "Verified object model:"
+    f" features={len(FEATURE_NAMES)},"
+    f" oob_score={metadata.get('oob_score')}"
+)
+PY
 
 echo "Object classifier ready: $OUTPUT_MODEL"
