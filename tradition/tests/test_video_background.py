@@ -1,5 +1,6 @@
 import numpy as np
 
+from tradition.visualization import radarocc_video
 from tradition.visualization.radarocc_video import (
     _index_radarocc_predictions,
     _replace_background_for_visualization,
@@ -48,3 +49,39 @@ def test_radarocc_supplies_only_visual_background(tmp_path):
     assert visual[30, 40, 5] == 0
     assert np.count_nonzero(visual == 1) == 1
     assert np.count_nonzero(visual == 2) == 2
+
+
+def test_semantic_renderer_uses_distinct_output_names_and_clears_stale_frames(
+    tmp_path,
+    monkeypatch,
+):
+    frames_dir = tmp_path / "semantic_frames"
+    frames_dir.mkdir()
+    stale_frame = frames_dir / "frame_99999.png"
+    stale_frame.touch()
+
+    renderer = radarocc_video.RadarOccStyleVideoRenderer(
+        tmp_path,
+        scene="3",
+        keep_frames=True,
+    )
+
+    assert not stale_frame.exists()
+
+    def fake_encode_video(frames_dir, output_dir, fps):
+        del frames_dir, fps
+        mp4 = output_dir / "prediction_gt.mp4"
+        gif = output_dir / "prediction_gt.gif"
+        mp4.touch()
+        gif.touch()
+        return mp4, gif
+
+    monkeypatch.setattr(radarocc_video, "encode_video", fake_encode_video)
+    renderer.frame_count = 1
+
+    mp4, gif = renderer.finish()
+
+    assert mp4.name == "scene_3_semantic_overlay.mp4"
+    assert gif.name == "scene_3_semantic_overlay.gif"
+    assert mp4.exists()
+    assert gif.exists()
