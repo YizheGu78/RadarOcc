@@ -41,6 +41,7 @@ from tradition.analysis.visualize_static_thresholds import (
     build_velocity_unwrapper,
     ordered_scene_infos,
     save_velocity_diagnostics,
+    velocity_partition_masks,
     velocity_source_summary,
 )
 
@@ -251,24 +252,35 @@ def draw_bev(
     residuals: np.ndarray,
     persistent_static_mask: np.ndarray,
     threshold: float,
+    max_speed_mps: float,
     grid: GridConfig,
     all_point_size: float,
     static_point_size: float,
-) -> tuple[int, int, float, int, int, int, int]:
-    absolute = np.abs(residuals)
+) -> tuple[int, int, float, int, int, int, int, int, int]:
     persistent = np.asarray(persistent_static_mask, dtype=bool)
     if persistent.shape != (len(xy),):
         raise ValueError("persistent_static_mask must align with xy")
-    resolved_motion = np.isfinite(absolute) & ~persistent
-    motion_static = resolved_motion & (absolute <= threshold)
-    dynamic_mask = resolved_motion & (absolute > threshold)
-    unknown_mask = ~np.isfinite(absolute) & ~persistent
-    static_mask = persistent | motion_static
+    (
+        persistent_static,
+        persistent_dynamic,
+        motion_static,
+        _motion_dynamic,
+        dynamic_mask,
+        unknown_mask,
+    ) = velocity_partition_masks(
+        residuals,
+        persistent,
+        threshold_mps=threshold,
+        max_speed_mps=max_speed_mps,
+    )
+    static_mask = persistent_static | motion_static
 
     total = int(len(xy))
     selected = int(np.count_nonzero(static_mask))
     ratio = selected / total if total else 0.0
-    persistent_count = int(np.count_nonzero(persistent))
+    persistent_static_count = int(np.count_nonzero(persistent_static))
+    persistent_dynamic_count = int(np.count_nonzero(persistent_dynamic))
+    persistent_unresolved_count = int(np.count_nonzero(persistent & unknown_mask))
     motion_static_count = int(np.count_nonzero(motion_static))
     dynamic_count = int(np.count_nonzero(dynamic_mask))
     unresolved_count = int(np.count_nonzero(unknown_mask))
@@ -286,28 +298,28 @@ def draw_bev(
             display_x[dynamic_mask], display_y[dynamic_mask],
             s=static_point_size, c="tab:red", alpha=0.88,
             linewidths=0, rasterized=True,
-            label=r"Resolved dynamic: $|r|>\tau_s$",
+            label=r"Resolved dynamic: $\tau_s<|v|<v_{max}$",
         )
     if np.any(unknown_mask):
         ax.scatter(
             display_x[unknown_mask], display_y[unknown_mask],
             s=static_point_size, c="tab:orange", marker="x",
             linewidths=0.7, rasterized=True,
-            label="Unresolved motion candidate",
+            label="Velocity unresolved (either source)",
         )
     if np.any(motion_static):
         ax.scatter(
             display_x[motion_static], display_y[motion_static],
             s=static_point_size, c="tab:green", alpha=0.95,
             linewidths=0, rasterized=True,
-            label=r"Motion branch static: $|r|\leq\tau_s$",
+            label=r"Non-persistent velocity-static: $|v|\leq\tau_s$",
         )
-    if np.any(persistent):
+    if np.any(persistent_static):
         ax.scatter(
-            display_x[persistent], display_y[persistent],
+            display_x[persistent_static], display_y[persistent_static],
             s=static_point_size, c="tab:blue", alpha=0.95,
             linewidths=0, rasterized=True,
-            label="World-grid persistent stationary",
+            label=r"Persistent and velocity-static: $|v|\leq\tau_s$",
         )
 
     ax.set_xlim(-grid.max_xyz[1], -grid.min_xyz[1])
@@ -319,8 +331,9 @@ def draw_bev(
     ax.set_title(
         rf"$\tau_s$ = {threshold:.2f} m/s"
         f"\nStatic {selected}/{total} ({100.0 * ratio:.1f}%)"
-        f" | grid {persistent_count} + motion {motion_static_count}"
-        f"\ndynamic {dynamic_count} | unresolved {unresolved_count}"
+        f" | persistent {persistent_static_count} + other {motion_static_count}"
+        f"\ndynamic {dynamic_count} (persistent→dynamic {persistent_dynamic_count})"
+        f" | unresolved {unresolved_count}"
     )
     ax.scatter([0.0], [0.0], s=45, marker="^", c="black", zorder=5)
     ax.text(
@@ -328,8 +341,9 @@ def draw_bev(
         ha="center", va="top", fontsize=9,
     )
     return (
-        selected, total, ratio, persistent_count,
-        motion_static_count, dynamic_count, unresolved_count,
+        selected, total, ratio, persistent_static_count,
+        motion_static_count, dynamic_count, persistent_dynamic_count,
+        unresolved_count, persistent_unresolved_count,
     )
 
 
@@ -348,6 +362,7 @@ def render_frame(
     all_point_size: float,
     static_point_size: float,
     dpi: int,
+    max_speed_mps: float,
     velocity_mode: str = "off",
 ) -> None:
     image = mpimg.imread(image_path)
@@ -369,6 +384,7 @@ def render_frame(
             residuals=residuals,
             persistent_static_mask=persistent_static_mask,
             threshold=float(threshold),
+            max_speed_mps=max_speed_mps,
             grid=grid,
             all_point_size=all_point_size,
             static_point_size=static_point_size,
@@ -470,6 +486,10 @@ def main() -> None:
     thresholds = [float(value) for value in args.thresholds]
     if any(not np.isfinite(value) or value < 0.0 for value in thresholds):
         raise ValueError("Thresholds must be finite and non-negative.")
+    if args.range_difference_max_speed_mps <= max(thresholds):
+        raise ValueError(
+            "--range-difference-max-speed-mps must exceed every threshold."
+        )
 
     repo_root = args.repo_root.expanduser().resolve()
 
@@ -584,6 +604,7 @@ def main() -> None:
     )
     persistence_classifier = build_occupancy_persistence_classifier(args)
     print(f"Velocity mode: {args.velocity_unwrapping}")
+    print(f"Persistent velocity check: {args.persistent_velocity_check}")
     print("Static-threshold video")
     print(f"  scene       : {args.scene}")
     print(f"  frames      : {len(selected_infos)}")
@@ -660,13 +681,18 @@ def main() -> None:
 
         if unwrapper is None:
             residuals_all = wrapped_residuals_all.copy()
-            residuals_all[persistent_static_all] = 0.0
+            if args.persistent_velocity_check == "off":
+                residuals_all[persistent_static_all] = 0.0
         else:
             temporal_residuals_all, _ = unwrapper.update(
                 reliable_detections,
                 ego_motion,
                 token,
-                excluded_mask=persistent_static_all,
+                excluded_mask=(
+                    persistent_static_all
+                    if args.persistent_velocity_check == "off"
+                    else None
+                ),
             )
             residuals_all = temporal_residuals_all
 
@@ -679,6 +705,21 @@ def main() -> None:
             analysis_summary["occupancy_persistence"] = dict(
                 persistence_classifier.last_diagnostics
             )
+        persistent_velocity_resolved = (
+            persistent_static_all
+            & np.isfinite(residuals_all)
+            & (np.abs(residuals_all) < args.range_difference_max_speed_mps)
+        )
+        analysis_summary["persistent_velocity_check"] = {
+            "enabled": args.persistent_velocity_check == "on",
+            "resolved_count": int(np.count_nonzero(persistent_velocity_resolved)),
+            "unresolved_count": int(
+                np.count_nonzero(
+                    persistent_static_all & ~persistent_velocity_resolved
+                )
+            ),
+            "max_speed_mps": float(args.range_difference_max_speed_mps),
+        }
         if output_index < 0:
             continue  # Warmup needs no RGB image and produces no video frame.
         camera_path = camera_by_token.get(token)
@@ -728,7 +769,11 @@ def main() -> None:
             all_point_size=args.all_point_size,
             static_point_size=args.static_point_size,
             dpi=args.dpi,
-            velocity_mode=args.velocity_unwrapping,
+            max_speed_mps=args.range_difference_max_speed_mps,
+            velocity_mode=(
+                f"{args.velocity_unwrapping}; "
+                f"persistent-check={args.persistent_velocity_check}"
+            ),
         )
 
         if (
@@ -736,19 +781,33 @@ def main() -> None:
             or (output_index + 1) % 25 == 0
             or output_index + 1 == len(selected_infos)
         ):
-            counts = [
-                int(
-                    np.count_nonzero(
-                        persistent_static_roi
-                        | (
-                            np.isfinite(residuals_roi)
-                            & ~persistent_static_roi
-                            & (np.abs(residuals_roi) <= threshold)
+            counts = []
+            persistent_to_dynamic = []
+            for threshold in thresholds:
+                (
+                    persistent_velocity_static,
+                    persistent_velocity_dynamic,
+                    nonpersistent_velocity_static,
+                    _nonpersistent_velocity_dynamic,
+                    _dynamic,
+                    _unresolved,
+                ) = velocity_partition_masks(
+                    residuals_roi,
+                    persistent_static_roi,
+                    threshold_mps=threshold,
+                    max_speed_mps=args.range_difference_max_speed_mps,
+                )
+                counts.append(
+                    int(
+                        np.count_nonzero(
+                            persistent_velocity_static
+                            | nonpersistent_velocity_static
                         )
                     )
                 )
-                for threshold in thresholds
-            ]
+                persistent_to_dynamic.append(
+                    int(np.count_nonzero(persistent_velocity_dynamic))
+                )
 
             print(
                 f"[{output_index + 1:4d}/{len(selected_infos):4d}] "
@@ -756,8 +815,8 @@ def main() -> None:
                 f"reliable={len(reliable_detections):4d} | "
                 f"ROI={len(xy):4d} | "
                 f"grid_static={int(np.count_nonzero(persistent_static_roi))} | "
-                f"unresolved={int(np.count_nonzero(~np.isfinite(residuals_roi) & ~persistent_static_roi))} | "
-                f"static={counts}"
+                f"unresolved={int(np.count_nonzero(~np.isfinite(residuals_roi)))} | "
+                f"static={counts} | persistent_to_dynamic={persistent_to_dynamic}"
             )
 
     output_mp4 = (
