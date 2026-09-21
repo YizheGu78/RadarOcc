@@ -20,7 +20,12 @@ from tradition.core.types import DopplerEvidence, MotionLabel, TemporalDetection
 from tradition.detection.rpc_reliability_filter import LocalPowerRPCFilter
 from tradition.detection.rpc_target_detector import RPCPointTargetDetector
 from tradition.evaluation.radarocc_metrics import load_gt_sparse_xyz
-from tradition.experiment.dataset_runner import _load_infos, _resolve_gt, _resolve_rpc_radar
+from tradition.experiment.dataset_runner import (
+    RPCFrameNotFoundError,
+    _load_infos,
+    _resolve_gt,
+    _resolve_rpc_radar,
+)
 from tradition.io.pose_reader import RadarOccPoseReader
 from tradition.io.rpc_radar_reader import KRadarRPCReader
 from tradition.motion.range_kalman import RangeKalmanUnwrapper
@@ -205,6 +210,8 @@ def main() -> None:
     y: list[int] = []
     outcome_counts = {outcome: 0 for outcome in ClusterLabellingOutcome}
     active_scene = None
+    processed_frames = 0
+    skipped_missing_rpc = 0
     temporal.reset()
     for ordinal, info in enumerate(infos, start=1):
         scene = str(info.get("scene_token"))
@@ -214,9 +221,21 @@ def main() -> None:
             if unwrapper is not None:
                 unwrapper.reset()
             active_scene = scene
-        radar_path = _resolve_rpc_radar(
-            info, repo_root, radar_root, calib_root
-        )
+        try:
+            radar_path = _resolve_rpc_radar(
+                info, repo_root, radar_root, calib_root
+            )
+        except RPCFrameNotFoundError as error:
+            skipped_missing_rpc += 1
+            print(
+                f"[{ordinal}/{len(infos)}] SKIP missing RPC "
+                f"scene={scene} token={token} "
+                f"aligned={error.aligned_frame:05d} "
+                f"offset={error.frame_difference:+d} "
+                f"rpc={error.rpc_frame:05d}"
+            )
+            continue
+        processed_frames += 1
         gt_path = _resolve_gt(info, repo_root, gt_root)
         ego = _ego_motion(pose_reader, pose_estimator, scene, token)
         raw = detector.detect(reader.read(radar_path))
@@ -286,6 +305,17 @@ def main() -> None:
             f"{outcome_counts[ClusterLabellingOutcome.AMBIGUOUS]}"
         )
 
+    if processed_frames == 0:
+        raise RuntimeError(
+            "No training frames were processed. "
+            "Check the RPC root and frame alignment."
+        )
+
+    print(
+        "Training frame totals: "
+        f"selected={len(infos)} processed={processed_frames} "
+        f"skipped_missing_rpc={skipped_missing_rpc}"
+    )
     print(
         "Training candidate totals: "
         f"foreground={outcome_counts[ClusterLabellingOutcome.FOREGROUND]} "
@@ -306,7 +336,9 @@ def main() -> None:
             "velocity_unwrapping": args.velocity_unwrapping,
             "unwrapping_config": asdict(unwrapping_cfg) if unwrapping_cfg is not None else None,
             "annotation": str(args.annotation.expanduser().resolve()),
-            "frame_count": len(infos),
+            "selected_frame_count": len(infos),
+            "frame_count": processed_frames,
+            "skipped_missing_rpc_count": skipped_missing_rpc,
             "foreground_candidates": outcome_counts[
                 ClusterLabellingOutcome.FOREGROUND
             ],
