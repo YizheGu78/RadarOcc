@@ -454,7 +454,7 @@ class TraditionalDatasetRunner:
         ego_speed_mps: float | None = None,
         max_frames: int | None = None,
         video_scene: str | None = None,
-        video_layout: str = "branch-comparison",
+        video_layout: str = "both",
         camera_dir: str | Path | None = None,
         camera_offset: int = 0,
         video_background_prediction_root: str | Path | None = None,
@@ -521,15 +521,23 @@ class TraditionalDatasetRunner:
             raise RuntimeError("No annotation entries selected.")
 
         camera_by_token: dict[str, Path] = {}
-        renderer = None
+        branch_renderer = None
+        semantic_renderer = None
         if video_scene is not None:
             if camera_dir is None:
                 raise ValueError(
                     "--camera-dir is required when --video-scene is used."
                 )
-            if video_layout not in {"branch-comparison", "semantic-overlay"}:
+            if video_layout not in {
+                "branch-comparison",
+                "semantic-overlay",
+                "both",
+            }:
                 raise ValueError("Unsupported video layout.")
-            if video_layout == "branch-comparison" and pose_reader is None:
+            if (
+                video_layout in {"branch-comparison", "both"}
+                and pose_reader is None
+            ):
                 raise ValueError(
                     "Branch-comparison video requires temporal RPC processing "
                     "with --pose-root."
@@ -541,24 +549,24 @@ class TraditionalDatasetRunner:
                 camera_offset,
             )
             # Keep video-only Mayavi/Qt dependencies out of metrics-only runs.
-            if video_layout == "branch-comparison":
+            if video_layout in {"branch-comparison", "both"}:
                 from tradition.visualization.branch_comparison_video import (
                     BranchComparisonVideoRenderer,
                 )
 
-                renderer = BranchComparisonVideoRenderer(
+                branch_renderer = BranchComparisonVideoRenderer(
                     output_dir=output_dir,
                     scene=str(video_scene),
                     fps=fps,
                     no_rotate=no_rotate,
                     keep_frames=keep_frames,
                 )
-            else:
+            if video_layout in {"semantic-overlay", "both"}:
                 from tradition.visualization.radarocc_video import (
                     RadarOccStyleVideoRenderer,
                 )
 
-                renderer = RadarOccStyleVideoRenderer(
+                semantic_renderer = RadarOccStyleVideoRenderer(
                     output_dir=output_dir,
                     scene=str(video_scene),
                     fps=fps,
@@ -674,24 +682,25 @@ class TraditionalDatasetRunner:
             accumulator.update(prediction.dense_labels_xyz, gt)
 
             if (
-                renderer is not None
+                (branch_renderer is not None or semantic_renderer is not None)
                 and str(info.get("scene_token")) == str(video_scene)
                 and token in camera_by_token
                 and rendered < max_video_frames
             ):
-                if video_layout == "branch-comparison":
+                camera_path = camera_by_token[token]
+                if branch_renderer is not None:
                     branches = prediction.branch_points_lidar_m or {}
-                    renderer.add_frame(
+                    branch_renderer.add_frame(
                         branches.get("persistent", np.empty((0, 3))),
                         branches.get("motion", np.empty((0, 3))),
-                        camera_by_token[token],
+                        camera_path,
                         token,
                     )
-                else:
-                    renderer.add_frame(
+                if semantic_renderer is not None:
+                    semantic_renderer.add_frame(
                         prediction.dense_labels_xyz,
                         gt,
-                        camera_by_token[token],
+                        camera_path,
                         token,
                     )
                 rendered += 1
@@ -763,9 +772,12 @@ class TraditionalDatasetRunner:
         )
         if skipped_rpc_path is not None:
             outputs["skipped_rpc_frames"] = skipped_rpc_path
-        if renderer is not None:
-            video = renderer.finish()
-            if video is not None:
-                prefix = "branches" if video_layout == "branch-comparison" else "overlay"
-                outputs[f"{prefix}_mp4"], outputs[f"{prefix}_gif"] = video
+        if branch_renderer is not None:
+            branch_video = branch_renderer.finish()
+            if branch_video is not None:
+                outputs["branches_mp4"], outputs["branches_gif"] = branch_video
+        if semantic_renderer is not None:
+            semantic_video = semantic_renderer.finish()
+            if semantic_video is not None:
+                outputs["overlay_mp4"], outputs["overlay_gif"] = semantic_video
         return outputs
