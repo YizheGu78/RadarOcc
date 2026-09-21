@@ -95,8 +95,10 @@ class RadarOccStyleVideoRenderer:
     ) -> None:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.frames_dir = self.output_dir / "frames"
+        self.frames_dir = self.output_dir / "semantic_frames"
         self.frames_dir.mkdir(parents=True, exist_ok=True)
+        for stale_frame in self.frames_dir.glob("frame_*.png"):
+            stale_frame.unlink()
         self.keep_frames = keep_frames
         self.fps = fps
         self.frame_count = 0
@@ -151,6 +153,14 @@ class RadarOccStyleVideoRenderer:
         if self.frame_count == 0:
             return None
         mp4, gif = encode_video(self.frames_dir, self.output_dir, self.fps)
+        semantic_mp4 = (
+            self.output_dir / f"scene_{self.args.scene}_semantic_overlay.mp4"
+        )
+        semantic_gif = (
+            self.output_dir / f"scene_{self.args.scene}_semantic_overlay.gif"
+        )
+        mp4.replace(semantic_mp4)
+        gif.replace(semantic_gif)
         if not self.keep_frames:
             shutil.rmtree(self.frames_dir, ignore_errors=True)
-        return mp4, gif
+        return semantic_mp4, semantic_gif
