@@ -51,6 +51,8 @@ class BranchComparisonVideoRenderer:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.frames_dir = self.output_dir / "branch_frames"
         self.frames_dir.mkdir(parents=True, exist_ok=True)
+        for stale_frame in self.frames_dir.glob("frame_*.png"):
+            stale_frame.unlink()
         self.scene = str(scene)
         self.fps = int(fps)
         self.keep_frames = bool(keep_frames)
