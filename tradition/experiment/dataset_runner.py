@@ -36,6 +36,25 @@ _RPC_RADAR_DIRS = (
 _CALIBRATION_FILENAME = "calib_radar_lidar.txt"
 
 
+class RPCFrameNotFoundError(FileNotFoundError):
+    """An aligned annotation frame has no corresponding local RPC file."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        scene: str,
+        aligned_frame: int,
+        frame_difference: int,
+        rpc_frame: int,
+    ) -> None:
+        super().__init__(message)
+        self.scene = str(scene)
+        self.aligned_frame = int(aligned_frame)
+        self.frame_difference = int(frame_difference)
+        self.rpc_frame = int(rpc_frame)
+
+
 def _natural_key(path: Path) -> list[object]:
     return [
         int(part) if part.isdigit() else part.lower()
@@ -351,7 +370,7 @@ def _resolve_rpc_radar(
     if resolved is not None and resolved.suffix.lower() == ".npy":
         return resolved
 
-    raise FileNotFoundError(
+    raise RPCFrameNotFoundError(
         "Cannot resolve Enhanced K-Radar RPC point cloud. Expected an "
         "rpc_*.npy/pc01p_*.npy [N,11] file.\n"
         f"Annotation radar path: {raw}\n"
@@ -362,7 +381,11 @@ def _resolve_rpc_radar(
         f"Radar frame candidates: {frame_tokens}\n"
         f"Scene: {scene}\n"
         f"Input root: {radar_root}\n"
-        f"Tried: {candidates}"
+        f"Tried: {candidates}",
+        scene=scene,
+        aligned_frame=aligned_frame,
+        frame_difference=frame_difference,
+        rpc_frame=rpc_frame,
     )
 
 
@@ -534,6 +557,8 @@ class TraditionalDatasetRunner:
 
         accumulator = RadarOccMetricAccumulator()
         rendered = 0
+        processed_frames = 0
+        skipped_rpc_frames: list[dict[str, object]] = []
         active_scene: str | None = None
         self.pipeline.reset_sequence()
         for index, info in enumerate(infos, start=1):
@@ -543,12 +568,32 @@ class TraditionalDatasetRunner:
                 self.pipeline.reset_sequence()
                 active_scene = scene_token
             if input_mode == "rpc":
-                radar_path = _resolve_rpc_radar(
-                    info, repo_root, radar_root_p, calib_root_p
-                )
+                try:
+                    radar_path = _resolve_rpc_radar(
+                        info, repo_root, radar_root_p, calib_root_p
+                    )
+                except RPCFrameNotFoundError as error:
+                    skipped_rpc_frames.append(
+                        {
+                            "scene": scene_token,
+                            "token": token,
+                            "aligned_frame": error.aligned_frame,
+                            "frame_difference": error.frame_difference,
+                            "rpc_frame": error.rpc_frame,
+                        }
+                    )
+                    print(
+                        f"[{index}/{len(infos)}] SKIP missing RPC "
+                        f"scene={scene_token} token={token} "
+                        f"aligned={error.aligned_frame:05d} "
+                        f"offset={error.frame_difference:+d} "
+                        f"rpc={error.rpc_frame:05d}"
+                    )
+                    continue
             else:
                 radar_path = _resolve_raw_radar(info, repo_root, radar_root_p)
 
+            processed_frames += 1
             gt_path = _resolve_gt(info, repo_root, gt_root_p)
             if pose_reader is not None and pose_estimator is not None:
                 pose_index = pose_reader.frame_index(token)
@@ -681,10 +726,31 @@ class TraditionalDatasetRunner:
                     f"background={background_count} foreground={foreground_count}"
                 )
 
+        if processed_frames == 0:
+            raise RuntimeError(
+                "No frames were processed. Check the RPC root and frame alignment."
+            )
+
+        skipped_rpc_path = None
+        if skipped_rpc_frames:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            skipped_rpc_path = output_dir / "skipped_rpc_frames.json"
+            skipped_rpc_path.write_text(
+                json.dumps(skipped_rpc_frames, indent=2),
+                encoding="utf-8",
+            )
+        print(
+            "Frame totals: "
+            f"selected={len(infos)} processed={processed_frames} "
+            f"skipped_missing_rpc={len(skipped_rpc_frames)}"
+        )
+
         outputs = MetricsReportWriter().write(
             accumulator.results(),
             output_dir,
         )
+        if skipped_rpc_path is not None:
+            outputs["skipped_rpc_frames"] = skipped_rpc_path
         if renderer is not None:
             video = renderer.finish()
             if video is not None:
