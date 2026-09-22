@@ -1,0 +1,40 @@
+{
+  "autoware_repository": "https://github.com/YizheGu78/autoware_universe",
+  "autoware_commit": "1c93b65555410c8c7b8299dab2f48320d1cb19e4",
+  "radarocc_base_commit": "990ddee58285708f9692ee6e2214d5c69dde244f",
+  "files": [
+    {
+      "source_path": "perception/autoware_probabilistic_occupancy_grid_map/lib/costmap_2d/occupancy_grid_map.cpp",
+      "local_path": "vendor/autoware/occupancy_grid_map.cpp",
+      "sha256": "d60932458f7e929cf6b192b4294212636550d029700f35c6f0b060ce00bad6c1"
+    },
+    {
+      "source_path": "perception/autoware_probabilistic_occupancy_grid_map/lib/costmap_2d/occupancy_grid_map_base.cpp",
+      "local_path": "vendor/autoware/occupancy_grid_map_base.cpp",
+      "sha256": "f7d9e6dd774bc240892d41178f08ae960e942a3415c9d9b4eccb4c1a6c64a378"
+    },
+    {
+      "source_path": "perception/autoware_probabilistic_occupancy_grid_map/lib/updater/binary_bayes_filter_updater.cpp",
+      "local_path": "vendor/autoware/binary_bayes_filter_updater.cpp",
+      "sha256": "7510b4229b56a9b706aadb25f7ee05f611db43dad6f468c37b014a3062aa99cd"
+    },
+    {
+      "source_path": "perception/autoware_probabilistic_occupancy_grid_map/include/autoware/probabilistic_occupancy_grid_map/cost_value/cost_value.hpp",
+      "local_path": "vendor/autoware/cost_value.hpp",
+      "sha256": "eda9c3f15cfbe16c43efa2869db04cd33a292cf87ebbd8e8ff1cc4402b6dfd76"
+    },
+    {
+      "source_path": "perception/autoware_probabilistic_occupancy_grid_map/config/binary_bayes_filter_updater.param.yaml",
+      "local_path": "vendor/autoware/binary_bayes_filter_updater.param.yaml",
+      "sha256": "62166e33bda5894cdfb78f5336e2132ea12e2c76ce6cf46f31d93660fb63e21b"
+    },
+    {
+      "source_path": "nav2_costmap_2d/include/nav2_costmap_2d/costmap_2d.hpp",
+      "local_path": "vendor/nav2_costmap_2d.hpp",
+      "sha256": "170ad89c0581223539174db07bfdb914a0b850f7855b05a9d675ff24d02f0599"
+    }
+  ],
+  "nav2_repository": "https://github.com/ros-navigation/navigation2",
+  "nav2_ref": "humble",
+  "nav2_blob_sha": "bac2fe6d12be94ebbeee6f54809c4a3deecb27b1"
+}
