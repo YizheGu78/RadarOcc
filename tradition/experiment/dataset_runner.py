@@ -35,26 +35,25 @@ _RPC_RADAR_DIRS = (
     "radar_pc",
     "radar_point_cloud",
 )
-_CALIBRATION_FILENAME = "calib_radar_lidar.txt"
-
-
 class RPCFrameNotFoundError(FileNotFoundError):
-    """An aligned annotation frame has no corresponding local RPC file."""
+    """A scene-order annotation entry has no corresponding RPC file."""
 
     def __init__(
         self,
         message: str,
         *,
         scene: str,
-        aligned_frame: int,
-        frame_difference: int,
-        rpc_frame: int,
+        annotation_ordinal: int,
+        annotation_count: int | None,
+        rpc_count: int,
     ) -> None:
         super().__init__(message)
         self.scene = str(scene)
-        self.aligned_frame = int(aligned_frame)
-        self.frame_difference = int(frame_difference)
-        self.rpc_frame = int(rpc_frame)
+        self.annotation_ordinal = int(annotation_ordinal)
+        self.annotation_count = (
+            None if annotation_count is None else int(annotation_count)
+        )
+        self.rpc_count = int(rpc_count)
 
 
 def _natural_key(path: Path) -> list[object]:
@@ -331,7 +330,6 @@ def _resolve_rpc_radar(
     info: dict[str, Any],
     repo_root: Path,
     radar_root: Path | None,
-    calib_root: Path | None = None,
 ) -> Path:
     """Resolve RPC by scene-local order, never by cross-sensor frame number.
 
@@ -378,9 +376,9 @@ def _resolve_rpc_radar(
             f"RPC files={len(rpc_files)}. "
             "Cross-sensor frame IDs are intentionally ignored.",
             scene=scene,
-            aligned_frame=ordinal,
-            frame_difference=0,
-            rpc_frame=ordinal,
+            annotation_ordinal=ordinal,
+            annotation_count=annotation_count,
+            rpc_count=len(rpc_files),
         )
 
     if ordinal < 0 or ordinal >= len(rpc_files):
@@ -390,9 +388,9 @@ def _resolve_rpc_radar(
             f"RPC files={len(rpc_files)}. "
             "Cross-sensor frame IDs are intentionally ignored.",
             scene=scene,
-            aligned_frame=ordinal,
-            frame_difference=0,
-            rpc_frame=ordinal,
+            annotation_ordinal=ordinal,
+            annotation_count=annotation_count,
+            rpc_count=len(rpc_files),
         )
 
     return rpc_files[ordinal]
@@ -447,7 +445,6 @@ class TraditionalDatasetRunner:
         output_dir: str | Path,
         repo_root: str | Path = ".",
         radar_root: str | Path | None = None,
-        calib_root: str | Path | None = None,
         gt_root: str | Path | None = None,
         gt_order: str = "xyz",
         scene: str | None = None,
@@ -469,27 +466,12 @@ class TraditionalDatasetRunner:
         if input_mode not in {"rpc", "raw"}:
             raise ValueError("input_mode must be 'rpc' or 'raw'.")
 
-        unwrapper = self.pipeline.velocity_unwrapper
-        if unwrapper is not None:
-            if input_mode != "rpc" or pose_root is None:
-                raise ValueError("Range-Kalman unwrapping requires RPC with poses.")
-            if not math.isclose(unwrapper.config.frame_dt_s, pose_dt_s):
-                raise ValueError("Unwrapping and pose frame intervals must match.")
         annotation = Path(annotation).expanduser().resolve()
         output_dir = Path(output_dir).expanduser().resolve()
         repo_root = Path(repo_root).expanduser().resolve()
         radar_root_p = (
             Path(radar_root).expanduser().resolve() if radar_root else None
         )
-        if calib_root:
-            calib_root_path = Path(calib_root).expanduser()
-            calib_root_p = (
-                calib_root_path.resolve()
-                if calib_root_path.is_absolute()
-                else (repo_root / calib_root_path).resolve()
-            )
-        else:
-            calib_root_p = (repo_root / "data" / "K-Radar_calib").resolve()
         gt_root_p = Path(gt_root).expanduser().resolve() if gt_root else None
         pose_root_p = (
             Path(pose_root).expanduser().resolve() if pose_root else None
@@ -589,25 +571,23 @@ class TraditionalDatasetRunner:
                 active_scene = scene_token
             if input_mode == "rpc":
                 try:
-                    radar_path = _resolve_rpc_radar(
-                        info, repo_root, radar_root_p, calib_root_p
-                    )
+                    radar_path = _resolve_rpc_radar(info, repo_root, radar_root_p)
                 except RPCFrameNotFoundError as error:
                     skipped_rpc_frames.append(
                         {
                             "scene": scene_token,
                             "token": token,
-                            "aligned_frame": error.aligned_frame,
-                            "frame_difference": error.frame_difference,
-                            "rpc_frame": error.rpc_frame,
+                            "annotation_ordinal": error.annotation_ordinal,
+                            "annotation_count": error.annotation_count,
+                            "rpc_count": error.rpc_count,
                         }
                     )
                     print(
                         f"[{index}/{len(infos)}] SKIP missing RPC "
                         f"scene={scene_token} token={token} "
-                        f"aligned={error.aligned_frame:05d} "
-                        f"offset={error.frame_difference:+d} "
-                        f"rpc={error.rpc_frame:05d}"
+                        f"ordinal={error.annotation_ordinal} "
+                        f"annotation_count={error.annotation_count} "
+                        f"rpc_count={error.rpc_count}"
                     )
                     continue
             else:
@@ -650,29 +630,37 @@ class TraditionalDatasetRunner:
                     radar_path,
                     ego_speed_mps=ego_speed_mps,
                 )
-            if unwrapper is not None:
-                diagnostics_dir = output_dir / "velocity_unwrapping"
-                diagnostics_dir.mkdir(parents=True, exist_ok=True)
-                (diagnostics_dir / f"{token}.json").write_text(
-                    json.dumps(prediction.metadata["velocity_unwrapping"], allow_nan=False),
-                    encoding="utf-8",
-                )
             if pose_reader is not None:
                 diagnostics_dir = output_dir / "branch_diagnostics"
                 diagnostics_dir.mkdir(parents=True, exist_ok=True)
                 (diagnostics_dir / f"{token}.json").write_text(
                     json.dumps(
                         {
-                            "occupancy_persistence": prediction.metadata[
-                                "occupancy_persistence"
+                            "doppler_velocity_source": prediction.metadata[
+                                "doppler_velocity_source"
                             ],
-                            "persistent_current_count": prediction.metadata[
-                                "persistent_current_count"
+                            "doppler_unwrapping": prediction.metadata[
+                                "doppler_unwrapping"
                             ],
-                            "motion_confirmed_count": prediction.metadata[
-                                "motion_confirmed_count"
+                            "static_branch_count": len(
+                                (prediction.branch_points_lidar_m or {}).get(
+                                    "static", ()
+                                )
+                            ),
+                            "dynamic_branch_count": len(
+                                (prediction.branch_points_lidar_m or {}).get(
+                                    "dynamic", ()
+                                )
+                            ),
+                            "doppler_static_evidence_count": prediction.metadata[
+                                "doppler_static_evidence_count"
                             ],
-                            "unknown_count": prediction.metadata["unknown_count"],
+                            "doppler_uncertain_evidence_count": prediction.metadata[
+                                "doppler_uncertain_evidence_count"
+                            ],
+                            "doppler_dynamic_evidence_count": prediction.metadata[
+                                "doppler_dynamic_evidence_count"
+                            ],
                         },
                         allow_nan=False,
                     ),
@@ -691,8 +679,8 @@ class TraditionalDatasetRunner:
                 if branch_renderer is not None:
                     branches = prediction.branch_points_lidar_m or {}
                     branch_renderer.add_frame(
-                        branches.get("persistent", np.empty((0, 3))),
-                        branches.get("motion", np.empty((0, 3))),
+                        branches.get("static", np.empty((0, 3))),
+                        branches.get("dynamic", np.empty((0, 3))),
                         camera_path,
                         token,
                     )
@@ -720,16 +708,15 @@ class TraditionalDatasetRunner:
                     f"raw={prediction.metadata['raw_detection_count']} "
                     f"reliable={prediction.metadata['reliable_detection_count']} "
                     f"temporal={prediction.metadata.get('temporal_accepted_detection_count', prediction.metadata['accepted_detection_count'])} "
-                    f"persistent/motion/unknown="
-                    f"{prediction.metadata.get('persistent_current_count', 0)}/"
-                    f"{prediction.metadata.get('motion_confirmed_count', 0)}/"
-                    f"{prediction.metadata.get('unknown_count', 0)} "
+                    f"static/dynamic="
+                    f"{len((prediction.branch_points_lidar_m or {}).get('static', ()))}/"
+                    f"{len((prediction.branch_points_lidar_m or {}).get('dynamic', ()))} "
                     f"accepted={prediction.metadata['accepted_detection_count']} "
                     f"history_bg={prediction.metadata['historic_background_count']} "
                     f"history_fg={prediction.metadata.get('historic_foreground_count', 0)} "
                     f"objects={prediction.metadata.get('object_classifier', {}).get('candidate_count', 0)} "
-                    f"fallback_bg={prediction.metadata.get('object_classifier', {}).get('motion_background_fallback_point_count', 0)} "
-                    f"velocity_s/u/d="
+                    f"fallback_bg={prediction.metadata.get('object_classifier', {}).get('dynamic_background_fallback_point_count', 0)} "
+                    f"doppler_s/u/d="
                     f"{prediction.metadata['doppler_static_evidence_count']}/"
                     f"{prediction.metadata['doppler_uncertain_evidence_count']}/"
                     f"{prediction.metadata['doppler_dynamic_evidence_count']} "

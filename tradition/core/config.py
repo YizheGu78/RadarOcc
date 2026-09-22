@@ -133,24 +133,13 @@ class ReliabilityConfig:
 
 @dataclass(frozen=True)
 class TemporalConfig:
-    """Occupancy-first temporal classification for pose-aligned RPC frames.
+    """Causal temporal consistency settings for pose-aligned RPC frames."""
 
-    ``window_size`` is the number of *previous* frames retained. A current
-    return becomes persistent only when its world XY cell was occupied in at
-    least ``min_static_support`` prior frames. Velocity evidence is evaluated
-    only for the complementary, non-persistent points.
-
-    ``static_match_radius_m`` remains as a deprecated constructor field for
-    old experiment configs; persistence now uses the explicit grid settings.
-    """
-
-    window_size: int = 5
-    min_static_support: int = 3
+    window_size: int = 3
+    min_static_support: int = 2
     min_dynamic_support: int = 2
     static_match_radius_m: float = 0.60
     dynamic_match_radius_m: float = 2.00
-    occupancy_cell_size_m: float = 0.40
-    occupancy_dilation_cells: int = 1
 
     def __post_init__(self) -> None:
         if self.window_size < 1:
@@ -165,10 +154,6 @@ class TemporalConfig:
             raise ValueError(
                 "Dynamic match radius must not be smaller than static radius."
             )
-        if self.occupancy_cell_size_m <= 0.0:
-            raise ValueError("Occupancy persistence cell size must be positive.")
-        if self.occupancy_dilation_cells < 0:
-            raise ValueError("Occupancy persistence dilation must be non-negative.")
 
 
 @dataclass(frozen=True)
@@ -236,36 +221,3 @@ class MappingConfig:
     hit_radius_xy_voxels: int = 1
     hit_radius_z_voxels: int = 1
     foreground_override_ratio: float = 0.80
-
-
-@dataclass(frozen=True)
-class UnwrappingConfig:
-    """Experimental range-only CA-KF; values need validation on real RPC tracks."""
-
-    frame_dt_s: float = 0.10
-    cluster_radius_m: float = 1.5
-    min_cluster_points: int = 2
-    association_radius_m: float = 1.5
-    max_speed_mps: float = 40.0
-    max_gap_s: float = 0.5
-    init_frames: int = 4
-    history_size: int = 12
-    range_std_m: float = 0.20
-    jerk_variance: float = 1.0
-    initial_acceleration_std_mps2: float = 2.0
-    innovation_sigma: float = 4.0
-    velocity_floor_std_mps: float = 0.20
-    confidence_sigma: float = 2.0
-    max_doppler_error_mps: float = 0.80
-    range_check_tolerance_mps: float = 1.0
-
-    def __post_init__(self):
-        import math
-        for name, value in vars(self).items():
-            if not math.isfinite(value) or value <= 0:
-                raise ValueError(f"{name} must be finite and positive.")
-        for name in ('min_cluster_points', 'init_frames', 'history_size'):
-            if not isinstance(getattr(self, name), int):
-                raise ValueError(f"{name} must be an integer.")
-        if self.init_frames < 3 or self.history_size < self.init_frames:
-            raise ValueError("Require history_size >= init_frames >= 3.")

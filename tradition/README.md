@@ -22,12 +22,11 @@ indices follow `lidar_token`, not the differently numbered aligned RPC file.
 ```text
 RPC [N,11]
     -> local polar-neighbour power/reliability filtering
-    -> pose-align prior frames into a fixed world grid
-    -> occupancy persistence first: 3 of the previous 5 frames by default
-    -> persistent points: no target-speed calculation; 2D OGM components
-    -> non-persistent points: selective range-Kalman/Doppler motion evidence
-       confirmed motion: current-frame scaled XYZ DBSCAN
-       unresolved evidence: Unknown, not forced into either branch
+    -> adjacent LiDAR poses produce vx, vy and yaw rate
+    -> full-vector ego-motion-compensated wrapped Doppler residual
+    -> pose-align a causal five-frame window
+    -> static points (current + aligned static history): 2D OGM components
+       dynamic points (current frame only): scaled XYZ DBSCAN
     -> cluster geometry/power/compensated-residual features
     -> trained classical Random Forest objectness
     -> object cluster: foreground; other occupied structure: background
@@ -56,7 +55,7 @@ for training and video inference so the serialized estimator stays compatible.
 The default model is written to:
 
 ```text
-work_dirs/traditional_object_classifier/object_random_forest_occupancy_first_42d.joblib
+work_dirs/traditional_object_classifier/object_random_forest_42d.joblib
 ```
 
 The default is `kradar_dict_train_official_doppler8.pkl`. Do not train on
@@ -73,7 +72,7 @@ OUTPUT_MODEL=$PWD/work_dirs/traditional_object_classifier/smoke.joblib \
 ## 42-D cluster features and retraining
 
 Training and inference both call `RadarObjectFeatureExtractor.extract` through
-`OccupancyFirstCandidateExtractor`. `FEATURE_NAMES` is the ordered schema: the
+`DualBranchCandidateExtractor`. `FEATURE_NAMES` is the ordered schema: the
 original 28 entries retain their positions and the following 14 are appended.
 These are cluster-level inputs to the binary objectness Random Forest, not
 new output classes; occupancy output remains free/background/foreground.
@@ -117,13 +116,11 @@ The descriptors are adaptations of feature ideas, not an exact reproduction
 of a published 50-D schema. Additional inputs are not guaranteed to improve
 accuracy; compare with the 28-D baseline on the same held-out sequences.
 
-**Models trained before the occupancy-first change cannot be reused.** The
-first feature is now `source_motion` and the former `dynamic_fraction` is now
-`motion_fraction`; loading an old schema raises an explicit retraining error.
-The training command regenerates
+**Old 28-D model files cannot be used with the 42-D extractor.** Loading an old
+schema raises an explicit retraining error. The training command regenerates
 features from RPC inputs, logs the dimension, and stores `feature_names` plus
 `metadata.feature_count` in the new bundle. The training and video scripts
-default to `object_random_forest_occupancy_first_42d.joblib`, leaving old files intact
+default to `object_random_forest_42d.joblib`, leaving the old 28-D file intact
 for baseline comparisons.
 
 For the video script, select it with `OBJECT_MODEL`; for the Python inference
@@ -146,21 +143,18 @@ python -m tradition.cli.run \
   --output-dir work_dirs/tradition_rpc_pose_smoke \
   --scene 3 \
   --max-frames 3 \
-  --object-model work_dirs/traditional_object_classifier/object_random_forest_occupancy_first_42d.joblib \
-  --velocity-unwrapping range-kalman \
+  --object-model work_dirs/traditional_object_classifier/object_random_forest_42d.joblib \
   --static-residual-threshold-mps 0.50 \
   --dynamic-residual-threshold-mps 0.80 \
   --temporal-window 5 \
-  --min-persistent-support 3 \
-  --min-motion-support 2 \
-  --occupancy-cell-size-m 0.40 \
-  --occupancy-dilation-cells 1
+  --min-static-support 2 \
+  --min-dynamic-support 2
 ```
 
 Complete official-test metrics over **all scenes**, while rendering only Scene 3:
 
 ```bash
-OBJECT_MODEL=$PWD/work_dirs/traditional_object_classifier/object_random_forest_occupancy_first_42d.joblib \
+OBJECT_MODEL=$PWD/work_dirs/traditional_object_classifier/object_random_forest_42d.joblib \
 ./run_traditional_scene3_video.sh
 ```
 
@@ -170,33 +164,46 @@ The default evaluation deliberately omits `--scene`, so every entry in
 RadarOcc comparison protocol: whole official test split for quantitative
 metrics and Scene 3 for qualitative visualization.
 
+By default the runner creates both qualitative videos:
+
+- `scene_3_branches_rgb.*`: static branch | dynamic branch | RGB. The static
+  panel includes current and aligned historic static points; the dynamic panel
+  contains current-frame points only, exactly as used by candidate generation.
+- `scene_3_semantic_overlay.*`: Free / Background / Foreground prediction and
+  GT | RGB, preserving the original three-class visualization.
+
+There is no Kalman, range-difference, or other Doppler unwrapping in this
+pipeline. The RPC Doppler column is the original physical velocity represented
+by the selected Doppler bin. It is used directly after ego-motion projection
+subtraction and ordinary wrapping to the sensor's native Doppler interval.
+
+The two threshold visualizers likewise compare the original compensated bin
+residual at `0.3/0.5/0.7 m/s`:
+
+```bash
+python -m tradition.analysis.visualize_static_thresholds --scene 3 --token 3_00080
+python -m tradition.analysis.visualize_static_thresholds_video --scene 3
+```
+
 Three-frame Scene-3-only video smoke test:
 
 ```bash
 OUTPUT_DIR=$PWD/work_dirs/tradition_scene3_pose_smoke \
 EVAL_SCENE=3 MAX_FRAMES=3 MAX_VIDEO_FRAMES=3 KEEP_FRAMES=1 \
-OBJECT_MODEL=$PWD/work_dirs/traditional_object_classifier/object_random_forest_occupancy_first_42d.joblib \
+OBJECT_MODEL=$PWD/work_dirs/traditional_object_classifier/object_random_forest_42d.joblib \
 ./run_traditional_scene3_video.sh
 ```
 
-The default video layout is three panels: persistent branch on the left,
-motion-confirmed branch in the middle, and the synchronized RGB image on the
-right. Blue voxels are persistent points (including aligned supporting
-history); red voxels are current-frame motion-confirmed points.
-
-The RPC resolver treats the annotation frame as the synchronized LiDAR/RadarOcc
-index. For every scene it reads
-`data/K-Radar_calib/<scene>/info_calib/calib_radar_lidar.txt` and applies:
+The RPC resolver deliberately ignores cross-sensor frame-number equality. It
+sorts annotation entries and RPC files independently inside each scene and
+pairs them in order: first with first, second with second, and so on. Common
+layouts include:
 
 ```text
-original RPC frame = aligned annotation frame + frame difference
+data/K-Radar_rpc/3/rpc_00042.npy
+data/K-Radar_rpc/3/pc01p/rpc_00042.npy
+data/K-Radar_rpc/3/pc01p_00042.npy
 ```
-
-For example, Scene 3 has `frame difference=30`, so aligned
-`EAsparse_00001.npz` resolves to `rpc_00031.npy`, while LiDAR pose lookup
-continues to use token `3_00001`. The calibration file's x/y fields are not
-used for this temporal filename mapping. Override the calibration root with
-`--calib-root` or the shell scripts' `CALIB_ROOT` environment variable.
 
 The pose resolver accepts a sequence pose directory, a split root, or the
 whole K-RadarOcc root, for example:
@@ -283,77 +290,3 @@ tradition/
   background means occupied environment structure, not simply a static return.
 - Unobserved cells are class 0/free because the requested evaluation has only
   three output classes and no unknown class.
-
-
-## Experimental range-Kalman Doppler unwrapping
-
-Enable on the pose-temporal RPC evaluation command with:
-
-```bash
---velocity-unwrapping range-kalman --pose-root /path/to/poses --pose-dt-s 0.10
-```
-
-`--velocity-unwrapping off` is the default for baseline comparisons. The new
-mode is also available in `tradition.cli.train_object_classifier`. Use the same
-mode, frame interval and tuning for RF training and inference; existing RF
-weights were trained on wrapped velocity features and should be retrained for
-this experiment. `tradition.cli.predict` remains a single-frame interface and
-does not perform unwrapping. Python callers pass `UnwrappingConfig(...)` as
-`unwrapping_cfg` to `build_rpc_pipeline` and use `predict_temporal_file`.
-
-Processing order:
-
-1. Reliability filtering, then spatial connected components on **all** reliable
-   points; there is no static/Doppler pre-filter.
-2. Conservative world-coordinate association. Multiple plausible matches start
-   new tracks. Position history predicts the next association center.
-3. At least four associated observations initialize `[range, range_rate, 0]`
-   from a least-squares distance slope. A constant-acceleration KF updates only
-   with the raw sensor distance of the robust cluster centroid. It never uses
-   folded or unwrapped Doppler as a KF measurement.
-4. Convert KF range rate to the compensated Doppler residual convention:
-   `predicted_residual = -s * (range_rate + ego_velocity · LOS)`, where
-   `s = stationary_velocity_sign`. Select
-   `k = round((predicted_residual - wrapped_residual) / period)`.
-5. Accept the alias only if its discrepancy plus the configured uncertainty
-   margin remains below half a Doppler period. Range-history consistency is a
-   gate, not an independent weighted observation: it shares data with the KF.
-6. Generate static/dynamic evidence from the accepted unwrapped residual.
-   Unresolved tracks have NaN residual and UNCERTAIN evidence. Nearby static
-   returns cannot override a current dynamic or uncertain observation.
-
-With the repository's `s=+1`, ego `23 m/s` and an ahead, same-direction truck
-at `19.6 m/s`, relative range rate is `-3.4 m/s`; compensated residual is
-`-19.6 m/s`, folded to `-0.4 m/s`, and the residual ambiguity integer is `-5`.
-The magnitude determines motion classification. This integer describes the
-**compensated residual**, not necessarily the raw Doppler ambiguity integer.
-
-Elapsed time comes from LiDAR pose token index differences times `pose_dt_s`,
-not RPC filename indices or number of processed frames. Sequence changes,
-non-increasing tokens, long gaps, and range innovation outliers reset/restart
-tracks. Inputs must use synchronized poses and the correct Doppler sign and
-period. The current repository period is 3.84 m/s; it is configurable in
-`KRadarConfig` and is not inferred from an arbitrary RPC file.
-
-Per-frame diagnostics are saved by `tradition.cli.run` under
-`OUTPUT/velocity_unwrapping/TOKEN.json`: reliable-point indices, track IDs,
-wrapped residuals, KF predictions, ambiguity integers, unwrapped residuals,
-and resolved/unresolved counts. Null values mean unresolved. The arrays refer
-to reliable detections **before** temporal/RF rejection.
-
-`UnwrappingConfig` contains the experimental thresholds. The CLI exposes
-`--unwrap-range-std-m` and `--unwrap-cluster-radius-m`; these defaults are
-engineering starting values, not fitted or paper-validated K-Radar parameters.
-KF covariance does not fully model centroid switches, pose error or incorrect
-association. Wide/merged clusters can contain multiple motions; a centroid
-radial prior is only an approximation across their points. Purely transverse
-motion with near-zero radial velocity remains a limitation. Unknown points are
-currently excluded from occupancy evidence, so startup/association losses can
-reduce occupancy recall. Validate on continuous real sequences before using
-this as the replacement baseline; short sparse clips may never converge.
-
-Validation without pytest:
-
-```bash
-python -m unittest tradition.tests.test_range_kalman -v
-```

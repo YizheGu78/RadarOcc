@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, replace
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -14,25 +14,18 @@ from tradition.core.config import (
     PoseConfig,
     ReliabilityConfig,
     TemporalConfig,
-    UnwrappingConfig,
 )
-from tradition.core.types import DopplerEvidence, MotionLabel, TemporalDetectionFrame
+from tradition.core.types import MotionLabel, TemporalDetectionFrame
 from tradition.detection.rpc_reliability_filter import LocalPowerRPCFilter
 from tradition.detection.rpc_target_detector import RPCPointTargetDetector
 from tradition.evaluation.radarocc_metrics import load_gt_sparse_xyz
-from tradition.experiment.dataset_runner import (
-    RPCFrameNotFoundError,
-    _load_infos,
-    _resolve_gt,
-    _resolve_rpc_radar,
-)
+from tradition.experiment.dataset_runner import _load_infos, _resolve_gt, _resolve_rpc_radar
 from tradition.io.pose_reader import RadarOccPoseReader
 from tradition.io.rpc_radar_reader import KRadarRPCReader
-from tradition.motion.range_kalman import RangeKalmanUnwrapper
 from tradition.motion.doppler_classifier import EgoCompensatedDopplerClassifier
 from tradition.motion.pose_ego_motion import PoseEgoMotionEstimator
-from tradition.motion.temporal_consistency import OccupancyFirstTemporalClassifier
-from tradition.semantics.object_classifier import OccupancyFirstCandidateExtractor
+from tradition.motion.temporal_consistency import PoseAlignedTemporalClassifier
+from tradition.semantics.object_classifier import DualBranchCandidateExtractor
 from tradition.semantics.training import (
     ClusterLabellingConfig,
     ClusterLabellingOutcome,
@@ -44,26 +37,12 @@ from tradition.semantics.training import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Train the occupancy-first candidate Random Forest from "
+            "Train the classical dual-branch cluster Random Forest from "
             "RadarOcc training GT. GT is used only here, never at inference."
         )
     )
-    parser.add_argument(
-        "--velocity-unwrapping",
-        choices=("off", "range-kalman"),
-        default="range-kalman",
-        help="Range-only tracking for non-persistent points; requires RPC poses.",
-    )
-    parser.add_argument("--unwrap-range-std-m", type=float, default=0.20)
-    parser.add_argument("--unwrap-cluster-radius-m", type=float, default=1.5)
     parser.add_argument("--annotation", type=Path, required=True)
     parser.add_argument("--radar-root", type=Path, required=True)
-    parser.add_argument(
-        "--calib-root",
-        type=Path,
-        default=Path("data/K-Radar_calib"),
-        help="Root containing each scene's info_calib/calib_radar_lidar.txt.",
-    )
     parser.add_argument("--pose-root", type=Path, required=True)
     parser.add_argument("--output-model", type=Path, required=True)
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
@@ -78,24 +57,10 @@ def parse_args() -> argparse.Namespace:
         "--stationary-velocity-sign", type=float, choices=(-1.0, 1.0), default=1.0
     )
     parser.add_argument("--temporal-window", type=int, default=5)
-    parser.add_argument(
-        "--min-persistent-support",
-        "--min-static-support",
-        dest="min_persistent_support",
-        type=int,
-        default=3,
-    )
-    parser.add_argument(
-        "--min-motion-support",
-        "--min-dynamic-support",
-        dest="min_motion_support",
-        type=int,
-        default=2,
-    )
+    parser.add_argument("--min-static-support", type=int, default=2)
+    parser.add_argument("--min-dynamic-support", type=int, default=2)
     parser.add_argument("--static-match-radius-m", type=float, default=0.60)
     parser.add_argument("--dynamic-match-radius-m", type=float, default=2.00)
-    parser.add_argument("--occupancy-cell-size-m", type=float, default=0.40)
-    parser.add_argument("--occupancy-dilation-cells", type=int, default=1)
     parser.add_argument("--min-local-power-ratio", type=float, default=0.25)
     parser.add_argument("--min-local-neighbors", type=int, default=1)
     parser.add_argument("--static-object-cell-size-m", type=float, default=0.40)
@@ -132,18 +97,8 @@ def _ego_motion(
 
 def main() -> None:
     args = parse_args()
-    unwrapping_cfg = (UnwrappingConfig(
-        frame_dt_s=args.pose_dt_s, range_std_m=args.unwrap_range_std_m,
-        cluster_radius_m=args.unwrap_cluster_radius_m,
-    ) if args.velocity_unwrapping == "range-kalman" else None)
     repo_root = args.repo_root.expanduser().resolve()
     radar_root = args.radar_root.expanduser().resolve()
-    calib_root = args.calib_root.expanduser()
-    calib_root = (
-        calib_root.resolve()
-        if calib_root.is_absolute()
-        else (repo_root / calib_root).resolve()
-    )
     gt_root = args.gt_root.expanduser().resolve() if args.gt_root else None
     motion_cfg = MotionConfig(
         static_residual_threshold_mps=args.static_residual_threshold_mps,
@@ -152,12 +107,10 @@ def main() -> None:
     )
     temporal_cfg = TemporalConfig(
         window_size=args.temporal_window,
-        min_static_support=args.min_persistent_support,
-        min_dynamic_support=args.min_motion_support,
+        min_static_support=args.min_static_support,
+        min_dynamic_support=args.min_dynamic_support,
         static_match_radius_m=args.static_match_radius_m,
         dynamic_match_radius_m=args.dynamic_match_radius_m,
-        occupancy_cell_size_m=args.occupancy_cell_size_m,
-        occupancy_dilation_cells=args.occupancy_dilation_cells,
     )
     object_cfg = ObjectClusteringConfig(
         static_cell_size_m=args.static_object_cell_size_m,
@@ -177,16 +130,14 @@ def main() -> None:
             min_local_neighbors=args.min_local_neighbors,
         )
     )
-    unwrapper = (RangeKalmanUnwrapper(motion_cfg=motion_cfg, config=unwrapping_cfg)
-                 if unwrapping_cfg is not None else None)
     doppler = EgoCompensatedDopplerClassifier(motion_cfg=motion_cfg)
-    temporal = OccupancyFirstTemporalClassifier(temporal_cfg, motion_cfg)
+    temporal = PoseAlignedTemporalClassifier(temporal_cfg, motion_cfg)
     pose_reader = RadarOccPoseReader(args.pose_root)
     pose_estimator = PoseEgoMotionEstimator(
         radar_cfg=KRadarConfig(),
         pose_cfg=PoseConfig(frame_dt_s=args.pose_dt_s),
     )
-    candidates = OccupancyFirstCandidateExtractor(object_cfg)
+    candidates = DualBranchCandidateExtractor(object_cfg)
     print(f"Object feature schema: {len(candidates.features.feature_names)} dimensions")
     labeller = RadarOccClusterLabeller(
         GridConfig(),
@@ -210,56 +161,21 @@ def main() -> None:
     y: list[int] = []
     outcome_counts = {outcome: 0 for outcome in ClusterLabellingOutcome}
     active_scene = None
-    processed_frames = 0
-    skipped_missing_rpc = 0
     temporal.reset()
     for ordinal, info in enumerate(infos, start=1):
         scene = str(info.get("scene_token"))
         token = str(info["lidar_token"])
         if scene != active_scene:
             temporal.reset()
-            if unwrapper is not None:
-                unwrapper.reset()
             active_scene = scene
-        try:
-            radar_path = _resolve_rpc_radar(
-                info, repo_root, radar_root, calib_root
-            )
-        except RPCFrameNotFoundError as error:
-            skipped_missing_rpc += 1
-            print(
-                f"[{ordinal}/{len(infos)}] SKIP missing RPC "
-                f"scene={scene} token={token} "
-                f"aligned={error.aligned_frame:05d} "
-                f"offset={error.frame_difference:+d} "
-                f"rpc={error.rpc_frame:05d}"
-            )
-            continue
-        processed_frames += 1
+        radar_path = _resolve_rpc_radar(info, repo_root, radar_root)
         gt_path = _resolve_gt(info, repo_root, gt_root)
         ego = _ego_motion(pose_reader, pose_estimator, scene, token)
         raw = detector.detect(reader.read(radar_path))
         reliable = reliability.filter(raw)
-        persistence = temporal.assess_persistence(
-            token=token,
-            pose_lidar_to_world=ego.pose_lidar_to_world,
-            detections=reliable,
+        residuals, evidence = doppler.evidence_with_velocity(
+            reliable, ego.linear_velocity_radar_mps
         )
-        if unwrapper is None:
-            residuals, evidence = doppler.evidence_with_velocity(
-                reliable, ego.linear_velocity_radar_mps
-            )
-            residuals = np.asarray(residuals, dtype=np.float64).copy()
-            evidence = np.asarray(evidence, dtype=np.int8).copy()
-            residuals[persistence.persistent_mask] = 0.0
-            evidence[persistence.persistent_mask] = int(DopplerEvidence.STATIC)
-        else:
-            residuals, evidence = unwrapper.update(
-                reliable,
-                ego,
-                token,
-                excluded_mask=persistence.persistent_mask,
-            )
         result = temporal.update(
             TemporalDetectionFrame(
                 token=token,
@@ -267,8 +183,7 @@ def main() -> None:
                 detections=reliable,
                 doppler_residuals_mps=residuals,
                 doppler_evidence=evidence,
-            ),
-            persistence,
+            )
         )
         current_features = [
             replace(
@@ -278,7 +193,7 @@ def main() -> None:
             for index in result.current_indices
         ]
         combined = current_features + result.historic_detections
-        motion = result.current_motion_labels + [MotionLabel.PERSISTENT] * len(
+        motion = result.current_motion_labels + [MotionLabel.STATIC] * len(
             result.historic_detections
         )
         gt = load_gt_sparse_xyz(gt_path, coordinate_order=args.gt_order)
@@ -293,9 +208,6 @@ def main() -> None:
         print(
             f"[{ordinal}/{len(infos)}] scene={scene} token={token} "
             f"raw={len(raw)} reliable={len(reliable)} "
-            f"persistent={len(result.persistent_indices)} "
-            f"motion={len(result.motion_indices)} "
-            f"unknown={len(result.unknown_indices)} "
             f"candidates={len(frame_candidates)} "
             f"foreground={outcome_counts[ClusterLabellingOutcome.FOREGROUND]} "
             f"background={outcome_counts[ClusterLabellingOutcome.BACKGROUND]} "
@@ -305,17 +217,6 @@ def main() -> None:
             f"{outcome_counts[ClusterLabellingOutcome.AMBIGUOUS]}"
         )
 
-    if processed_frames == 0:
-        raise RuntimeError(
-            "No training frames were processed. "
-            "Check the RPC root and frame alignment."
-        )
-
-    print(
-        "Training frame totals: "
-        f"selected={len(infos)} processed={processed_frames} "
-        f"skipped_missing_rpc={skipped_missing_rpc}"
-    )
     print(
         "Training candidate totals: "
         f"foreground={outcome_counts[ClusterLabellingOutcome.FOREGROUND]} "
@@ -333,12 +234,8 @@ def main() -> None:
         n_estimators=args.n_estimators,
         random_state=args.random_state,
         metadata={
-            "velocity_unwrapping": args.velocity_unwrapping,
-            "unwrapping_config": asdict(unwrapping_cfg) if unwrapping_cfg is not None else None,
             "annotation": str(args.annotation.expanduser().resolve()),
-            "selected_frame_count": len(infos),
-            "frame_count": processed_frames,
-            "skipped_missing_rpc_count": skipped_missing_rpc,
+            "frame_count": len(infos),
             "foreground_candidates": outcome_counts[
                 ClusterLabellingOutcome.FOREGROUND
             ],
@@ -352,10 +249,6 @@ def main() -> None:
                 ClusterLabellingOutcome.AMBIGUOUS
             ],
             "temporal_window": args.temporal_window,
-            "occupancy_cell_size_m": args.occupancy_cell_size_m,
-            "occupancy_dilation_cells": args.occupancy_dilation_cells,
-            "min_persistent_support": args.min_persistent_support,
-            "min_motion_support": args.min_motion_support,
             "positive_foreground_fraction": args.positive_foreground_fraction,
             "negative_foreground_fraction": args.negative_foreground_fraction,
         },

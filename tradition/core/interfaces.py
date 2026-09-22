@@ -81,21 +81,10 @@ class TemporalMotionClassifier(ABC):
         """Clear buffered frames at a scene boundary."""
 
     @abstractmethod
-    def assess_persistence(
-        self,
-        token: str,
-        pose_lidar_to_world: np.ndarray,
-        detections: Sequence[RadarDetection],
-    ) -> Any:
-        """Classify world-grid persistence without committing the frame."""
-
-    @abstractmethod
     def update(
-        self,
-        frame: TemporalDetectionFrame,
-        persistence: Any | None = None,
+        self, frame: TemporalDetectionFrame
     ) -> TemporalClassification:
-        """Confirm motion for non-persistent points and commit the frame."""
+        """Fuse a new frame with its pose-aligned causal history."""
 
 
 class SemanticClassifier(ABC):

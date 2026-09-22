@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-from collections import deque
 from pathlib import Path
 
 import matplotlib
@@ -13,7 +12,6 @@ matplotlib.use("Agg")
 import matplotlib.image as mpimg
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy.spatial import cKDTree
 
 from tradition.core.config import (
     GridConfig,
@@ -35,556 +33,12 @@ from tradition.motion.doppler_classifier import EgoCompensatedDopplerClassifier
 from tradition.motion.pose_ego_motion import PoseEgoMotionEstimator
 
 
-def add_velocity_arguments(parser):
-    parser.add_argument(
-        "--velocity-unwrapping", choices=("off", "range-difference"),
-        default="range-difference",
-        help=(
-            "Estimate target velocity from cross-frame world-position "
-            "differences and solve integer k; off shows wrapped residuals."
-        ),
-    )
-    parser.add_argument(
-        "--occupancy-persistence",
-        choices=("on", "off"),
-        default="on",
-        help=(
-            "Use pose-aligned world-grid persistence before motion tracking. "
-            "Persistent cells bypass cluster-center velocity estimation."
-        ),
-    )
-    parser.add_argument("--occupancy-cell-size-m", type=float, default=0.40)
-    parser.add_argument("--occupancy-history-size", type=int, default=5)
-    parser.add_argument("--occupancy-min-support", type=int, default=3)
-    parser.add_argument("--occupancy-dilation-cells", type=int, default=1)
-    parser.add_argument("--unwrap-cluster-radius-m", type=float, default=0.8)
-    parser.add_argument(
-        "--unwrap-max-cluster-extent-m",
-        type=float,
-        default=4.0,
-        help=(
-            "Maximum XY diameter of a world-anchored local patch. "
-            "Prevents long guardrails from becoming one cluster."
-        ),
-    )
-    parser.add_argument("--range-difference-association-radius-m", type=float, default=1.0)
-    parser.add_argument("--range-difference-history", type=int, default=5)
-    parser.add_argument("--range-difference-max-speed-mps", type=float, default=40.0)
-    parser.add_argument("--range-difference-max-error-mps", type=float, default=0.80)
-
-
-class WorldOccupancyPersistenceClassifier:
-    """Stationary evidence from repeated occupancy in fixed world XY cells.
-
-    Only historical frames contribute to the support of a current point. The
-    current frame is appended after classification, so a point needs genuine
-    cross-frame persistence rather than receiving support from itself.
-    """
-
-    def __init__(
-        self,
-        cell_size_m=0.40,
-        history_size=5,
-        min_support=3,
-        dilation_cells=1,
-    ):
-        if cell_size_m <= 0.0:
-            raise ValueError("occupancy cell size must be positive")
-        if history_size < 1:
-            raise ValueError("occupancy history size must be >= 1")
-        if min_support < 1 or min_support > history_size:
-            raise ValueError(
-                "occupancy min support must be within [1, history size]"
-            )
-        if dilation_cells < 0:
-            raise ValueError("occupancy dilation cells must be >= 0")
-        self.cell_size_m = float(cell_size_m)
-        self.history_size = int(history_size)
-        self.min_support = int(min_support)
-        self.dilation_cells = int(dilation_cells)
-        self.offsets = [
-            (dx, dy)
-            for dx in range(-self.dilation_cells, self.dilation_cells + 1)
-            for dy in range(-self.dilation_cells, self.dilation_cells + 1)
-        ]
-        self.reset()
-
-    def reset(self):
-        self.frames = deque(maxlen=self.history_size)
-        self.last_frame_index = None
-        self.scene = None
-        self.last_diagnostics = {}
-
-    def update(self, detections, ego_motion, token):
-        token_text = str(token)
-        scene = token_text.rsplit("_", 1)[0]
-        frame_index = RadarOccPoseReader.frame_index(token_text)
-        if self.scene != scene or (
-            self.last_frame_index is not None
-            and frame_index <= self.last_frame_index
-        ):
-            self.reset()
-        self.scene = scene
-
-        xyz_lidar = np.asarray(
-            [det.xyz_lidar_m for det in detections], dtype=np.float64
-        ).reshape(-1, 3)
-        pose = np.asarray(ego_motion.pose_lidar_to_world, dtype=np.float64)
-        xyz_world = (
-            pose[:3, :3] @ xyz_lidar.T
-        ).T + pose[:3, 3]
-        valid = np.all(np.isfinite(xyz_world), axis=1)
-        cells = np.zeros((len(detections), 2), dtype=np.int64)
-        cells[valid] = np.floor(
-            xyz_world[valid, :2] / self.cell_size_m
-        ).astype(np.int64)
-
-        support = np.zeros(len(detections), dtype=np.int16)
-        for index in np.flatnonzero(valid):
-            cell_x, cell_y = cells[index]
-            for historic_cells in self.frames:
-                if any(
-                    (int(cell_x + dx), int(cell_y + dy)) in historic_cells
-                    for dx, dy in self.offsets
-                ):
-                    support[index] += 1
-
-        persistent = valid & (support >= self.min_support)
-        current_cells = {
-            (int(cell_x), int(cell_y))
-            for cell_x, cell_y in cells[valid]
-        }
-        history_before_append = len(self.frames)
-        self.frames.append(current_cells)
-        self.last_frame_index = frame_index
-        values, counts = np.unique(support, return_counts=True)
-        self.last_diagnostics = {
-            "method": "world_xy_occupancy_persistence",
-            "token": token_text,
-            "cell_size_m": self.cell_size_m,
-            "history_size": self.history_size,
-            "history_frames_available": history_before_append,
-            "min_support": self.min_support,
-            "dilation_cells": self.dilation_cells,
-            "persistent_static_count": int(np.count_nonzero(persistent)),
-            "motion_candidate_count": int(
-                np.count_nonzero(valid & ~persistent)
-            ),
-            "support_histogram": {
-                str(int(value)): int(count)
-                for value, count in zip(values, counts)
-            },
-        }
-        return persistent, support
-
-
-def build_occupancy_persistence_classifier(args):
-    if args.occupancy_persistence == "off":
-        return None
-    return WorldOccupancyPersistenceClassifier(
-        cell_size_m=args.occupancy_cell_size_m,
-        history_size=args.occupancy_history_size,
-        min_support=args.occupancy_min_support,
-        dilation_cells=args.occupancy_dilation_cells,
-    )
-
-
-class RangeDifferenceUnwrapper:
-    """Non-Kalman ambiguity resolution from cross-frame cluster displacement."""
-
-    def __init__(
-        self, radar_cfg, motion_cfg, frame_dt_s=0.10,
-        cluster_radius_m=0.8, max_cluster_extent_m=4.0,
-        association_radius_m=1.0, history_size=5, min_cluster_points=2,
-        max_speed_mps=40.0, max_doppler_error_mps=0.80,
-    ):
-        if frame_dt_s <= 0.0:
-            raise ValueError("frame_dt_s must be positive")
-        if (
-            cluster_radius_m <= 0.0
-            or max_cluster_extent_m <= 0.0
-            or association_radius_m <= 0.0
-        ):
-            raise ValueError(
-                "cluster radius, maximum extent, and association radius "
-                "must be positive"
-            )
-        if history_size < 2:
-            raise ValueError("range-difference history must be >= 2")
-        if max_speed_mps <= 0.0 or max_doppler_error_mps <= 0.0:
-            raise ValueError("speed/error gates must be positive")
-        self.radar_cfg = radar_cfg
-        self.motion_cfg = motion_cfg
-        self.frame_dt_s = float(frame_dt_s)
-        self.cluster_radius_m = float(cluster_radius_m)
-        self.max_cluster_extent_m = float(max_cluster_extent_m)
-        self.association_radius_m = float(association_radius_m)
-        self.history_size = int(history_size)
-        self.min_cluster_points = int(min_cluster_points)
-        self.max_speed_mps = float(max_speed_mps)
-        self.max_doppler_error_mps = float(max_doppler_error_mps)
-        self.max_gap_s = max(0.5, 2.5 * self.frame_dt_s)
-        self.radar_to_lidar_rotation = np.asarray(
-            PoseConfig().radar_to_lidar_rotation, dtype=np.float64
-        )
-        self.doppler = EgoCompensatedDopplerClassifier(radar_cfg, motion_cfg)
-        self.reset()
-
-    def reset(self):
-        self.tracks = []
-        self.next_id = 0
-        self.last_time = None
-        self.scene = None
-        self.last_diagnostics = {}
-
-    def _clusters(self, detections, pose, excluded_mask=None):
-        """Build compact patches in a fixed world-coordinate grid.
-
-        Radius connectivity is evaluated only inside one world-anchored patch.
-        This removes single-linkage chaining along guardrails while keeping
-        patch boundaries stable as the ego vehicle moves.
-        """
-        xyz_lidar = np.asarray(
-            [det.xyz_lidar_m for det in detections], dtype=np.float64
-        ).reshape(-1, 3)
-        finite = np.all(np.isfinite(xyz_lidar), axis=1)
-        if excluded_mask is None:
-            excluded = np.zeros(len(detections), dtype=bool)
-        else:
-            excluded = np.asarray(excluded_mask, dtype=bool)
-            if excluded.shape != (len(detections),):
-                raise ValueError(
-                    "excluded_mask must align with detections"
-                )
-        valid = np.flatnonzero(finite & ~excluded)
-        if not len(valid):
-            return []
-
-        xyz_world = (
-            pose[:3, :3] @ xyz_lidar.T
-        ).T + pose[:3, 3]
-
-        # A square cell with this side length has an XY diagonal no larger
-        # than max_cluster_extent_m.
-        patch_width = self.max_cluster_extent_m / np.sqrt(2.0)
-        patch_keys = np.floor(
-            xyz_world[valid, :2] / patch_width
-        ).astype(np.int64)
-        patches = {}
-        for detection_index, key in zip(valid, patch_keys):
-            patches.setdefault(tuple(key.tolist()), []).append(
-                int(detection_index)
-            )
-
-        clusters = []
-        for key in sorted(patches):
-            member_indices = np.asarray(
-                patches[key], dtype=np.int64
-            )
-            tree = cKDTree(xyz_world[member_indices])
-            unseen = set(range(len(member_indices)))
-
-            while unseen:
-                seed = min(unseen)
-                unseen.remove(seed)
-                pending, component = [seed], []
-                while pending:
-                    local_index = pending.pop()
-                    component.append(int(member_indices[local_index]))
-                    for neighbour in tree.query_ball_point(
-                        xyz_world[member_indices[local_index]],
-                        self.cluster_radius_m,
-                    ):
-                        if neighbour in unseen:
-                            unseen.remove(neighbour)
-                            pending.append(neighbour)
-
-                if len(component) >= self.min_cluster_points:
-                    clusters.append(
-                        np.asarray(sorted(component), dtype=np.int64)
-                    )
-        return clusters
-
-    @staticmethod
-    def _track_velocity_world(track):
-        """Robust velocity from the median of all pairwise history slopes."""
-        history = track["history"]
-        if len(history) < 2:
-            return None
-        times = np.asarray([item[0] for item in history], dtype=np.float64)
-        centers = np.asarray([item[1] for item in history], dtype=np.float64)
-        slopes = []
-        for first in range(len(history) - 1):
-            for second in range(first + 1, len(history)):
-                dt = float(times[second] - times[first])
-                if dt > 1e-9:
-                    slopes.append(
-                        (centers[second] - centers[first]) / dt
-                    )
-        if not slopes:
-            return None
-        return np.median(np.asarray(slopes, dtype=np.float64), axis=0)
-
-    def _predicted_center(self, track, time):
-        previous_time, previous_center = track["history"][-1]
-        velocity = self._track_velocity_world(track)
-        if velocity is None:
-            return previous_center
-        return previous_center + velocity * (time - previous_time)
-
-    def update(self, detections, ego_motion, token, excluded_mask=None):
-        time = RadarOccPoseReader.frame_index(str(token)) * self.frame_dt_s
-        scene = str(token).rsplit("_", 1)[0]
-        if self.scene != scene or (
-            self.last_time is not None and time <= self.last_time
-        ):
-            self.reset()
-        self.scene, self.last_time = scene, time
-        self.tracks = [
-            track for track in self.tracks
-            if time - track["history"][-1][0] <= self.max_gap_s
-        ]
-
-        wrapped = self.doppler.residuals_with_velocity(
-            detections, ego_motion.linear_velocity_radar_mps
-        )
-        output = np.full(len(detections), np.nan, dtype=np.float64)
-        track_ids = np.full(len(detections), -1, dtype=np.int64)
-        ambiguity = [None] * len(detections)
-        temporal_prediction = [None] * len(detections)
-        failure_reason = ["no_cluster"] * len(detections)
-        if excluded_mask is None:
-            excluded = np.zeros(len(detections), dtype=bool)
-        else:
-            excluded = np.asarray(excluded_mask, dtype=bool)
-            if excluded.shape != (len(detections),):
-                raise ValueError(
-                    "excluded_mask must align with detections"
-                )
-        output[excluded] = 0.0
-        for index in np.flatnonzero(excluded):
-            failure_reason[int(index)] = "occupancy_persistent_static"
-
-        # Persistent world-grid occupancy is the stationary branch. Remaining
-        # reliable points enter displacement tracking and Doppler unwrapping.
-        pose = np.asarray(ego_motion.pose_lidar_to_world, dtype=np.float64)
-        clusters = self._clusters(
-            detections, pose, excluded_mask=excluded,
-        )
-        observations = []
-        for indices in clusters:
-            center_lidar = np.median(
-                [detections[index].xyz_lidar_m for index in indices], axis=0
-            )
-            observations.append(
-                pose[:3, :3] @ center_lidar + pose[:3, 3]
-            )
-
-        distances = np.full(
-            (len(self.tracks), len(clusters)), np.inf, dtype=np.float64
-        )
-        for track_index, track in enumerate(self.tracks):
-            dt = max(time - track["history"][-1][0], 0.0)
-            velocity_world = self._track_velocity_world(track)
-            predicted_center = self._predicted_center(track, time)
-            if velocity_world is None:
-                gate = self.association_radius_m
-            else:
-                track_speed = min(
-                    float(np.linalg.norm(velocity_world)),
-                    self.max_speed_mps,
-                )
-                gate = self.association_radius_m + track_speed * dt
-            for cluster_index, center_world in enumerate(observations):
-                distance = float(np.linalg.norm(center_world - predicted_center))
-                if distance <= gate:
-                    distances[track_index, cluster_index] = distance
-
-        assignments = {}
-        if distances.size:
-            nearest_track = np.argmin(distances, axis=0)
-            nearest_cluster = np.argmin(distances, axis=1)
-            for cluster_index, track_index in enumerate(nearest_track):
-                if (
-                    np.isfinite(distances[track_index, cluster_index])
-                    and nearest_cluster[track_index] == cluster_index
-                ):
-                    assignments[cluster_index] = self.tracks[track_index]
-
-        for cluster_index, (indices, center_world) in enumerate(
-            zip(clusters, observations)
-        ):
-            track = assignments.get(cluster_index)
-            had_candidate = (
-                distances.shape[0] > 0
-                and np.any(np.isfinite(distances[:, cluster_index]))
-            )
-            if track is None:
-                track = {"identifier": self.next_id, "history": []}
-                self.next_id += 1
-                self.tracks.append(track)
-                reason = (
-                    "association_ambiguous_or_unmatched"
-                    if had_candidate else "new_track"
-                )
-            else:
-                reason = "insufficient_history"
-
-            track["history"].append((time, center_world.copy()))
-            track["history"] = track["history"][-self.history_size:]
-            track_ids[indices] = track["identifier"]
-            for index in indices:
-                failure_reason[index] = reason
-
-            velocity_world = self._track_velocity_world(track)
-            if velocity_world is None:
-                continue
-            speed = float(np.linalg.norm(velocity_world))
-            if not np.isfinite(speed) or speed > self.max_speed_mps:
-                for index in indices:
-                    failure_reason[index] = "temporal_speed_gate_failed"
-                continue
-
-            velocity_lidar = pose[:3, :3].T @ velocity_world
-            velocity_radar = self.radar_to_lidar_rotation.T @ velocity_lidar
-            for index in indices:
-                point_radar = np.asarray(
-                    detections[index].xyz_radar_m, dtype=np.float64
-                )
-                distance = float(np.linalg.norm(point_radar))
-                if distance <= 1e-9:
-                    failure_reason[index] = "invalid_line_of_sight"
-                    continue
-                line_of_sight = point_radar / distance
-                predicted = -self.motion_cfg.stationary_velocity_sign * float(
-                    velocity_radar @ line_of_sight
-                )
-                temporal_prediction[index] = predicted
-                value = wrapped[index]
-                if not np.isfinite(value):
-                    failure_reason[index] = "invalid_wrapped_residual"
-                    continue
-                period = self.radar_cfg.doppler_period_mps
-                k = int(np.rint((predicted - value) / period))
-                candidate = value + k * period
-                if (
-                    abs(candidate) > self.max_speed_mps
-                    or abs(candidate - predicted) > self.max_doppler_error_mps
-                ):
-                    failure_reason[index] = "doppler_gate_failed"
-                    continue
-                output[index] = candidate
-                ambiguity[index] = k
-                failure_reason[index] = "resolved"
-
-        self.last_diagnostics = {
-            "method": "range_difference_position_history",
-            "token": str(token),
-            "doppler_period_mps": self.radar_cfg.doppler_period_mps,
-            "cluster_radius_m": self.cluster_radius_m,
-            "max_cluster_extent_m": self.max_cluster_extent_m,
-            "association_radius_m": self.association_radius_m,
-            "history_size": self.history_size,
-            "track_ids": track_ids.tolist(),
-            "ambiguity_k": ambiguity,
-            "wrapped_residual_mps": [
-                float(value) if np.isfinite(value) else None for value in wrapped
-            ],
-            "temporal_prediction_mps": temporal_prediction,
-            "unwrapped_residual_mps": [
-                float(value) if np.isfinite(value) else None for value in output
-            ],
-            "failure_reason": failure_reason,
-            "occupancy_persistent_static_count": int(
-                np.count_nonzero(excluded)
-            ),
-            "range_difference_resolved_count": int(
-                np.count_nonzero(
-                    np.asarray(failure_reason, dtype=object) == "resolved"
-                )
-            ),
-            "resolved_count": int(np.count_nonzero(np.isfinite(output))),
-            "unresolved_count": int(np.count_nonzero(~np.isfinite(output))),
-        }
-        return output, None
-
-
-def build_velocity_unwrapper(args, radar_cfg, motion_cfg):
-    if args.velocity_unwrapping == "off":
-        return None
-    return RangeDifferenceUnwrapper(
-        radar_cfg=radar_cfg,
-        motion_cfg=motion_cfg,
-        frame_dt_s=args.pose_dt_s,
-        cluster_radius_m=args.unwrap_cluster_radius_m,
-        max_cluster_extent_m=args.unwrap_max_cluster_extent_m,
-        association_radius_m=args.range_difference_association_radius_m,
-        history_size=args.range_difference_history,
-        max_speed_mps=args.range_difference_max_speed_mps,
-        max_doppler_error_mps=args.range_difference_max_error_mps,
-    )
-
-
-def ordered_scene_infos(infos, scene):
-    selected = sorted(
-        (info for info in infos if str(info.get("scene_token")) == str(scene)),
-        key=lambda info: RadarOccPoseReader.frame_index(str(info["lidar_token"])),
-    )
-    indices = [RadarOccPoseReader.frame_index(str(info["lidar_token"]))
-               for info in selected]
-    if len(indices) != len(set(indices)):
-        raise ValueError("Duplicate pose indices in the selected scene.")
-    return selected
-
-
-def save_velocity_diagnostics(path, unwrapper, analysis_summary=None):
-    if unwrapper is None and analysis_summary is None:
-        return
-    import json
-    payload = (
-        dict(unwrapper.last_diagnostics)
-        if unwrapper is not None
-        else {"method": "velocity_unwrapping_disabled"}
-    )
-    if analysis_summary is not None:
-        payload["visualization_velocity_summary"] = analysis_summary
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(payload, allow_nan=False),
-        encoding="utf-8",
-    )
-
-
-def velocity_source_summary(unwrapper, temporal_residuals):
-    diagnostics = unwrapper.last_diagnostics
-    temporal = np.asarray(temporal_residuals, dtype=np.float64)
-    reasons = np.asarray(diagnostics["failure_reason"], dtype=object)
-    reason_counts = {
-        str(reason): int(count)
-        for reason, count in zip(*np.unique(reasons, return_counts=True))
-    }
-    return {
-        "occupancy_persistent_static_count": int(
-            reason_counts.get("occupancy_persistent_static", 0)
-        ),
-        "range_difference_resolved_count": int(
-            reason_counts.get("resolved", 0)
-        ),
-        "finite_velocity_or_static_count": int(
-            np.count_nonzero(np.isfinite(temporal))
-        ),
-        "unresolved_count": int(
-            np.count_nonzero(~np.isfinite(temporal))
-        ),
-        "range_difference_failure_reasons": reason_counts,
-    }
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Qualitatively compare ego-motion-compensated static Doppler "
-            "thresholds on one K-Radar frame. Output layout: "
+            "Compare static thresholds on the original RPC/bin Doppler "
+            "velocity after ego-motion compensation, without unwrapping. "
+            "Output layout: "
             "BEV tau1 | BEV tau2 | BEV tau3 | RGB."
         )
     )
@@ -599,12 +53,6 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/K-Radar_rpc"),
         help="Enhanced K-Radar RPC root.",
-    )
-    parser.add_argument(
-        "--calib-root",
-        type=Path,
-        default=Path("data/K-Radar_calib"),
-        help="Per-scene frame-difference calibration root.",
     )
     parser.add_argument(
         "--pose-root",
@@ -668,7 +116,6 @@ def parse_args() -> argparse.Namespace:
         help="Marker size for points selected as static.",
     )
     parser.add_argument("--dpi", type=int, default=180)
-    add_velocity_arguments(parser)
     return parser.parse_args()
 
 
@@ -767,92 +214,117 @@ def plot_bev(
     ax,
     xy: np.ndarray,
     residuals: np.ndarray,
-    persistent_static_mask: np.ndarray,
     threshold: float,
     grid: GridConfig,
     all_point_size: float,
     static_point_size: float,
-) -> tuple[int, int, float, int, int, int, int]:
+) -> tuple[int, int, float]:
     absolute = np.abs(residuals)
-    persistent = np.asarray(persistent_static_mask, dtype=bool)
-    if persistent.shape != (len(xy),):
-        raise ValueError("persistent_static_mask must align with xy")
-    resolved_motion = np.isfinite(absolute) & ~persistent
-    motion_static = resolved_motion & (absolute <= threshold)
-    dynamic_mask = resolved_motion & (absolute > threshold)
-    unknown_mask = ~np.isfinite(absolute) & ~persistent
-    static_mask = persistent | motion_static
+    static_mask = np.isfinite(absolute) & (absolute <= threshold)
 
     total = int(len(xy))
     selected = int(np.count_nonzero(static_mask))
     ratio = selected / total if total else 0.0
-    persistent_count = int(np.count_nonzero(persistent))
-    motion_static_count = int(np.count_nonzero(motion_static))
-    dynamic_count = int(np.count_nonzero(dynamic_mask))
-    unresolved_count = int(np.count_nonzero(unknown_mask))
+
+    # 原始车辆坐标：
+    # x = forward
+    # +y = vehicle left
+    # -y = vehicle right
+    #
+    # 为了和 front RGB 对齐：
+    # 图像纵轴 = +x forward
+    # 图像左侧 = vehicle left (+y)
+    # 图像右侧 = vehicle right (-y)
+    #
+    # 因此：
+    # display horizontal = -y
+    # display vertical   =  x
     display_x = -xy[:, 1]
     display_y = xy[:, 0]
 
+    # 灰色：RadarOcc ROI 内所有 reliable RPC points
     if total:
         ax.scatter(
-            display_x, display_y, s=all_point_size, c="0.72",
-            alpha=0.45, linewidths=0,
+            display_x,
+            display_y,
+            s=all_point_size,
+            c="0.72",
+            alpha=0.55,
+            linewidths=0,
             label="Reliable RPC points in RadarOcc ROI",
             rasterized=True,
         )
-    if np.any(dynamic_mask):
+
+    # 蓝色：当前 threshold 下判定为 Static 的点
+    if selected:
         ax.scatter(
-            display_x[dynamic_mask], display_y[dynamic_mask],
-            s=static_point_size, c="tab:red", alpha=0.88,
-            linewidths=0, label=r"Resolved dynamic: $|r|>\tau_s$",
-            rasterized=True,
-        )
-    if np.any(unknown_mask):
-        ax.scatter(
-            display_x[unknown_mask], display_y[unknown_mask],
-            s=static_point_size, c="tab:orange", marker="x",
-            linewidths=0.7, label="Unresolved motion candidate",
-            rasterized=True,
-        )
-    if np.any(motion_static):
-        ax.scatter(
-            display_x[motion_static], display_y[motion_static],
-            s=static_point_size, c="tab:green", alpha=0.95,
+            display_x[static_mask],
+            display_y[static_mask],
+            s=static_point_size,
+            c="tab:blue",
+            alpha=0.95,
             linewidths=0,
-            label=r"Motion branch static: $|r|\leq\tau_s$",
-            rasterized=True,
-        )
-    if np.any(persistent):
-        ax.scatter(
-            display_x[persistent], display_y[persistent],
-            s=static_point_size, c="tab:blue", alpha=0.95,
-            linewidths=0,
-            label="World-grid persistent stationary",
+            label=r"Static: $|r|\leq\tau_s$",
             rasterized=True,
         )
 
-    ax.set_xlim(-grid.max_xyz[1], -grid.min_xyz[1])
-    ax.set_ylim(grid.min_xyz[0], grid.max_xyz[0])
+    # 横轴现在是 -y：
+    # 左边 = vehicle left
+    # 右边 = vehicle right
+    ax.set_xlim(
+        -grid.max_xyz[1],
+        -grid.min_xyz[1],
+    )
+
+    # 纵轴现在是 x：
+    # 底部 = Ego
+    # 顶部 = 前方 51.2 m
+    ax.set_ylim(
+        grid.min_xyz[0],
+        grid.max_xyz[0],
+    )
+
     ax.set_aspect("equal", adjustable="box")
     ax.grid(True, alpha=0.18)
+
     ax.set_xlabel("Lateral [m]   ← vehicle left | vehicle right →")
     ax.set_ylabel("Forward x [m]")
+
     ax.set_title(
         rf"$\tau_s$ = {threshold:.2f} m/s"
-        f"\nStatic {selected}/{total} ({100.0 * ratio:.1f}%)"
-        f" | grid {persistent_count} + motion {motion_static_count}"
-        f"\ndynamic {dynamic_count} | unresolved {unresolved_count}"
+        f"\nStatic: {selected}/{total} ({100.0 * ratio:.1f}%)"
     )
-    ax.scatter([0.0], [0.0], s=50, marker="^", c="black", zorder=5)
-    ax.text(0.0, 1.1, "Ego", ha="center", va="bottom", fontsize=8)
+
+    # Ego 位置
+    ax.scatter(
+        [0.0],
+        [0.0],
+        s=50,
+        marker="^",
+        c="black",
+        zorder=5,
+    )
+
     ax.text(
-        0.5, 0.985, "Forward ↑", transform=ax.transAxes,
-        ha="center", va="top", fontsize=9,
+        0.0,
+        1.1,
+        "Ego",
+        ha="center",
+        va="bottom",
+        fontsize=8,
     )
-    return (
-        selected, total, ratio, persistent_count,
-        motion_static_count, dynamic_count, unresolved_count,
+
+    ax.text(
+        0.5,
+        0.985,
+        "Forward ↑",
+        transform=ax.transAxes,
+        ha="center",
+        va="top",
+        fontsize=9,
     )
+
+    return selected, total, ratio
 
 
 def main() -> None:
@@ -863,13 +335,12 @@ def main() -> None:
             "This four-panel visualization expects exactly three thresholds, "
             "for example: --thresholds 0.3 0.5 0.7"
         )
-    if any(not np.isfinite(value) or value < 0.0 for value in args.thresholds):
+    if any(value < 0.0 for value in args.thresholds):
         raise ValueError("Thresholds must be non-negative.")
 
     repo_root = args.repo_root.expanduser().resolve()
     annotation = args.annotation.expanduser()
     radar_root = args.radar_root.expanduser()
-    calib_root = args.calib_root.expanduser()
     pose_root = args.pose_root.expanduser()
     camera_root = args.camera_root.expanduser()
 
@@ -881,10 +352,6 @@ def main() -> None:
         radar_root = (repo_root / radar_root).resolve()
     else:
         radar_root = radar_root.resolve()
-    if not calib_root.is_absolute():
-        calib_root = (repo_root / calib_root).resolve()
-    else:
-        calib_root = calib_root.resolve()
     if not pose_root.is_absolute():
         pose_root = (repo_root / pose_root).resolve()
     else:
@@ -898,9 +365,7 @@ def main() -> None:
     info = find_info(infos, str(args.scene), str(args.token))
 
     # Resolve exactly the same RPC representation used by the traditional runner.
-    radar_path = _resolve_rpc_radar(
-        info, repo_root, radar_root, calib_root
-    )
+    radar_path = _resolve_rpc_radar(info, repo_root, radar_root)
 
     radar_cfg = KRadarConfig()
     grid_cfg = GridConfig()
@@ -940,75 +405,10 @@ def main() -> None:
             stationary_velocity_sign=args.stationary_velocity_sign,
         ),
     )
-    unwrapper = build_velocity_unwrapper(
-        args, radar_cfg, doppler_classifier.motion_cfg,
+    residuals_all = doppler_classifier.residuals_with_velocity(
+        reliable_detections,
+        ego_motion.linear_velocity_radar_mps,
     )
-    persistence_classifier = build_occupancy_persistence_classifier(args)
-    wrapped_residuals_all = doppler_classifier.residuals_with_velocity(
-        reliable_detections, ego_motion.linear_velocity_radar_mps,
-    )
-
-    # Warm up both temporal branches from the beginning of the scene.
-    target_index = pose_reader.frame_index(str(args.token))
-    if unwrapper is not None or persistence_classifier is not None:
-        for history_info in ordered_scene_infos(infos, args.scene):
-            history_token = str(history_info["lidar_token"])
-            if pose_reader.frame_index(history_token) >= target_index:
-                break
-            history_path = _resolve_rpc_radar(
-                history_info, repo_root, radar_root, calib_root
-            )
-            history_detections = reliability_filter.filter(
-                detector.detect(reader.read(history_path))
-            )
-            history_motion, _ = estimate_ego_motion(
-                pose_reader, pose_estimator, str(args.scene),
-                history_token, args.pose_dt_s,
-            )
-            history_persistent = np.zeros(
-                len(history_detections), dtype=bool
-            )
-            if persistence_classifier is not None:
-                history_persistent, _ = persistence_classifier.update(
-                    history_detections, history_motion, history_token,
-                )
-            if unwrapper is not None:
-                unwrapper.update(
-                    history_detections,
-                    history_motion,
-                    history_token,
-                    excluded_mask=history_persistent,
-                )
-
-    persistent_static_all = np.zeros(
-        len(reliable_detections), dtype=bool
-    )
-    if persistence_classifier is not None:
-        persistent_static_all, _ = persistence_classifier.update(
-            reliable_detections, ego_motion, str(args.token),
-        )
-
-    if unwrapper is None:
-        residuals_all = wrapped_residuals_all.copy()
-        residuals_all[persistent_static_all] = 0.0
-    else:
-        temporal_residuals_all, _ = unwrapper.update(
-            reliable_detections,
-            ego_motion,
-            str(args.token),
-            excluded_mask=persistent_static_all,
-        )
-        residuals_all = temporal_residuals_all
-
-    analysis_summary = {}
-    if unwrapper is not None:
-        analysis_summary.update(
-            velocity_source_summary(unwrapper, residuals_all)
-        )
-    if persistence_classifier is not None:
-        analysis_summary["occupancy_persistence"] = dict(
-            persistence_classifier.last_diagnostics
-        )
 
     xyz = np.asarray(
         [det.xyz_lidar_m for det in reliable_detections],
@@ -1029,7 +429,6 @@ def main() -> None:
 
     xyz_roi = xyz[in_roi]
     residuals = residuals_all[in_roi]
-    persistent_static = persistent_static_all[in_roi]
     xy = xyz_roi[:, :2]
 
     camera_dir = resolve_camera_dir(camera_root, str(args.scene))
@@ -1054,19 +453,18 @@ def main() -> None:
         gridspec_kw={"width_ratios": [1.0, 1.0, 1.0, 1.35]},
     )
 
-    summaries = []
+    summaries: list[tuple[float, int, int, float]] = []
     for ax, threshold in zip(axes[:3], args.thresholds):
-        stats = plot_bev(
+        selected, total, ratio = plot_bev(
             ax=ax,
             xy=xy,
             residuals=residuals,
-            persistent_static_mask=persistent_static,
             threshold=float(threshold),
             grid=grid_cfg,
             all_point_size=args.all_point_size,
             static_point_size=args.static_point_size,
         )
-        summaries.append((float(threshold), *stats))
+        summaries.append((float(threshold), selected, total, ratio))
 
     # One legend is enough because all three BEVs use exactly the same encoding.
     axes[0].legend(loc="upper right", fontsize=8, framealpha=0.9)
@@ -1078,7 +476,7 @@ def main() -> None:
     velocity = ego_motion.linear_velocity_radar_mps
     speed = float(np.linalg.norm(velocity[:2]))
     fig.suptitle(
-        f"Static threshold comparison | velocity mode: {args.velocity_unwrapping}"
+        "Original Doppler-bin residual threshold comparison (no unwrapping)"
         f"\nScene {args.scene} | token {args.token} | "
         f"ego speed = {speed:.2f} m/s | "
         f"reliable RPC: {len(reliable_detections)} | "
@@ -1092,24 +490,12 @@ def main() -> None:
     save_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(save_path, dpi=args.dpi, bbox_inches="tight")
     plt.close(fig)
-    save_velocity_diagnostics(
-        save_path.with_suffix(".velocity.json"), unwrapper, analysis_summary,
-    )
 
     print("Static-threshold qualitative visualization")
-    print(f"  velocity mode: {args.velocity_unwrapping}")
-    print(
-        "  occupancy persistent ROI: "
-        f"{int(np.count_nonzero(persistent_static))}"
-    )
-    print(
-        "  unresolved motion ROI: "
-        f"{int(np.count_nonzero(~np.isfinite(residuals) & ~persistent_static))}"
-    )
+    print("  Doppler     : raw RPC/bin velocity, ego compensated, no unwrapping")
     print(f"  scene       : {args.scene}")
     print(f"  token       : {args.token}")
     print(f"  radar       : {radar_path}")
-    print(f"  calib root  : {calib_root}")
     print(f"  pose        : {pose_path}")
     print(f"  camera      : {camera_path}")
     print(
@@ -1119,15 +505,10 @@ def main() -> None:
     print(f"  raw RPC     : {len(raw_detections)}")
     print(f"  reliable RPC: {len(reliable_detections)}")
     print(f"  in ROI      : {len(xyz_roi)}")
-    for (
-        threshold, selected, total, ratio, persistent_count,
-        motion_static_count, dynamic_count, unresolved_count,
-    ) in summaries:
+    for threshold, selected, total, ratio in summaries:
         print(
-            f"  tau={threshold:.2f}: static={selected}/{total} "
-            f"({100.0 * ratio:.1f}%) | grid={persistent_count} "
-            f"| motion_static={motion_static_count} "
-            f"| dynamic={dynamic_count} | unresolved={unresolved_count}"
+            f"  tau={threshold:.2f}: "
+            f"static {selected}/{total} ({100.0 * ratio:.1f}%)"
         )
     print(f"  output      : {save_path}")
 

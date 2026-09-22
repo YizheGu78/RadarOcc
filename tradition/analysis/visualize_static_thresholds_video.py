@@ -35,22 +35,14 @@ from tradition.motion.doppler_classifier import EgoCompensatedDopplerClassifier
 from tradition.motion.pose_ego_motion import PoseEgoMotionEstimator
 
 
-from tradition.analysis.visualize_static_thresholds import (
-    add_velocity_arguments,
-    build_occupancy_persistence_classifier,
-    build_velocity_unwrapper,
-    ordered_scene_infos,
-    save_velocity_diagnostics,
-    velocity_source_summary,
-)
-
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Render all selected K-Radar frames as a synchronized video: "
+            "Render original ego-compensated RPC/bin Doppler thresholds with "
+            "no unwrapping as a synchronized video: "
             "BEV tau=0.3 | BEV tau=0.5 | BEV tau=0.7 | RGB."
         )
     )
@@ -63,12 +55,6 @@ def parse_args() -> argparse.Namespace:
         "--radar-root",
         type=Path,
         default=Path("data/K-Radar_rpc"),
-    )
-    parser.add_argument(
-        "--calib-root",
-        type=Path,
-        default=Path("data/K-Radar_calib"),
-        help="Per-scene frame-difference calibration root.",
     )
     parser.add_argument(
         "--pose-root",
@@ -165,7 +151,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Keep intermediate PNG frames after MP4 encoding.",
     )
-    add_velocity_arguments(parser)
     return parser.parse_args()
 
 
@@ -249,88 +234,89 @@ def draw_bev(
     ax,
     xy: np.ndarray,
     residuals: np.ndarray,
-    persistent_static_mask: np.ndarray,
     threshold: float,
     grid: GridConfig,
     all_point_size: float,
     static_point_size: float,
-) -> tuple[int, int, float, int, int, int, int]:
+) -> tuple[int, int, float]:
+    """
+    RGB-aligned BEV:
+
+        vertical display   = +x forward
+        display left       = vehicle left  (+y)
+        display right      = vehicle right (-y)
+
+    Therefore:
+        plot_x = -vehicle_y
+        plot_y =  vehicle_x
+    """
     absolute = np.abs(residuals)
-    persistent = np.asarray(persistent_static_mask, dtype=bool)
-    if persistent.shape != (len(xy),):
-        raise ValueError("persistent_static_mask must align with xy")
-    resolved_motion = np.isfinite(absolute) & ~persistent
-    motion_static = resolved_motion & (absolute <= threshold)
-    dynamic_mask = resolved_motion & (absolute > threshold)
-    unknown_mask = ~np.isfinite(absolute) & ~persistent
-    static_mask = persistent | motion_static
+    static_mask = np.isfinite(absolute) & (absolute <= threshold)
 
     total = int(len(xy))
     selected = int(np.count_nonzero(static_mask))
     ratio = selected / total if total else 0.0
-    persistent_count = int(np.count_nonzero(persistent))
-    motion_static_count = int(np.count_nonzero(motion_static))
-    dynamic_count = int(np.count_nonzero(dynamic_mask))
-    unresolved_count = int(np.count_nonzero(unknown_mask))
+
     display_x = -xy[:, 1]
     display_y = xy[:, 0]
 
     if total:
         ax.scatter(
-            display_x, display_y, s=all_point_size, c="0.72",
-            alpha=0.45, linewidths=0, rasterized=True,
+            display_x,
+            display_y,
+            s=all_point_size,
+            c="0.72",
+            alpha=0.55,
+            linewidths=0,
+            rasterized=True,
             label="Reliable RPC in ROI",
         )
-    if np.any(dynamic_mask):
+
+    if selected:
         ax.scatter(
-            display_x[dynamic_mask], display_y[dynamic_mask],
-            s=static_point_size, c="tab:red", alpha=0.88,
-            linewidths=0, rasterized=True,
-            label=r"Resolved dynamic: $|r|>\tau_s$",
-        )
-    if np.any(unknown_mask):
-        ax.scatter(
-            display_x[unknown_mask], display_y[unknown_mask],
-            s=static_point_size, c="tab:orange", marker="x",
-            linewidths=0.7, rasterized=True,
-            label="Unresolved motion candidate",
-        )
-    if np.any(motion_static):
-        ax.scatter(
-            display_x[motion_static], display_y[motion_static],
-            s=static_point_size, c="tab:green", alpha=0.95,
-            linewidths=0, rasterized=True,
-            label=r"Motion branch static: $|r|\leq\tau_s$",
-        )
-    if np.any(persistent):
-        ax.scatter(
-            display_x[persistent], display_y[persistent],
-            s=static_point_size, c="tab:blue", alpha=0.95,
-            linewidths=0, rasterized=True,
-            label="World-grid persistent stationary",
+            display_x[static_mask],
+            display_y[static_mask],
+            s=static_point_size,
+            c="tab:blue",
+            alpha=0.95,
+            linewidths=0,
+            rasterized=True,
+            label=r"Static: $|r|\leq\tau_s$",
         )
 
     ax.set_xlim(-grid.max_xyz[1], -grid.min_xyz[1])
     ax.set_ylim(grid.min_xyz[0], grid.max_xyz[0])
     ax.set_aspect("equal", adjustable="box")
     ax.grid(True, alpha=0.18)
+
     ax.set_xlabel("← vehicle left    lateral [m]    vehicle right →")
     ax.set_ylabel("Forward x [m]")
+
     ax.set_title(
         rf"$\tau_s$ = {threshold:.2f} m/s"
         f"\nStatic {selected}/{total} ({100.0 * ratio:.1f}%)"
-        f" | grid {persistent_count} + motion {motion_static_count}"
-        f"\ndynamic {dynamic_count} | unresolved {unresolved_count}"
     )
-    ax.scatter([0.0], [0.0], s=45, marker="^", c="black", zorder=5)
+
+    ax.scatter(
+        [0.0],
+        [0.0],
+        s=45,
+        marker="^",
+        c="black",
+        zorder=5,
+    )
+
     ax.text(
-        0.5, 0.985, "Forward ↑", transform=ax.transAxes,
-        ha="center", va="top", fontsize=9,
+        0.5,
+        0.985,
+        "Forward ↑",
+        transform=ax.transAxes,
+        ha="center",
+        va="top",
+        fontsize=9,
     )
-    return (
-        selected, total, ratio, persistent_count,
-        motion_static_count, dynamic_count, unresolved_count,
-    )
+
+    return selected, total, ratio
 
 
 def render_frame(
@@ -340,7 +326,6 @@ def render_frame(
     frame_ordinal: int,
     xy: np.ndarray,
     residuals: np.ndarray,
-    persistent_static_mask: np.ndarray,
     thresholds: list[float],
     grid: GridConfig,
     ego_velocity_radar: np.ndarray,
@@ -348,7 +333,6 @@ def render_frame(
     all_point_size: float,
     static_point_size: float,
     dpi: int,
-    velocity_mode: str = "off",
 ) -> None:
     image = mpimg.imread(image_path)
 
@@ -367,7 +351,6 @@ def render_frame(
             ax=ax,
             xy=xy,
             residuals=residuals,
-            persistent_static_mask=persistent_static_mask,
             threshold=float(threshold),
             grid=grid,
             all_point_size=all_point_size,
@@ -391,7 +374,7 @@ def render_frame(
     )
 
     fig.suptitle(
-        f"Static threshold comparison | velocity mode: {velocity_mode}"
+        "Original Doppler-bin residual thresholds (no unwrapping)"
         f"   |   scene {token.split('_')[0]}"
         f"   |   token {token}"
         f"   |   frame {frame_ordinal}"
@@ -438,8 +421,6 @@ def encode_mp4(
         "medium",
         "-crf",
         "18",
-        "-vf",
-        "pad=ceil(iw/2)*2:ceil(ih/2)*2",
         "-pix_fmt",
         "yuv420p",
         "-movflags",
@@ -468,8 +449,6 @@ def main() -> None:
         raise ValueError("--pose-dt-s must be > 0")
 
     thresholds = [float(value) for value in args.thresholds]
-    if any(not np.isfinite(value) or value < 0.0 for value in thresholds):
-        raise ValueError("Thresholds must be finite and non-negative.")
 
     repo_root = args.repo_root.expanduser().resolve()
 
@@ -479,10 +458,6 @@ def main() -> None:
     )
     radar_root = resolve_repo_path(
         args.radar_root,
-        repo_root,
-    )
-    calib_root = resolve_repo_path(
-        args.calib_root,
         repo_root,
     )
     pose_root = resolve_repo_path(
@@ -507,7 +482,11 @@ def main() -> None:
 
     infos_all = _load_infos(annotation)
 
-    scene_infos = ordered_scene_infos(infos_all, args.scene)
+    scene_infos = [
+        info
+        for info in infos_all
+        if str(info.get("scene_token")) == str(args.scene)
+    ]
 
     if not scene_infos:
         raise RuntimeError(
@@ -579,57 +558,34 @@ def main() -> None:
         ),
     )
 
-    unwrapper = build_velocity_unwrapper(
-        args, radar_cfg, doppler_classifier.motion_cfg,
-    )
-    persistence_classifier = build_occupancy_persistence_classifier(args)
-    print(f"Velocity mode: {args.velocity_unwrapping}")
     print("Static-threshold video")
+    print("  Doppler     : raw RPC/bin velocity, ego compensated, no unwrapping")
     print(f"  scene       : {args.scene}")
     print(f"  frames      : {len(selected_infos)}")
     print(f"  scene total : {len(scene_infos)}")
     print(f"  start       : {args.start}")
     print(f"  thresholds  : {thresholds}")
-    print(f"  persistence : {args.occupancy_persistence}")
-    print(f"  occ cell    : {args.occupancy_cell_size_m:.2f} m")
-    print(
-        f"  occ support : {args.occupancy_min_support}/"
-        f"{args.occupancy_history_size} historical frames"
-    )
-    print(f"  occ dilation: {args.occupancy_dilation_cells} cells")
-    print(f"  cluster r   : {args.unwrap_cluster_radius_m:.2f} m")
-    print(f"  patch extent: {args.unwrap_max_cluster_extent_m:.2f} m")
-    print(
-        f"  association : {args.range_difference_association_radius_m:.2f} m "
-        "(track-speed adaptive)"
-    )
-    print(f"  history     : {args.range_difference_history} frames")
-    print(f"  max error   : {args.range_difference_max_error_mps:.2f} m/s")
     print(f"  fps         : {args.fps}")
     print(f"  annotation  : {annotation}")
     print(f"  radar root  : {radar_root}")
-    print(f"  calib root  : {calib_root}")
     print(f"  pose root   : {pose_root}")
     print(f"  camera dir  : {camera_dir}")
     print(f"  output dir  : {output_dir}")
     print()
 
-    # Even when --start is nonzero, process preceding observations to build displacement history.
-    processing_start = (
-        0
-        if unwrapper is not None or persistence_classifier is not None
-        else args.start
-    )
-    for scene_index in range(processing_start, stop):
-        info = scene_infos[scene_index]
-        output_index = scene_index - args.start
+    for output_index, info in enumerate(selected_infos):
         token = str(info["lidar_token"])
+
+        camera_path = camera_by_token.get(token)
+        if camera_path is None:
+            raise FileNotFoundError(
+                f"No RGB image mapped for token={token}"
+            )
 
         radar_path = _resolve_rpc_radar(
             info,
             repo_root,
             radar_root,
-            calib_root,
         )
 
         raw_detections = detector.detect(
@@ -647,47 +603,9 @@ def main() -> None:
             dt_s=args.pose_dt_s,
         )
 
-        wrapped_residuals_all = doppler_classifier.residuals_with_velocity(
-            reliable_detections, ego_motion.linear_velocity_radar_mps,
-        )
-        persistent_static_all = np.zeros(
-            len(reliable_detections), dtype=bool
-        )
-        if persistence_classifier is not None:
-            persistent_static_all, _ = persistence_classifier.update(
-                reliable_detections, ego_motion, token,
-            )
-
-        if unwrapper is None:
-            residuals_all = wrapped_residuals_all.copy()
-            residuals_all[persistent_static_all] = 0.0
-        else:
-            temporal_residuals_all, _ = unwrapper.update(
-                reliable_detections,
-                ego_motion,
-                token,
-                excluded_mask=persistent_static_all,
-            )
-            residuals_all = temporal_residuals_all
-
-        analysis_summary = {}
-        if unwrapper is not None:
-            analysis_summary.update(
-                velocity_source_summary(unwrapper, residuals_all)
-            )
-        if persistence_classifier is not None:
-            analysis_summary["occupancy_persistence"] = dict(
-                persistence_classifier.last_diagnostics
-            )
-        if output_index < 0:
-            continue  # Warmup needs no RGB image and produces no video frame.
-        camera_path = camera_by_token.get(token)
-        if camera_path is None:
-            raise FileNotFoundError(f"No RGB image mapped for token={token}")
-        save_velocity_diagnostics(
-            output_dir / "velocity_unwrapping" / f"{token}.json",
-            unwrapper,
-            analysis_summary,
+        residuals_all = doppler_classifier.residuals_with_velocity(
+            reliable_detections,
+            ego_motion.linear_velocity_radar_mps,
         )
 
         xyz = np.asarray(
@@ -705,7 +623,6 @@ def main() -> None:
 
         xyz_roi = xyz[roi_mask]
         residuals_roi = residuals_all[roi_mask]
-        persistent_static_roi = persistent_static_all[roi_mask]
         xy = xyz_roi[:, :2]
 
         save_path = (
@@ -720,7 +637,6 @@ def main() -> None:
             frame_ordinal=args.start + output_index,
             xy=xy,
             residuals=residuals_roi,
-            persistent_static_mask=persistent_static_roi,
             thresholds=thresholds,
             grid=grid_cfg,
             ego_velocity_radar=ego_motion.linear_velocity_radar_mps,
@@ -728,7 +644,6 @@ def main() -> None:
             all_point_size=args.all_point_size,
             static_point_size=args.static_point_size,
             dpi=args.dpi,
-            velocity_mode=args.velocity_unwrapping,
         )
 
         if (
@@ -739,11 +654,10 @@ def main() -> None:
             counts = [
                 int(
                     np.count_nonzero(
-                        persistent_static_roi
-                        | (
-                            np.isfinite(residuals_roi)
-                            & ~persistent_static_roi
-                            & (np.abs(residuals_roi) <= threshold)
+                        np.isfinite(residuals_roi)
+                        & (
+                            np.abs(residuals_roi)
+                            <= threshold
                         )
                     )
                 )
@@ -755,8 +669,6 @@ def main() -> None:
                 f"{token} | "
                 f"reliable={len(reliable_detections):4d} | "
                 f"ROI={len(xy):4d} | "
-                f"grid_static={int(np.count_nonzero(persistent_static_roi))} | "
-                f"unresolved={int(np.count_nonzero(~np.isfinite(residuals_roi) & ~persistent_static_roi))} | "
                 f"static={counts}"
             )
 

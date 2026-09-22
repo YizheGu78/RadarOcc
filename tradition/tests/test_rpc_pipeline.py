@@ -1,14 +1,11 @@
 import math
 
 import numpy as np
-import pytest
 
-from tradition.core.types import MotionLabel, SemanticLabel
+from tradition.core.config import ReliabilityConfig, TemporalConfig
+from tradition.core.types import EgoMotion, MotionLabel, SemanticLabel
 from tradition.detection.rpc_target_detector import RPCPointTargetDetector
-from tradition.experiment.dataset_runner import (
-    RPCFrameNotFoundError,
-    _resolve_rpc_radar,
-)
+from tradition.experiment.dataset_runner import _resolve_rpc_radar
 from tradition.io.rpc_radar_reader import KRadarRPCReader
 from tradition.pipeline.traditional_radar_pipeline import build_rpc_pipeline
 
@@ -78,57 +75,63 @@ def test_rpc_endpoint_outside_grid_still_carves_free_ray(tmp_path):
     assert not np.any(pipeline.mapper.occupancy_log_odds > 0.0)
 
 
-def test_rpc_resolver_prefers_aligned_radar_frame_index(tmp_path):
-    calib_path = (
-        tmp_path
-        / "data"
-        / "K-Radar_calib"
-        / "3"
-        / "info_calib"
-        / "calib_radar_lidar.txt"
-    )
-    calib_path.parent.mkdir(parents=True)
-    calib_path.write_text("0,-2.54,0.3\n", encoding="utf-8")
-
-    rpc_path = tmp_path / "3" / "rpc_00042.npy"
-    rpc_path.parent.mkdir(parents=True)
-    np.save(rpc_path, np.zeros((1, 11), dtype=np.float32))
+def test_rpc_resolver_pairs_frames_by_scene_order_not_sensor_ids(tmp_path):
+    scene_dir = tmp_path / "3"
+    scene_dir.mkdir(parents=True)
+    first = scene_dir / "rpc_00031.npy"
+    second = scene_dir / "rpc_00077.npy"
+    np.save(first, np.zeros((1, 11), dtype=np.float32))
+    np.save(second, np.zeros((1, 11), dtype=np.float32))
     info = {
         "scene_token": "3",
-        "lidar_token": "3_00040",
+        "lidar_token": "3_00999",
         "radar_frame_idx": 42,
         "radar_path": "/missing/tesseract_00099.mat",
+        "_rpc_sequence_ordinal": 1,
+        "_rpc_sequence_count": 2,
     }
 
     resolved = _resolve_rpc_radar(info, tmp_path, tmp_path)
-    assert resolved == rpc_path.resolve()
+    assert resolved == second.resolve()
 
 
-def test_rpc_resolver_marks_missing_aligned_frame_as_skippable(tmp_path):
-    calib_path = (
-        tmp_path
-        / "data"
-        / "K-Radar_calib"
-        / "4"
-        / "info_calib"
-        / "calib_radar_lidar.txt"
+def test_temporal_pipeline_exposes_true_static_and_dynamic_branches(tmp_path):
+    path = tmp_path / "rpc_00001.npy"
+    np.save(
+        path,
+        np.asarray(
+            [
+                _point(10.0, -4.0, 0.1),
+                _point(10.0, 4.0, 1.0),
+            ],
+            dtype=np.float64,
+        ),
+        allow_pickle=False,
     )
-    calib_path.parent.mkdir(parents=True)
-    calib_path.write_text("41,-2.54,0.3\n", encoding="utf-8")
-    info = {
-        "scene_token": "4",
-        "lidar_token": "4_00589",
-        "radar_path": "/missing/EAsparse_00589.npz",
-    }
+    pipeline = build_rpc_pipeline(
+        reliability_cfg=ReliabilityConfig(min_local_neighbors=0),
+        temporal_cfg=TemporalConfig(
+            window_size=1,
+            min_static_support=1,
+            min_dynamic_support=1,
+        ),
+    )
+    prediction = pipeline.predict_temporal_file(
+        path,
+        token="3_00000",
+        ego_motion=EgoMotion(
+            pose_lidar_to_world=np.eye(4),
+            linear_velocity_lidar_mps=np.zeros(3),
+            linear_velocity_radar_mps=np.zeros(3),
+            yaw_rate_rps=0.0,
+        ),
+    )
 
-    with pytest.raises(RPCFrameNotFoundError) as caught:
-        _resolve_rpc_radar(info, tmp_path, tmp_path)
-
-    error = caught.value
-    assert error.scene == "4"
-    assert error.aligned_frame == 589
-    assert error.frame_difference == 41
-    assert error.rpc_frame == 630
+    assert prediction.metadata["doppler_velocity_source"] == "rpc_raw_bin_velocity_mps"
+    assert prediction.metadata["doppler_unwrapping"] == "none"
+    assert prediction.branch_points_lidar_m is not None
+    assert prediction.branch_points_lidar_m["static"].shape == (1, 3)
+    assert prediction.branch_points_lidar_m["dynamic"].shape == (1, 3)
 
 
 def test_rpc_reader_rejects_wrong_schema(tmp_path):

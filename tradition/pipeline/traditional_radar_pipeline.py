@@ -16,7 +16,6 @@ from tradition.core.config import (
     ObjectClusteringConfig,
     ReliabilityConfig,
     TemporalConfig,
-    UnwrappingConfig,
 )
 from tradition.core.interfaces import (
     DetectionReliabilityFilter,
@@ -51,8 +50,7 @@ from tradition.mapping.temporal_occupancy_grid_3d import (
 )
 from tradition.motion.doppler_classifier import EgoCompensatedDopplerClassifier
 from tradition.motion.ego_speed_estimator import RobustDopplerEgoSpeedEstimator
-from tradition.motion.range_kalman import RangeKalmanUnwrapper
-from tradition.motion.temporal_consistency import OccupancyFirstTemporalClassifier
+from tradition.motion.temporal_consistency import PoseAlignedTemporalClassifier
 from tradition.semantics.classical_classifier import DopplerSemanticClassifier
 from tradition.semantics.object_classifier import ObjectAwareSemanticClassifier
 
@@ -71,7 +69,6 @@ class TraditionalRadarPipeline:
         writer: PredictionWriter,
         reliability_filter: DetectionReliabilityFilter | None = None,
         temporal_classifier: TemporalMotionClassifier | None = None,
-        velocity_unwrapper: RangeKalmanUnwrapper | None = None,
     ) -> None:
         self.reader = reader
         self.detector = detector
@@ -82,11 +79,8 @@ class TraditionalRadarPipeline:
         self.writer = writer
         self.reliability_filter = reliability_filter
         self.temporal_classifier = temporal_classifier
-        self.velocity_unwrapper = velocity_unwrapper
 
     def reset_sequence(self) -> None:
-        if self.velocity_unwrapper is not None:
-            self.velocity_unwrapper.reset()
         if self.temporal_classifier is not None:
             self.temporal_classifier.reset()
 
@@ -95,8 +89,6 @@ class TraditionalRadarPipeline:
         measurement: Any,
         ego_speed_mps: float | None = None,
     ) -> FramePrediction:
-        if self.velocity_unwrapper is not None:
-            raise ValueError("Range-Kalman unwrapping requires temporal RPC with poses.")
         detections = self.detector.detect(measurement)
         resolved_ego_speed_mps = (
             self.ego_speed_estimator.estimate(detections)
@@ -171,26 +163,10 @@ class TraditionalRadarPipeline:
         measurement = self.reader.read(radar_path)
         raw_detections = self.detector.detect(measurement)
         reliable_detections = self.reliability_filter.filter(raw_detections)
-        persistence = self.temporal_classifier.assess_persistence(
-            token=str(token),
-            pose_lidar_to_world=ego_motion.pose_lidar_to_world,
-            detections=reliable_detections,
+        residuals, evidence = self.motion_classifier.evidence_with_velocity(
+            reliable_detections,
+            ego_motion.linear_velocity_radar_mps,
         )
-        if self.velocity_unwrapper is None:
-            residuals, evidence = self.motion_classifier.evidence_with_velocity(
-                reliable_detections, ego_motion.linear_velocity_radar_mps,
-            )
-            residuals = np.asarray(residuals, dtype=np.float64).copy()
-            evidence = np.asarray(evidence, dtype=np.int8).copy()
-            residuals[persistence.persistent_mask] = 0.0
-            evidence[persistence.persistent_mask] = int(DopplerEvidence.STATIC)
-        else:
-            residuals, evidence = self.velocity_unwrapper.update(
-                reliable_detections,
-                ego_motion,
-                token,
-                excluded_mask=persistence.persistent_mask,
-            )
         temporal_frame = TemporalDetectionFrame(
             token=str(token),
             pose_lidar_to_world=ego_motion.pose_lidar_to_world,
@@ -198,10 +174,7 @@ class TraditionalRadarPipeline:
             doppler_residuals_mps=residuals,
             doppler_evidence=evidence,
         )
-        classification = self.temporal_classifier.update(
-            temporal_frame,
-            persistence,
-        )
+        classification = self.temporal_classifier.update(temporal_frame)
         temporal_accepted_detections = [
             reliable_detections[int(index)]
             for index in classification.current_indices
@@ -217,7 +190,7 @@ class TraditionalRadarPipeline:
         historic_detections = classification.historic_detections
         combined_detections = temporal_feature_detections + historic_detections
         combined_motion_labels = temporal_motion_labels + [
-            MotionLabel.PERSISTENT
+            MotionLabel.STATIC
         ] * len(historic_detections)
 
         classifier_with_acceptance = getattr(
@@ -277,29 +250,23 @@ class TraditionalRadarPipeline:
         )
         dense = self.mapper.labels()
         finite_residuals = np.abs(residuals[np.isfinite(residuals)])
-        support_values, support_counts = np.unique(
-            classification.static_support,
-            return_counts=True,
-        )
-        persistent_points = np.asarray(
+        static_branch_points = np.asarray(
             [
-                reliable_detections[int(index)].xyz_lidar_m
-                for index in classification.persistent_indices
-            ]
-            + [item.xyz_lidar_m for item in historic_detections],
-            dtype=np.float64,
-        ).reshape(-1, 3)
-        motion_points = np.asarray(
-            [
-                reliable_detections[int(index)].xyz_lidar_m
-                for index in classification.motion_indices
+                detection.xyz_lidar_m
+                for detection, label in zip(
+                    combined_detections, combined_motion_labels
+                )
+                if label == MotionLabel.STATIC
             ],
             dtype=np.float64,
         ).reshape(-1, 3)
-        unknown_points = np.asarray(
+        dynamic_branch_points = np.asarray(
             [
-                reliable_detections[int(index)].xyz_lidar_m
-                for index in classification.unknown_indices
+                detection.xyz_lidar_m
+                for detection, label in zip(
+                    combined_detections, combined_motion_labels
+                )
+                if label == MotionLabel.DYNAMIC
             ],
             dtype=np.float64,
         ).reshape(-1, 3)
@@ -309,25 +276,8 @@ class TraditionalRadarPipeline:
             motion_labels=motion_labels,
             semantic_labels=semantic_labels,
             metadata={
-                "velocity_unwrapping": (
-                    dict(self.velocity_unwrapper.last_diagnostics)
-                    if self.velocity_unwrapper is not None
-                    else {"method": "wrapped_doppler_fallback"}
-                ),
-                "occupancy_persistence": {
-                    "cell_size_m": (
-                        self.temporal_classifier.temporal_cfg.occupancy_cell_size_m
-                    ),
-                    "history_size": self.temporal_classifier.temporal_cfg.window_size,
-                    "min_support": self.temporal_classifier.temporal_cfg.min_static_support,
-                    "dilation_cells": (
-                        self.temporal_classifier.temporal_cfg.occupancy_dilation_cells
-                    ),
-                    "support_histogram": {
-                        str(int(value)): int(count)
-                        for value, count in zip(support_values, support_counts)
-                    },
-                },
+                "doppler_velocity_source": "rpc_raw_bin_velocity_mps",
+                "doppler_unwrapping": "none",
                 "radar_path": str(radar_path),
                 "ego_speed_mps": float(
                     np.linalg.norm(ego_motion.linear_velocity_lidar_mps[:2])
@@ -345,9 +295,6 @@ class TraditionalRadarPipeline:
                 "temporal_accepted_detection_count": len(
                     temporal_accepted_detections
                 ),
-                "persistent_current_count": len(classification.persistent_indices),
-                "motion_confirmed_count": len(classification.motion_indices),
-                "unknown_count": len(classification.unknown_indices),
                 "accepted_detection_count": len(accepted_detections),
                 "historic_detection_count": len(accepted_historic_detections),
                 "historic_background_count": sum(
@@ -386,9 +333,8 @@ class TraditionalRadarPipeline:
                 ),
             },
             branch_points_lidar_m={
-                "persistent": persistent_points,
-                "motion": motion_points,
-                "unknown": unknown_points,
+                "static": static_branch_points,
+                "dynamic": dynamic_branch_points,
             },
         )
 
@@ -497,7 +443,6 @@ def build_rpc_pipeline(
     temporal_cfg: TemporalConfig | None = None,
     object_cfg: ObjectClusteringConfig | None = None,
     object_model_path: str | Path | None = None,
-    unwrapping_cfg: UnwrappingConfig | None = None,
 ) -> TraditionalRadarPipeline:
     """Build the default Enhanced K-Radar RPC point-cloud baseline.
 
@@ -547,10 +492,8 @@ def build_rpc_pipeline(
         semantic_classifier=semantic_classifier,
         mapper=mapper,
         writer=writer,
-        velocity_unwrapper=(RangeKalmanUnwrapper(radar_cfg, motion_cfg, unwrapping_cfg)
-                            if unwrapping_cfg is not None else None),
         reliability_filter=LocalPowerRPCFilter(reliability_cfg),
-        temporal_classifier=OccupancyFirstTemporalClassifier(
+        temporal_classifier=PoseAlignedTemporalClassifier(
             temporal_cfg=temporal_cfg,
             motion_cfg=motion_cfg,
         ),

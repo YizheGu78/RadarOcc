@@ -8,12 +8,8 @@ import numpy as np
 
 
 class MotionLabel(IntEnum):
-    """Candidate-generation source, with legacy aliases kept for callers."""
-
-    PERSISTENT = 1
-    MOTION = 2
-    STATIC = PERSISTENT
-    DYNAMIC = MOTION
+    STATIC = 1
+    DYNAMIC = 2
 
 
 class DopplerEvidence(IntEnum):
@@ -92,27 +88,14 @@ class TemporalDetectionFrame:
 
 @dataclass(frozen=True)
 class TemporalClassification:
-    """Occupancy-first result and pose-aligned persistent history.
-
-    Unknown points are intentionally not part of ``current_indices``. They are
-    retained in ``unknown_indices`` for diagnostics but are not forced into the
-    motion branch or occupancy map.
-    """
+    """Accepted current detections plus pose-aligned historic measurements."""
 
     current_indices: np.ndarray
     current_motion_labels: list[MotionLabel]
-    persistent_indices: np.ndarray
-    motion_indices: np.ndarray
-    unknown_indices: np.ndarray
-    historic_persistent_lidar_m: np.ndarray
+    historic_background_lidar_m: np.ndarray
     historic_detections: list[RadarDetection]
     static_support: np.ndarray
     dynamic_support: np.ndarray
-
-    @property
-    def historic_background_lidar_m(self) -> np.ndarray:
-        """Backward-compatible name for pre-occupancy-first callers."""
-        return self.historic_persistent_lidar_m
 
 
 @dataclass
@@ -124,4 +107,8 @@ class FramePrediction:
     motion_labels: list[MotionLabel]
     semantic_labels: list[SemanticLabel]
     metadata: dict[str, Any]
+    # Optional pre-RF temporal branches for qualitative diagnostics.  The
+    # static branch contains accepted current static returns plus aligned
+    # historic static returns; the dynamic branch contains current returns
+    # only, matching the actual dual-branch candidate generator.
     branch_points_lidar_m: dict[str, np.ndarray] | None = None

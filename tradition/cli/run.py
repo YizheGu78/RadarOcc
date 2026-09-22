@@ -10,7 +10,6 @@ from tradition.core.config import (
     PoseConfig,
     ReliabilityConfig,
     TemporalConfig,
-    UnwrappingConfig,
 )
 from tradition.experiment.dataset_runner import TraditionalDatasetRunner
 from tradition.pipeline.traditional_radar_pipeline import (
@@ -26,17 +25,6 @@ def parse_args() -> argparse.Namespace:
             "RadarOcc-style metrics and optional video."
         )
     )
-    parser.add_argument(
-        "--velocity-unwrapping",
-        choices=("off", "range-kalman"),
-        default="off",
-        help=(
-            "Optional range-only tracking for non-persistent points; "
-            "range-kalman requires RPC poses."
-        ),
-    )
-    parser.add_argument("--unwrap-range-std-m", type=float, default=0.20)
-    parser.add_argument("--unwrap-cluster-radius-m", type=float, default=1.5)
     parser.add_argument("--annotation", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
@@ -54,15 +42,6 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help=(
             "Input root: data/K-Radar_rpc for rpc, or the K-Radar root for raw."
-        ),
-    )
-    parser.add_argument(
-        "--calib-root",
-        type=Path,
-        default=Path("data/K-Radar_calib"),
-        help=(
-            "Per-scene K-Radar calibration root. calib_radar_lidar.txt supplies "
-            "the aligned-frame to original-RPC frame difference."
         ),
     )
     parser.add_argument("--gt-root", type=Path)
@@ -127,32 +106,19 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--temporal-window", type=int, default=5)
-    parser.add_argument(
-        "--min-persistent-support",
-        "--min-static-support",
-        dest="min_persistent_support",
-        type=int,
-        default=3,
-    )
-    parser.add_argument(
-        "--min-motion-support",
-        "--min-dynamic-support",
-        dest="min_motion_support",
-        type=int,
-        default=2,
-    )
+    parser.add_argument("--min-static-support", type=int, default=2)
+    parser.add_argument("--min-dynamic-support", type=int, default=2)
     parser.add_argument("--static-match-radius-m", type=float, default=0.60)
     parser.add_argument("--dynamic-match-radius-m", type=float, default=2.00)
-    parser.add_argument("--occupancy-cell-size-m", type=float, default=0.40)
-    parser.add_argument("--occupancy-dilation-cells", type=int, default=1)
     parser.add_argument("--min-local-power-ratio", type=float, default=0.25)
     parser.add_argument("--min-local-neighbors", type=int, default=1)
     parser.add_argument(
         "--object-model",
         type=Path,
         help=(
-            "Joblib Random-Forest objectness bundle trained with the current "
-            "persistent-OGM and motion-confirmed DBSCAN feature schema."
+            "Joblib Random-Forest objectness bundle. When supplied, static "
+            "OGM components and dynamic DBSCAN clusters replace the direct "
+            "static/background, dynamic/foreground semantic rule."
         ),
     )
     parser.add_argument("--object-probability-threshold", type=float, default=0.50)
@@ -172,6 +138,10 @@ def parse_args() -> argparse.Namespace:
         "--video-layout",
         choices=("branch-comparison", "semantic-overlay", "both"),
         default="both",
+        help=(
+            "branch-comparison: static | dynamic | RGB; semantic-overlay: "
+            "Free/BG/FG + GT | RGB; both: generate both videos."
+        ),
     )
     parser.add_argument("--camera-dir", type=Path)
     parser.add_argument("--camera-offset", type=int, default=0)
@@ -196,17 +166,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    unwrapping_cfg = (UnwrappingConfig(
-        frame_dt_s=args.pose_dt_s, range_std_m=args.unwrap_range_std_m,
-        cluster_radius_m=args.unwrap_cluster_radius_m,
-    ) if args.velocity_unwrapping == "range-kalman" else None)
     motion_cfg = MotionConfig(
         static_residual_threshold_mps=args.static_residual_threshold_mps,
         dynamic_residual_threshold_mps=args.dynamic_residual_threshold_mps,
         stationary_velocity_sign=args.stationary_velocity_sign,
     )
-    if unwrapping_cfg is not None and (args.input_mode != "rpc" or args.pose_root is None):
-        raise ValueError("--velocity-unwrapping range-kalman requires RPC and --pose-root.")
     pose_cfg = PoseConfig(frame_dt_s=args.pose_dt_s)
     reliability_cfg = ReliabilityConfig(
         min_local_power_ratio=args.min_local_power_ratio,
@@ -214,12 +178,10 @@ def main() -> None:
     )
     temporal_cfg = TemporalConfig(
         window_size=args.temporal_window,
-        min_static_support=args.min_persistent_support,
-        min_dynamic_support=args.min_motion_support,
+        min_static_support=args.min_static_support,
+        min_dynamic_support=args.min_dynamic_support,
         static_match_radius_m=args.static_match_radius_m,
         dynamic_match_radius_m=args.dynamic_match_radius_m,
-        occupancy_cell_size_m=args.occupancy_cell_size_m,
-        occupancy_dilation_cells=args.occupancy_dilation_cells,
     )
     object_cfg = ObjectClusteringConfig(
         static_cell_size_m=args.static_object_cell_size_m,
@@ -239,7 +201,6 @@ def main() -> None:
             temporal_cfg=temporal_cfg,
             object_cfg=object_cfg,
             object_model_path=args.object_model,
-            unwrapping_cfg=unwrapping_cfg,
         )
     else:
         if args.pose_root is not None:
@@ -256,7 +217,6 @@ def main() -> None:
         output_dir=args.output_dir,
         repo_root=args.repo_root,
         radar_root=args.radar_root,
-        calib_root=args.calib_root,
         gt_root=args.gt_root,
         gt_order=args.gt_order,
         scene=args.scene,

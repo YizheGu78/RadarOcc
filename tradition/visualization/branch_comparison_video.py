@@ -32,7 +32,7 @@ def _points_to_sparse_zyx(
 
 
 class BranchComparisonVideoRenderer:
-    """Render persistent, motion-confirmed and RGB panels side by side."""
+    """Render the pipeline's true static/dynamic branches beside RGB."""
 
     def __init__(
         self,
@@ -69,29 +69,29 @@ class BranchComparisonVideoRenderer:
 
     def add_frame(
         self,
-        persistent_points_lidar_m: np.ndarray,
-        motion_points_lidar_m: np.ndarray,
+        static_points_lidar_m: np.ndarray,
+        dynamic_points_lidar_m: np.ndarray,
         camera_path: str | Path,
         token: str,
     ) -> None:
-        persistent = _points_to_sparse_zyx(
-            persistent_points_lidar_m,
+        static = _points_to_sparse_zyx(
+            static_points_lidar_m,
             self.grid,
         )
-        motion = _points_to_sparse_zyx(motion_points_lidar_m, self.grid)
-        persistent_panel = render_simple_overlay(
-            persistent,
-            np.ones(len(persistent), dtype=np.int8),
+        dynamic = _points_to_sparse_zyx(dynamic_points_lidar_m, self.grid)
+        static_panel = render_simple_overlay(
+            static,
+            np.ones(len(static), dtype=np.int8),
             self.args,
         )
-        motion_panel = render_simple_overlay(
-            motion,
-            np.full(len(motion), 2, dtype=np.int8),
+        dynamic_panel = render_simple_overlay(
+            dynamic,
+            np.full(len(dynamic), 2, dtype=np.int8),
             self.args,
         )
         frame = self._compose(
-            persistent_panel,
-            motion_panel,
+            static_panel,
+            dynamic_panel,
             Path(camera_path),
             str(token),
         )
@@ -100,8 +100,8 @@ class BranchComparisonVideoRenderer:
 
     def _compose(
         self,
-        persistent_panel: Image.Image,
-        motion_panel: Image.Image,
+        static_panel: Image.Image,
+        dynamic_panel: Image.Image,
         camera_path: Path,
         token: str,
     ) -> Image.Image:
@@ -116,8 +116,8 @@ class BranchComparisonVideoRenderer:
         with Image.open(camera_path) as camera_file:
             camera = camera_file.convert("RGB")
         panels = (
-            fit_image(persistent_panel, panel_size, panel_size, (255, 255, 255)),
-            fit_image(motion_panel, panel_size, panel_size, (255, 255, 255)),
+            fit_image(static_panel, panel_size, panel_size, (255, 255, 255)),
+            fit_image(dynamic_panel, panel_size, panel_size, (255, 255, 255)),
             fit_image(
                 camera,
                 panel_size,
@@ -132,8 +132,8 @@ class BranchComparisonVideoRenderer:
         title_font = get_font(25)
         footer_font = get_font(17)
         titles = (
-            "Static / persistent branch",
-            "Dynamic / motion branch",
+            "Static branch (current + history)",
+            "Dynamic branch (current only)",
             "RGB original",
         )
         for index, title in enumerate(titles):
@@ -144,7 +144,7 @@ class BranchComparisonVideoRenderer:
 
         footer = (
             f"Scene {self.scene} | frame {self.frame_count:03d} | "
-            f"token {token} | blue=persistent | red=motion"
+            f"token {token} | blue=static | red=dynamic | raw Doppler bins"
         )
         box = draw.textbbox((0, 0), footer, font=footer_font)
         width = box[2] - box[0]
