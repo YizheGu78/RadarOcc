@@ -1,4 +1,5 @@
-"""Python translation of the pinned OctoMap OcTree occupancy insertion core."""
-from .octree import OcTree, OcTreeNode
+"""Stable OcTree interface; original C++ by default, Python reference on request."""
+from .backend import OcTree
+from .octree import OcTreeNode
 
 __all__ = ['OcTree', 'OcTreeNode']

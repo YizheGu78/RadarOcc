@@ -54,13 +54,16 @@ class EndToEndTests(unittest.TestCase):
                 with (root/f'{scene}.pkl').open('wb') as stream:
                     pickle.dump({'infos': infos}, stream)
             common = ['--radar-root', str(root/'rpc'), '--pose-root', str(root/'poses'), '--calib-root', str(root/'calib')]
-            main(['train', '--annotation', str(root/'1.pkl'), '--output', str(root/'train'), '--n-estimators', '40', *common])
+            # Online Python reference vs native-C++ preprocessing/cache consumers.
+            with patch.dict('os.environ', {'TRADITION_REAL_OCTOMAP_BACKEND': 'python'}):
+                main(['train', '--annotation', str(root/'1.pkl'), '--output', str(root/'train'), '--n-estimators', '40', *common])
             model_path = root/'train/random_forest.joblib'
             bundle = joblib.load(model_path)
             self.assertGreater(bundle['metadata']['background_samples'], 0)
             self.assertGreater(bundle['metadata']['foreground_samples'], 0)
-            main(['evaluate', '--annotation', str(root/'3.pkl'), '--model', str(model_path), '--output', str(root/'test'),
-                  '--save-predictions', '--camera-dir', str(root/'camera/3'), '--video-start', '2', '--video-end', '5', *common])
+            with patch.dict('os.environ', {'TRADITION_REAL_OCTOMAP_BACKEND': 'python'}):
+                main(['evaluate', '--annotation', str(root/'3.pkl'), '--model', str(model_path), '--output', str(root/'test'),
+                      '--save-predictions', '--camera-dir', str(root/'camera/3'), '--video-start', '2', '--video-end', '5', *common])
             run = json.loads((root/'test/run.json').read_text())
             self.assertEqual(run['processed_frames'], 12)
             self.assertEqual(run['video_frames'], 4)
@@ -76,7 +79,8 @@ class EndToEndTests(unittest.TestCase):
             self.assertEqual(int(capture.get(cv2.CAP_PROP_FRAME_COUNT)), 4)
             capture.release()
             # Preprocessing does not read GT or train RF.
-            with patch('tradition_real.adapters.dataset.load_gt_sparse_xyz', side_effect=AssertionError('GT read')):
+            with patch('tradition_real.adapters.dataset.load_gt_sparse_xyz', side_effect=AssertionError('GT read')), \
+                 patch.dict('os.environ', {'TRADITION_REAL_OCTOMAP_BACKEND': 'cpp'}):
                 for scene in ['1', '3']:
                     main(['preprocess', '--annotation', str(root/f'{scene}.pkl'),
                           '--output', str(root/f'cache_{scene}'), *common])
@@ -101,7 +105,8 @@ class EndToEndTests(unittest.TestCase):
                 shutil.rmtree(root/directory)
             with patch('tradition_real.pipeline.Pipeline.map_frame', side_effect=AssertionError('mapping called')), \
                  patch('tradition_real.semantics.features.DBSCAN', side_effect=AssertionError('DBSCAN called')), \
-                 patch('tradition_real.octomap.OcTree.insertPointCloud', side_effect=AssertionError('OctoMap called')):
+                 patch('tradition_real.octomap.OcTree.insertPointCloud', side_effect=AssertionError('OctoMap called')), \
+                 patch('tradition_real.octomap.backend.native_module', side_effect=AssertionError('native module loaded')):
                 main(train_cached)
                 cached_model = root/'cached_train/random_forest.joblib'
                 main(['evaluate', '--annotation', str(root/'3.pkl'), '--model', str(cached_model),

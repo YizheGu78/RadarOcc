@@ -2,6 +2,12 @@
 
 ## Active OctoMap occupancy core
 
+The default backend now uses `octomap/bindings.cpp` (pybind11) to call these
+unchanged vendored C++ sources directly. `octomap/octree.py` remains the Python
+reference implementation. The binding does not replace the upstream occupancy
+algorithm. pybind11 is an external build dependency under its own BSD-style
+license: https://github.com/pybind/pybind11/blob/master/LICENSE
+
 `octomap/octree.py` translates the OcTree occupancy methods identified in
 `OCTOMAP_SOURCE_MANIFEST.json`, pinned to YizheGu78/octomap commit
 `21a8871d7bbd0aa13c73bbdb4e128821d8279af4` (OctoMap 1.10.0).

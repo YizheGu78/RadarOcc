@@ -1,0 +1,4 @@
+_native*.so
+_native*.pyd
+.native-build-*/
+__pycache__/

@@ -67,6 +67,7 @@ evaluate_rf() {
 }
 
 case "$stage" in
+  build-octomap) "$PYTHON_BIN" -m tradition_real.octomap.build "$@" ;;
   preprocess-train) preprocess_split "$TRAIN_ANNOTATION" "$TRAIN_CACHE" "$@" ;;
   preprocess-test) preprocess_split "$TEST_ANNOTATION" "$TEST_CACHE" "$@" ;;
   preprocess-val) preprocess_split "$VAL_ANNOTATION" "$VAL_CACHE" "$@" ;;
@@ -90,10 +91,12 @@ case "$stage" in
   help|-h|--help)
     cat <<'HELP'
 Usage: bash run_tradition_real.sh STAGE [extra Python CLI arguments]
-Stages: preprocess-train | preprocess-test | preprocess-val | preprocess
+Stages: build-octomap | preprocess-train | preprocess-test | preprocess-val | preprocess
         train | evaluate | validate | all
 
-First run:  bash run_tradition_real.sh preprocess
+First run:  python -m pip install pybind11
+            bash run_tradition_real.sh build-octomap
+            bash run_tradition_real.sh preprocess
             bash run_tradition_real.sh train
             bash run_tradition_real.sh evaluate
 RF tuning:  N_ESTIMATORS=500 bash run_tradition_real.sh train
@@ -109,6 +112,9 @@ RF: N_ESTIMATORS MAX_DEPTH MIN_SAMPLES_LEAF CLASS_WEIGHT N_JOBS SEED
     POSITIVE_FRACTION NEGATIVE_FRACTION
 Video: CAMERA_DIR VIDEO_SCENE VIDEO_START VIDEO_END VIDEO_FPS
 Other: PYTHON_BIN SAVE_PREDICTIONS (default 1)
+Backend: TRADITION_REAL_OCTOMAP_BACKEND=cpp (default) or python (reference)
+Build: CXX (default c++); compile once per Python environment, after source updates.
+Cache-only train/evaluate/validate do not require the C++ binary or a compiler.
 
 Preprocess refuses to overwrite an existing cache. For changed preprocessing,
 use a new CACHE_ROOT and rebuild both splits. Train/evaluate never rebuild it.

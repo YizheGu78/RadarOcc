@@ -135,7 +135,17 @@ def main(argv=None):
            'input_mode': 'frame_fusion' if cache else 'rpc',
            'frame_fusion_root': str(cache.root) if cache else None,
            'preprocessing_signature': preprocessing_signature}
+    # Execution provenance is separate from the algorithm/cache signature:
+    # C++ and Python run the same pinned OcTree rules and share existing caches.
+    if cache:
+        run['octomap_execution'] = {'backend': 'cache', 'octomap_executed': False}
+    else:
+        from .octomap.backend import execution_info
+        run['octomap_execution'] = execution_info()
+        print(f"OctoMap backend: {run['octomap_execution']['backend']} (CPU)", flush=True)
     cache_writer = CacheWriter(output, cfg, args.radar_z, args.annotation, dataset.infos) if args.command == 'preprocess' else None
+    if cache_writer:
+        cache_writer.manifest['execution'] = run['octomap_execution']
     _json(output / 'pipeline_config.json', cfg.signature())
     _json(output / 'run.json', run)
     pipeline, accumulator = Pipeline(cfg), RadarOccMetricAccumulator()

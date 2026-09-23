@@ -201,6 +201,8 @@ See [tradition_real/README.md](tradition_real/README.md) for the independent bas
 cache format, configuration checks, training, complete test-set IoU and scene 3 videos.
 
 ```bash
+python -m pip install pybind11
+bash run_tradition_real.sh build-octomap  # once per Python environment
 bash run_tradition_real.sh preprocess  # once: RPC -> occupancy -> DBSCAN -> 42D cache
 bash run_tradition_real.sh train       # cache + GT -> Random Forest
 bash run_tradition_real.sh evaluate    # cache + RF -> predictions and IoU
@@ -210,8 +212,12 @@ bash run_tradition_real.sh evaluate    # cache + RF -> predictions and IoU
 Set `CAMERA_DIR=/path/to/scene3/rgb` for evaluation video. The existing `tradition/`
 pipeline remains separate. Run `bash run_tradition_real.sh help` for path overrides.
 
-The default backend is the pinned OctoMap OcTree Python port (3D rays, clamped
-log-odds, real octree nodes and pruning). Rebuild legacy caches and retrain RF;
-new defaults use `data/frame_fusion_octomap` and `work_dirs/tradition_real/octomap_rf_200`.
+The default backend now calls the pinned original OctoMap C++ OcTree through
+pybind11; all mapping/feature/RF logic stays unchanged. Build once in your active
+Python environment: `python -m pip install pybind11`, then
+`bash run_tradition_real.sh build-octomap`. The Python reference backend remains
+available with `TRADITION_REAL_OCTOMAP_BACKEND=python`. Completed OctoMap v2
+caches and their RF models remain compatible; only legacy Autoware/GM2019 caches require rebuilding.
+Defaults use `data/frame_fusion_octomap` and `work_dirs/tradition_real/octomap_rf_200`.
 For a held-out validation annotation, use `preprocess-val` and `validate` with
 `VAL_ANNOTATION=/path/to/val.pkl`. See the baseline README for source scope and C++ parity tests.
