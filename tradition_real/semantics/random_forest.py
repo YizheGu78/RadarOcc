@@ -6,7 +6,7 @@ import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 from .features import FEATURE_NAMES
 
-FORMAT = 'radarocc-autoware-gm2019-occupancy-first-rf-v1'
+FORMAT = 'radarocc-octomap-occupancy-first-rf-v1'
 
 
 def annotation_sha256(path):
@@ -39,7 +39,7 @@ class RandomForest:
     def load(cls, path, config):
         bundle = joblib.load(path)
         if not isinstance(bundle, dict) or bundle.get('format') != FORMAT:
-            raise ValueError('Requires a tradition_real RF model; old tradition checkpoints are incompatible')
+            raise ValueError('Requires an OctoMap tradition_real RF model; old tradition / Autoware-GM2019 checkpoints are incompatible')
         if tuple(bundle.get('feature_names', ())) != FEATURE_NAMES:
             raise ValueError('RF feature names/order mismatch')
         if bundle.get('config') != config.signature():

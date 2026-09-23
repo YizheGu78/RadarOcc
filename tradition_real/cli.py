@@ -22,7 +22,7 @@ from .evaluation.radarocc_metrics import RadarOccMetricAccumulator, radarocc_met
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('command', choices=['preprocess', 'train', 'evaluate'])
-    p.add_argument('--annotation', required=True, help='Train split for train; test split for evaluate')
+    p.add_argument('--annotation', required=True, help='Train split for train; held-out test/validation split for evaluate')
     p.add_argument('--radar-root', default='data/K-Radar_rpc')
     p.add_argument('--pose-root', default='data/K-RadarOcc')
     p.add_argument('--calib-root', help='Raw mode default: data/K-Radar_calib; cache mode: optional validation')
@@ -30,7 +30,7 @@ def parser():
     p.add_argument('--gt-root')
     p.add_argument('--gt-order', choices=['xyz', 'zyx'], default='xyz')
     p.add_argument('--repo-root', default='.')
-    p.add_argument('--output', required=True, help='preprocess: data/frame_fusion/SPLIT; train/evaluate: work_dirs/tradition_real/RUN')
+    p.add_argument('--output', required=True, help='preprocess: data/frame_fusion_octomap/SPLIT; train/evaluate: work_dirs/tradition_real/RUN')
     p.add_argument('--model', help='Required for evaluate; train defaults to OUTPUT/random_forest.joblib')
     p.add_argument('--config', help='JSON Config overrides; defaults to model/cache configuration')
     p.add_argument('--frame-fusion-root', help='Read cached mapping + 42D; no RPC/pose/DBSCAN needed')
@@ -75,7 +75,7 @@ def main(argv=None):
     cache = CacheReader(args.frame_fusion_root) if args.frame_fusion_root else None
     bundle = joblib.load(args.model) if args.command == 'evaluate' else None
     if bundle is not None and (not isinstance(bundle, dict) or bundle.get('format') != FORMAT):
-        raise ValueError('Old tradition RF is incompatible; train tradition_real first')
+        raise ValueError('Old tradition / Autoware-GM2019 RF is incompatible; train OctoMap tradition_real first')
     raw_config = dict(bundle['config'] if bundle else (cache.manifest['config'] if cache else {}))
     if args.config:
         raw_config.update(json.loads(Path(args.config).read_text()))
@@ -84,6 +84,9 @@ def main(argv=None):
     for key in ('shape_xyz', 'min_xyz'):
         if key in raw_config:
             raw_config[key] = tuple(raw_config[key])
+    legacy_keys = {'p_free', 'prior', 'occupied_threshold', 'free_threshold'} & raw_config.keys()
+    if legacy_keys:
+        raise ValueError(f'Old Autoware/GM2019 config fields {sorted(legacy_keys)}; use OctoMap config and rebuild cache')
     cfg = Config(**raw_config)
     if args.temporal_window is not None:
         cfg = replace(cfg, temporal_window=args.temporal_window)
@@ -121,7 +124,7 @@ def main(argv=None):
             raise ValueError('Evaluation overlaps RF training data; use the held-out test split')
         if model.metadata.get('radar_z') != args.radar_z or model.metadata.get('gt_order') != args.gt_order:
             raise ValueError('Calibration Z or GT coordinate convention differs from training')
-    manifest_path = Path(__file__).with_name('SOURCE_MANIFEST.json')
+    manifest_path = Path(__file__).with_name('OCTOMAP_SOURCE_MANIFEST.json')
     run = {'status': 'running', 'command': args.command, 'config': cfg.signature(),
            'annotation': str(Path(args.annotation).resolve()),
            'annotation_sha256': annotation_sha256(args.annotation),

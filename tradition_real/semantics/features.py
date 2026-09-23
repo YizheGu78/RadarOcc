@@ -56,7 +56,7 @@ def extract_features(xyz, returns, ages, probabilities):
 
 
 def proposals(probability, occupied, points, returns, ages, config):
-    from tradition_real.adapters.layers import voxel_indices
+    from tradition_real.adapters.octomap_grid import voxel_indices
     voxels = np.argwhere(occupied)
     if not len(voxels):
         return []

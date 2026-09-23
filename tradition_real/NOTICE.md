@@ -1,5 +1,23 @@
 # Source and license notices
 
+## Active OctoMap occupancy core
+
+`octomap/octree.py` translates the OcTree occupancy methods identified in
+`OCTOMAP_SOURCE_MANIFEST.json`, pinned to YizheGu78/octomap commit
+`21a8871d7bbd0aa13c73bbdb4e128821d8279af4` (OctoMap 1.10.0).
+Copyright (c) 2009-2013, K.M. Wurm and A. Hornung, University of Freiburg.
+The BSD-3-Clause license and disclaimer are reproduced in
+`vendor/octomap/LICENSE.txt` and the original source headers. These terms apply
+to the Python translation. See each source header for additional authors.
+
+Source: https://github.com/YizheGu78/octomap/tree/21a8871d7bbd0aa13c73bbdb4e128821d8279af4
+
+The RadarOcc coordinate/grid adapter, temporal window, DBSCAN, 42D features and
+RF integration are project additions, not claims about the upstream library.
+The port does not include the entire OctoMap API or its ROS integration.
+
+## Historical Autoware / GM2019 modules (not used by the current pipeline)
+
 The Python CPU port in `autoware/costmap.py` is derived from the files recorded
 in `SOURCE_MANIFEST.json`. The original files are retained verbatim in `vendor/`,
 including their copyright, license conditions and disclaimers.

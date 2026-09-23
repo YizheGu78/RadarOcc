@@ -195,7 +195,7 @@ Many thanks to these excellent projects:
 - [OpenOccupancy](https://github.com/JeffWang987/OpenOccupancy)
 - [VoxFormer](https://github.com/NVlabs/VoxFormer)
 
-## Traditional Autoware + GM2019 + Random Forest baseline
+## OctoMap 3D Occupancy + Random Forest baseline
 
 See [tradition_real/README.md](tradition_real/README.md) for the independent baseline,
 cache format, configuration checks, training, complete test-set IoU and scene 3 videos.
@@ -209,3 +209,9 @@ bash run_tradition_real.sh evaluate    # cache + RF -> predictions and IoU
 `N_ESTIMATORS=500 bash run_tradition_real.sh train` reuses the same cache.
 Set `CAMERA_DIR=/path/to/scene3/rgb` for evaluation video. The existing `tradition/`
 pipeline remains separate. Run `bash run_tradition_real.sh help` for path overrides.
+
+The default backend is the pinned OctoMap OcTree Python port (3D rays, clamped
+log-odds, real octree nodes and pruning). Rebuild legacy caches and retrain RF;
+new defaults use `data/frame_fusion_octomap` and `work_dirs/tradition_real/octomap_rf_200`.
+For a held-out validation annotation, use `preprocess-val` and `validate` with
+`VAL_ANNOTATION=/path/to/val.pkl`. See the baseline README for source scope and C++ parity tests.

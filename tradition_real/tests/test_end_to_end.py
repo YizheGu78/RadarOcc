@@ -10,7 +10,7 @@ import joblib
 import numpy as np
 from tradition_real.cli import main
 from tradition_real.config import Config
-from tradition_real.adapters.layers import voxel_indices
+from tradition_real.adapters.octomap_grid import voxel_indices
 from tradition_real.semantics.random_forest import RandomForest
 
 
@@ -100,7 +100,8 @@ class EndToEndTests(unittest.TestCase):
             for directory in ['rpc', 'poses', 'calib']:
                 shutil.rmtree(root/directory)
             with patch('tradition_real.pipeline.Pipeline.map_frame', side_effect=AssertionError('mapping called')), \
-                 patch('tradition_real.semantics.features.DBSCAN', side_effect=AssertionError('DBSCAN called')):
+                 patch('tradition_real.semantics.features.DBSCAN', side_effect=AssertionError('DBSCAN called')), \
+                 patch('tradition_real.octomap.OcTree.insertPointCloud', side_effect=AssertionError('OctoMap called')):
                 main(train_cached)
                 cached_model = root/'cached_train/random_forest.joblib'
                 main(['evaluate', '--annotation', str(root/'3.pkl'), '--model', str(cached_model),

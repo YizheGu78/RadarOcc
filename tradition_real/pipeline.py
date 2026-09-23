@@ -1,11 +1,9 @@
-"""RPC -> official Autoware 2D evidence -> GM2019 fusion -> DBSCAN -> RF."""
+"""RPC -> pinned OctoMap 3D OcTree occupancy -> unchanged DBSCAN/42D -> RF."""
 from collections import deque
 from dataclasses import dataclass
 import numpy as np
 from tradition_real.config import Config
-from tradition_real.adapters.layers import evidence_maps, transform_points
-from tradition_real.autoware.costmap import apply_bbf
-from tradition_real.gm2019.fusion import LogOddsFusion
+from tradition_real.adapters.octomap_grid import OctomapGrid, transform_points
 from tradition_real.semantics.features import proposals
 
 
@@ -55,10 +53,7 @@ class Pipeline:
         self.last_ordinal = ordinal
         self.history.append((rpc.copy(), pose.copy(), translation.copy(), ordinal))
         cfg = self.config
-        grid_fusion = LogOddsFusion(cfg.shape_xyz, cfg.p_hit, cfg.p_free, cfg.prior)
-        bev_fusion = LogOddsFusion(cfg.shape_xyz[:2], cfg.p_hit, cfg.p_free, cfg.prior)
-        bbf = np.full(cfg.shape_xyz, 128, np.uint8)
-        bev_bbf = np.full(cfg.shape_xyz[:2], 128, np.uint8)
+        mapping = OctomapGrid(cfg)
         all_points, all_returns, all_ages = [], [], []
         # Replay each source observation ONCE in the current reference frame.
         # Rebuild from prior every call; never re-add a window to a persistent map.
@@ -66,22 +61,14 @@ class Pipeline:
             relative = np.linalg.inv(pose) @ source_pose
             points = transform_points(source_rpc[:, :3] + source_translation, relative)
             origin = transform_points(source_translation[None], relative)[0]
-            evidence, bev = evidence_maps(points, origin, cfg)
-            grid_fusion.update(evidence)
-            bev_fusion.update(bev)
-            if cfg.fusion == 'autoware_bbf':
-                bbf = apply_bbf(evidence, bbf)
-                bev_bbf = apply_bbf(bev, bev_bbf)
+            mapping.insert(points, origin)
             all_points.append(points)
             all_returns.append(source_rpc)
             all_ages.append(np.full(len(points), ordinal - source_ordinal, np.int32))
-        probability = grid_fusion.probability if cfg.fusion == 'gm2019' else bbf / 255.
-        bev_probability = bev_fusion.probability if cfg.fusion == 'gm2019' else bev_bbf / 255.
-        occupied = grid_fusion.observed & (probability >= cfg.occupied_threshold)
-        free = grid_fusion.observed & (probability <= cfg.free_threshold)
+        probability, observed, occupied, free, bev_probability = mapping.export()
         candidates = proposals(probability, occupied, np.concatenate(all_points),
                                np.concatenate(all_returns), np.concatenate(all_ages), cfg)
-        return MappingResult(probability, grid_fusion.observed, occupied, free,
+        return MappingResult(probability, observed, occupied, free,
                              bev_probability, candidates)
 
     def predict(self, mapping, classifier):

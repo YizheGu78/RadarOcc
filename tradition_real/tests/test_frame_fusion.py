@@ -41,8 +41,8 @@ class FrameFusionTests(unittest.TestCase):
         config = Config()
         original = signature(config, -.7)
         self.assertEqual(original, signature(replace(config, foreground_threshold=.8, unknown_export='background'), -.7))
-        for overrides in ({'temporal_window': 1}, {'p_hit': .8}, {'prior': .48},
-                          {'dbscan_eps_xy': 2.}, {'occupied_threshold': .6}):
+        for overrides in ({'temporal_window': 1}, {'p_hit': .8}, {'clamping_max': .98},
+                          {'dbscan_eps_xy': 2.}, {'occupancy_threshold': .6}):
             self.assertNotEqual(original, signature(replace(config, **overrides), -.7))
         self.assertNotEqual(original, signature(config, -.8))
 

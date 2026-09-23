@@ -1,1 +1,1 @@
-"""Autoware CPU port + GM2019 classical baseline + Random Forest."""
+"""Pinned OctoMap OcTree Python port + cached 42D features + Random Forest."""

@@ -1,0 +1,218 @@
+{
+  "repository": "https://github.com/YizheGu78/octomap",
+  "commit": "21a8871d7bbd0aa13c73bbdb4e128821d8279af4",
+  "license": "BSD-3-Clause",
+  "scope": "OcTree point-cloud occupancy insertion, 3D key rays, log-odds/clamping, sparse octree search/update/expand/prune and inner occupancy. Project grid/window and RF are adapters. No ROS, visualization, binary IO or other tree subclasses are translated.",
+  "files": [
+    {
+      "upstream_path": "octomap/include/octomap/OcTreeBase.h",
+      "local_path": "vendor/octomap/include/octomap/OcTreeBase.h",
+      "sha256": "4f2bc2f31095bd552127027e02a56178b4745048af012f908021dea077e479c8"
+    },
+    {
+      "upstream_path": "octomap/include/octomap/OcTreeBaseImpl.h",
+      "local_path": "vendor/octomap/include/octomap/OcTreeBaseImpl.h",
+      "sha256": "fa318a5c3209ee8781072bdc37117774aa095e1af9311109d4d4935e175675ec"
+    },
+    {
+      "upstream_path": "octomap/include/octomap/OccupancyOcTreeBase.h",
+      "local_path": "vendor/octomap/include/octomap/OccupancyOcTreeBase.h",
+      "sha256": "e0e6ad4ea2376732923f2462ec22809f59bb6c94add681b5624d0d44a5b628d0"
+    },
+    {
+      "upstream_path": "octomap/include/octomap/octomap_types.h",
+      "local_path": "vendor/octomap/include/octomap/octomap_types.h",
+      "sha256": "b59086027b87a9a8ab8d1fe8a08d2ec170ab3604343674a2ec5822b26c99e542"
+    },
+    {
+      "upstream_path": "octomap/include/octomap/ColorOcTree.h",
+      "local_path": "vendor/octomap/include/octomap/ColorOcTree.h",
+      "sha256": "ec334d80cafd8a6bac79d6cc94a48208cfc640272973c3a81972c7b5aa3bfd16"
+    },
+    {
+      "upstream_path": "octomap/include/octomap/OcTree.h",
+      "local_path": "vendor/octomap/include/octomap/OcTree.h",
+      "sha256": "1c8dd040005cb5524e5a6b1d34ec3be94de1116c244bf90287481a6f0d599923"
+    },
+    {
+      "upstream_path": "octomap/include/octomap/octomap_timing.h",
+      "local_path": "vendor/octomap/include/octomap/octomap_timing.h",
+      "sha256": "6e28280af2941d62e6e04fb2e23c84e13c0298a02491a36d7fb532621ff41182"
+    },
+    {
+      "upstream_path": "octomap/include/octomap/octomap_utils.h",
+      "local_path": "vendor/octomap/include/octomap/octomap_utils.h",
+      "sha256": "7a9716044b70e0f14788a8af3038a058dd0c3662ce54271c8c359a860115b118"
+    },
+    {
+      "upstream_path": "octomap/include/octomap/MapCollection.h",
+      "local_path": "vendor/octomap/include/octomap/MapCollection.h",
+      "sha256": "2bd7ed77be063207bb4d9ef1aeebb5fee11b4bc0f82c7426cf808912b60debf7"
+    },
+    {
+      "upstream_path": "octomap/include/octomap/OcTreeDataNode.h",
+      "local_path": "vendor/octomap/include/octomap/OcTreeDataNode.h",
+      "sha256": "7cec6f0fdeabfebbac108d2880132889a2de459f5b1aef570aaea8f0513087bc"
+    },
+    {
+      "upstream_path": "octomap/include/octomap/AbstractOccupancyOcTree.h",
+      "local_path": "vendor/octomap/include/octomap/AbstractOccupancyOcTree.h",
+      "sha256": "0bb74048227b863dc5b757933c967c88f6dc6160c46cbd5f4321a3e8a260f0a5"
+    },
+    {
+      "upstream_path": "octomap/include/octomap/OcTreeStamped.h",
+      "local_path": "vendor/octomap/include/octomap/OcTreeStamped.h",
+      "sha256": "da98e68ca8e8df026e1d55a9d7aa49a42033fb70e022a0ccff98c41ce1b73ed1"
+    },
+    {
+      "upstream_path": "octomap/include/octomap/OcTreeKey.h",
+      "local_path": "vendor/octomap/include/octomap/OcTreeKey.h",
+      "sha256": "09f40e181656d27bc009c035e5ca017773da1c7293741184463e45be0b85860a"
+    },
+    {
+      "upstream_path": "octomap/include/octomap/MCTables.h",
+      "local_path": "vendor/octomap/include/octomap/MCTables.h",
+      "sha256": "092bc621879ec476c8f92a6ee10474740d495e2542c44d1c9d8a147177930dfc"
+    },
+    {
+      "upstream_path": "octomap/include/octomap/OcTreeNode.h",
+      "local_path": "vendor/octomap/include/octomap/OcTreeNode.h",
+      "sha256": "ee10f7fdf6264920e7cee61895195a74f5e39a05f12ac157c28c6bc7f4eb433e"
+    },
+    {
+      "upstream_path": "octomap/include/octomap/MapNode.h",
+      "local_path": "vendor/octomap/include/octomap/MapNode.h",
+      "sha256": "0a3b6d90330294e5e327c40429635c6b85ea50bc3928335ba5b81eb6bc4ea1d3"
+    },
+    {
+      "upstream_path": "octomap/include/octomap/octomap.h",
+      "local_path": "vendor/octomap/include/octomap/octomap.h",
+      "sha256": "27d67a72e2b1c1fb397391a4bfd47be5b0bad0654403dc6770421402af445d01"
+    },
+    {
+      "upstream_path": "octomap/include/octomap/CountingOcTree.h",
+      "local_path": "vendor/octomap/include/octomap/CountingOcTree.h",
+      "sha256": "cc80b76b896e91533ad6be624648f3a371dceed7cfac8f62b65fbbd4144e920c"
+    },
+    {
+      "upstream_path": "octomap/include/octomap/AbstractOcTree.h",
+      "local_path": "vendor/octomap/include/octomap/AbstractOcTree.h",
+      "sha256": "a1ac2d4af27aff4535e158a71b36d689658fa04ba3df729c32ba24175ebe36c2"
+    },
+    {
+      "upstream_path": "octomap/include/octomap/Pointcloud.h",
+      "local_path": "vendor/octomap/include/octomap/Pointcloud.h",
+      "sha256": "aeb36bef4ab4ab9d4f1efcb50af838fd5dcb99a889a3b00b453428796714cc64"
+    },
+    {
+      "upstream_path": "octomap/include/octomap/ScanGraph.h",
+      "local_path": "vendor/octomap/include/octomap/ScanGraph.h",
+      "sha256": "f6e078679aee0b0d4d682cc3ae75367e995a7ae9d183e0e25c7994d97d0460da"
+    },
+    {
+      "upstream_path": "octomap/include/octomap/octomap_deprecated.h",
+      "local_path": "vendor/octomap/include/octomap/octomap_deprecated.h",
+      "sha256": "a51d2306cd127bfab1054d30f2690d9ce12bc3b7326e6e35103fe5b39a56cd6e"
+    },
+    {
+      "upstream_path": "octomap/include/octomap/math/Utils.h",
+      "local_path": "vendor/octomap/include/octomap/math/Utils.h",
+      "sha256": "ca9b3d030a9dd461da7e997de0eb14ed948b2810615e3217fffbb6b909b2497e"
+    },
+    {
+      "upstream_path": "octomap/include/octomap/math/Vector3.h",
+      "local_path": "vendor/octomap/include/octomap/math/Vector3.h",
+      "sha256": "b01d9d5efdc770f6ed051d7b8059d1dc5001fff1d79d230841276fd1e5eb6675"
+    },
+    {
+      "upstream_path": "octomap/include/octomap/math/Quaternion.h",
+      "local_path": "vendor/octomap/include/octomap/math/Quaternion.h",
+      "sha256": "349d21b776769a4811abf07addc4168fe131227126b5c9bef7d1239d336afb2e"
+    },
+    {
+      "upstream_path": "octomap/include/octomap/math/Pose6D.h",
+      "local_path": "vendor/octomap/include/octomap/math/Pose6D.h",
+      "sha256": "9eeae8a728125e57b8470b921ea854e0409a339154d966f6bd4b15948649bc75"
+    },
+    {
+      "upstream_path": "octomap/include/octomap/OcTreeBaseImpl.hxx",
+      "local_path": "vendor/octomap/include/octomap/OcTreeBaseImpl.hxx",
+      "sha256": "9ed174459111ecdf6f30d11a36b5cbe93a2b815de093d5877ea81369d0f7ab77"
+    },
+    {
+      "upstream_path": "octomap/include/octomap/OcTreeDataNode.hxx",
+      "local_path": "vendor/octomap/include/octomap/OcTreeDataNode.hxx",
+      "sha256": "b1952c576f41f6ca9c705f4b866cc94bc584a26b3b0301987e6295bd4d8272a4"
+    },
+    {
+      "upstream_path": "octomap/include/octomap/MapCollection.hxx",
+      "local_path": "vendor/octomap/include/octomap/MapCollection.hxx",
+      "sha256": "15a9b3d8e27ef12e63533633ed2137ea8ef209603afb7c5712a0e9aa82538e07"
+    },
+    {
+      "upstream_path": "octomap/include/octomap/MapNode.hxx",
+      "local_path": "vendor/octomap/include/octomap/MapNode.hxx",
+      "sha256": "7f7683c2cc94a54ea15e4738ed7ba04b1b3af359f7975f37744310249a2c2528"
+    },
+    {
+      "upstream_path": "octomap/include/octomap/OccupancyOcTreeBase.hxx",
+      "local_path": "vendor/octomap/include/octomap/OccupancyOcTreeBase.hxx",
+      "sha256": "1d34fc3b704038e0f332beb820d765adad1fa870485333ca23e885f8c62a7903"
+    },
+    {
+      "upstream_path": "octomap/include/octomap/OcTreeIterator.hxx",
+      "local_path": "vendor/octomap/include/octomap/OcTreeIterator.hxx",
+      "sha256": "de78727ed678e513624f033cd7c67cdd2cc1e1b12eaec6dc88a90b18ffe6f6b9"
+    },
+    {
+      "upstream_path": "octomap/src/AbstractOcTree.cpp",
+      "local_path": "vendor/octomap/src/AbstractOcTree.cpp",
+      "sha256": "c20fd46af4bab57754f13872b6b413ddfd4513133bb469c79080e1de16195a73"
+    },
+    {
+      "upstream_path": "octomap/src/AbstractOccupancyOcTree.cpp",
+      "local_path": "vendor/octomap/src/AbstractOccupancyOcTree.cpp",
+      "sha256": "ace1df7ec43e3ea730fc19f99d9e09fcd9aa55b624c40df2aa7c96b490a8b95d"
+    },
+    {
+      "upstream_path": "octomap/src/OcTree.cpp",
+      "local_path": "vendor/octomap/src/OcTree.cpp",
+      "sha256": "fe6705a91ae487479f2ee8755f2f33add3d133d5bd31169776a531f63e848cc8"
+    },
+    {
+      "upstream_path": "octomap/src/OcTreeNode.cpp",
+      "local_path": "vendor/octomap/src/OcTreeNode.cpp",
+      "sha256": "c86e683262ca68c76eaf365c6acf82dac4545c8e716863389dc8d255447d9941"
+    },
+    {
+      "upstream_path": "octomap/src/Pointcloud.cpp",
+      "local_path": "vendor/octomap/src/Pointcloud.cpp",
+      "sha256": "00317aabc0e3bca253e49fa19861bb7c0a1229559e81fbe1a55309148659f93b"
+    },
+    {
+      "upstream_path": "octomap/src/ScanGraph.cpp",
+      "local_path": "vendor/octomap/src/ScanGraph.cpp",
+      "sha256": "67d0116f0c2f42416f23d3b22fc58693c0c9a3e4442d37ba61b0bb1d043ecd6c"
+    },
+    {
+      "upstream_path": "octomap/src/math/Pose6D.cpp",
+      "local_path": "vendor/octomap/src/math/Pose6D.cpp",
+      "sha256": "5647d2d61d0a9c9e966e406525fadd2727dae48e69793b71dbb28fbbbf159b88"
+    },
+    {
+      "upstream_path": "octomap/src/math/Quaternion.cpp",
+      "local_path": "vendor/octomap/src/math/Quaternion.cpp",
+      "sha256": "06f8e8ac7f17088854066c7c094bdf18c559e8bd1abf036e9b7f95513f9f42b6"
+    },
+    {
+      "upstream_path": "octomap/src/math/Vector3.cpp",
+      "local_path": "vendor/octomap/src/math/Vector3.cpp",
+      "sha256": "937ce1e8303299894d5a65c4c770d6a2a9bcf374d3885fb5b2254e84f3ca1d4b"
+    },
+    {
+      "upstream_path": "octomap/LICENSE.txt",
+      "local_path": "vendor/octomap/LICENSE.txt",
+      "sha256": "8a9ce1eadc1dd0fc4ee57a6016cb40eddc7003d2da824c58d55463f2b9ceb4ca"
+    }
+  ]
+}

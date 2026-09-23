@@ -10,11 +10,11 @@ import numpy as np
 from .pipeline import MappingResult
 from .semantics.features import FEATURE_NAMES
 
-FORMAT = 'tradition-real-frame-fusion-v1'
+FORMAT = 'tradition-real-octomap-frame-fusion-v2'
 # Changes to deterministic preprocessing invalidate old cache/model pairings.
 SOURCE_FILES = ('config.py', 'pipeline.py', 'adapters/dataset.py',
-                'adapters/paths.py', 'adapters/pose_reader.py', 'adapters/layers.py',
-                'autoware/costmap.py', 'gm2019/fusion.py', 'semantics/features.py')
+                'adapters/paths.py', 'adapters/pose_reader.py', 'adapters/octomap_grid.py',
+                'octomap/octree.py', 'OCTOMAP_SOURCE_MANIFEST.json', 'semantics/features.py')
 
 
 def sha256(path):
@@ -142,7 +142,7 @@ class CacheReader:
         self.manifest = json.loads((self.root / 'manifest.json').read_text())
         m = self.manifest
         if m.get('format') != FORMAT or m.get('status') != 'completed':
-            raise ValueError('Cache format unsupported or preprocessing incomplete/failed')
+            raise ValueError('Cache format unsupported (OctoMap v2 required) or preprocessing incomplete/failed')
         self.records = {(r['scene'], r['token']): r for r in m['frames']}
         if len(self.records) != len(m['frames']) or len(self.records) != m['expected_frames']:
             raise ValueError('Cache manifest has duplicate or missing frames')
