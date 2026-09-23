@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import unittest
 import numpy as np
-from trodition_real.autoware.costmap import OccupancyGridMap, apply_bbf
+from tradition_real.autoware.costmap import OccupancyGridMap, apply_bbf
 
 ROOT = Path(__file__).resolve().parents[1]
 

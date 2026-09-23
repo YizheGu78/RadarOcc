@@ -1,4 +1,4 @@
-"""Run from repository root: python -m trodition_real {train,evaluate}."""
+"""Run from repository root: python -m tradition_real {train,evaluate}."""
 import argparse
 from collections import Counter
 from dataclasses import replace
@@ -29,7 +29,7 @@ def parser():
     p.add_argument('--gt-root')
     p.add_argument('--gt-order', choices=['xyz', 'zyx'], default='xyz')
     p.add_argument('--repo-root', default='.')
-    p.add_argument('--output', required=True, help='Separate work_dirs/trodition_real output directory')
+    p.add_argument('--output', required=True, help='Separate work_dirs/tradition_real output directory')
     p.add_argument('--model', help='Required for evaluate; train defaults to OUTPUT/random_forest.joblib')
     p.add_argument('--config', help='JSON Config; evaluation defaults to the model configuration')
     p.add_argument('--temporal-window', type=int, help='Optional config override; must match RF when evaluating')
@@ -59,12 +59,12 @@ def main(argv=None):
     if args.video_start < 0 or (args.video_end is not None and args.video_end < args.video_start) or args.video_fps <= 0:
         raise ValueError('Invalid video range or frame rate')
     if args.command == 'evaluate' and not args.model:
-        raise ValueError('Evaluation requires --model trained with trodition_real')
+        raise ValueError('Evaluation requires --model trained with tradition_real')
     if args.command == 'train' and args.camera_dir:
         raise ValueError('Video is available for evaluate')
     bundle = joblib.load(args.model) if args.command == 'evaluate' else None
     if bundle is not None and (not isinstance(bundle, dict) or bundle.get('format') != FORMAT):
-        raise ValueError('Old tradition RF is incompatible; train trodition_real first')
+        raise ValueError('Old tradition RF is incompatible; train tradition_real first')
     raw_config = json.loads(Path(args.config).read_text()) if args.config else (bundle['config'] if bundle else {})
     for key in ('shape_xyz', 'min_xyz'):
         if key in raw_config:

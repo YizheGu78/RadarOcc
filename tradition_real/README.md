@@ -1,6 +1,6 @@
 # Autoware + GM2019 传统基线 + Random Forest
 
-独立目录 `RadarOcc/trodition_real`，与 `tradition` 同级。运行不依赖旧管线，
+独立目录 `RadarOcc/tradition_real`，与 `tradition` 同级。运行不依赖旧管线，
 旧目录、旧脚本、旧模型不需要更改。**新 RF 必须重新训练，不能复用旧 42D checkpoint。**
 
 流程：RPC → 位姿对齐 → Autoware CPU 二维射线证据 → GM2019 第 3.1 节
@@ -77,14 +77,14 @@ GM2019 论文主要提出神经网络 Occupancy Net。本目录实现的是该�
 需要视频时还需 OpenCV；不需要 ROS、CUDA、torch 或 mmcv。
 
 ```bash
-python -m pip install -r trodition_real/requirements.txt
+python -m pip install -r tradition_real/requirements.txt
 
-python -m trodition_real train \
+python -m tradition_real train \
   --annotation data/annotations/kradar_dict_train_official_doppler8.pkl \
   --radar-root data/K-Radar_rpc \
   --pose-root data/K-RadarOcc \
   --calib-root data/K-Radar_calib \
-  --output work_dirs/trodition_real/train
+  --output work_dirs/tradition_real/train
 ```
 
 输出 `random_forest.joblib`、`training_features.npz`、`pipeline_config.json`、
@@ -95,13 +95,13 @@ python -m trodition_real train \
 ## 完整测试集 + 场景 3 全帧视频
 
 ```bash
-python -m trodition_real evaluate \
+python -m tradition_real evaluate \
   --annotation data/annotations/kradar_dict_test_official_doppler8.pkl \
   --radar-root data/K-Radar_rpc \
   --pose-root data/K-RadarOcc \
   --calib-root data/K-Radar_calib \
-  --model work_dirs/trodition_real/train/random_forest.joblib \
-  --output work_dirs/trodition_real/test_official \
+  --model work_dirs/tradition_real/train/random_forest.joblib \
+  --output work_dirs/tradition_real/test_official \
   --save-predictions \
   --video-scene 3 \
   --camera-dir data/K-Radar/3/cam-front
@@ -157,7 +157,7 @@ GM2019 与 BBF 是替代关系，同一结果不会顺次做两遍概率融合�
 ## 验证
 
 ```bash
-python -m unittest discover -s trodition_real/tests -v
+python -m unittest discover -s tradition_real/tests -v
 ```
 
 - C++ 对照：从随代码保留的原始方法直接提取/编译，仅替换 ROS 消息与日志外壳。

@@ -6,10 +6,10 @@ import tempfile
 import unittest
 import joblib
 import numpy as np
-from trodition_real.cli import main
-from trodition_real.config import Config
-from trodition_real.adapters.layers import voxel_indices
-from trodition_real.semantics.random_forest import RandomForest
+from tradition_real.cli import main
+from tradition_real.config import Config
+from tradition_real.adapters.layers import voxel_indices
+from tradition_real.semantics.random_forest import RandomForest
 
 
 class EndToEndTests(unittest.TestCase):

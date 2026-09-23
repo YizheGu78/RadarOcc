@@ -1,12 +1,12 @@
 from dataclasses import replace
 import unittest
 import numpy as np
-from trodition_real.config import Config
-from trodition_real.pipeline import Pipeline
-from trodition_real.gm2019.fusion import LogOddsFusion, logit
-from trodition_real.adapters.layers import voxel_indices
-from trodition_real.semantics.features import FEATURE_NAMES
-from trodition_real.semantics.random_forest import training_target
+from tradition_real.config import Config
+from tradition_real.pipeline import Pipeline
+from tradition_real.gm2019.fusion import LogOddsFusion, logit
+from tradition_real.adapters.layers import voxel_indices
+from tradition_real.semantics.features import FEATURE_NAMES
+from tradition_real.semantics.random_forest import training_target
 
 
 def rpc_at(x=5.2, y=.2, z=.2, doppler=1.7):
