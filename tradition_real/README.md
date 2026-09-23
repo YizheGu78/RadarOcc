@@ -71,46 +71,150 @@ GM2019 论文主要提出神经网络 Occupancy Net。本目录实现的是该�
   GT 255 忽略，GT 1 为 BG，其他非零语义类别归 FG。GT 只供训练标签和评估使用，
   不参与推理的 occupancy、聚类或特征计算。
 
-## 安装与训练
+## 三阶段运行（推荐：先缓存，再训练 / 评估）
 
-在 RadarOcc 仓库根目录运行，使用已经装有 numpy/scikit-learn/joblib 的环境。
-需要视频时还需 OpenCV；不需要 ROS、CUDA、torch 或 mmcv。
+在仓库根目录激活 `radarocc5060` 等 Python 环境。仅依赖 numpy、scikit-learn、
+joblib；视频另需 OpenCV，不需要 ROS、CUDA、torch 或 mmcv。
 
 ```bash
 python -m pip install -r tradition_real/requirements.txt
 
-python -m tradition_real train \
-  --annotation data/annotations/kradar_dict_train_official_doppler8.pkl \
-  --radar-root data/K-Radar_rpc \
-  --pose-root data/K-RadarOcc \
-  --calib-root data/K-Radar_calib \
-  --output work_dirs/tradition_real/train
+# 第一次：两个 split 各做一次 RPC → Autoware → GM2019 → DBSCAN → 42D
+bash run_tradition_real.sh preprocess
+
+# 后续只从缓存读取特征，并用 GT 重新生成提案 BG/FG 标签
+bash run_tradition_real.sh train
+
+# 完整 test_official：缓存 + RF → 三类标签 → 15 个 IoU 指标
+bash run_tradition_real.sh evaluate
 ```
 
-输出 `random_forest.joblib`、`training_features.npz`、`pipeline_config.json`、
-`frames.json`、`run.json`。默认 200 棵树。OOB 是训练内部诊断，不是测试 IoU。
-训练标签：提案 FG 比例 ≥0.2 标前景；FG 比例 ≤0.05 且 BG 比例 ≥0.2 标背景；
-其余提案忽略。**以 Free 为主的提案不会自动当成 Background 训练样本。**
+也可第一次 `bash run_tradition_real.sh all` 连续执行三阶段。
+已有缓存时直接运行 train/evaluate；preprocess **拒绝覆盖已有缓存**，不会静默跳过或混用。
+改变预处理配置时指定新的 `CACHE_ROOT` 重建两个 split，例如：
+
+```bash
+CACHE_ROOT=data/frame_fusion_w1 TEMPORAL_WINDOW=1 bash run_tradition_real.sh preprocess
+CACHE_ROOT=data/frame_fusion_w1 RUN_DIR=work_dirs/tradition_real/w1 bash run_tradition_real.sh train
+CACHE_ROOT=data/frame_fusion_w1 RUN_DIR=work_dirs/tradition_real/w1 bash run_tradition_real.sh evaluate
+```
+
+单独生成一个 split：`bash run_tradition_real.sh preprocess-train` 或 `preprocess-test`。
+完整路径与参数见 `bash run_tradition_real.sh help`。脚本使用当前激活的 Python，
+可用 `PYTHON_BIN=/path/to/python` 指定。`RADAR_ROOT`、`POSE_ROOT`、`CALIB_ROOT`、
+`TRAIN_ANNOTATION`、`TEST_ANNOTATION` 可覆盖默认路径；含空格的路径请加引号。
+
+### 对应的 Python 命令
+
+```bash
+python -m tradition_real preprocess \
+  --annotation data/annotations/kradar_dict_train_official_doppler8.pkl \
+  --radar-root data/K-Radar_rpc --pose-root data/K-RadarOcc \
+  --calib-root data/K-Radar_calib --output data/frame_fusion/train_official
+
+python -m tradition_real preprocess \
+  --annotation data/annotations/kradar_dict_test_official_doppler8.pkl \
+  --radar-root data/K-Radar_rpc --pose-root data/K-RadarOcc \
+  --calib-root data/K-Radar_calib --output data/frame_fusion/test_official
+
+python -m tradition_real train \
+  --annotation data/annotations/kradar_dict_train_official_doppler8.pkl \
+  --frame-fusion-root data/frame_fusion/train_official \
+  --output work_dirs/tradition_real/rf_200 --n-estimators 200
+
+python -m tradition_real evaluate \
+  --annotation data/annotations/kradar_dict_test_official_doppler8.pkl \
+  --frame-fusion-root data/frame_fusion/test_official \
+  --model work_dirs/tradition_real/rf_200/random_forest.joblib \
+  --output work_dirs/tradition_real/rf_200_test --save-predictions
+```
+
+缓存模式只需要 PKL、缓存、GT，视频额外需要 RGB；RPC、pose、calibration 原文件
+可以离线。不会调用 `Pipeline.map_frame()`、Autoware、GM2019、DBSCAN 或特征提取。
+不传 `--frame-fusion-root` 仍可使用原来的在线 train/evaluate 入口进行对照。
+
+### 缓存结构和有效性
+
+```text
+data/frame_fusion/
+├── train_official/
+│   ├── manifest.json
+│   ├── pipeline_config.json / frames.json / run.json
+│   └── SCENE/frame_TOKEN.npz
+└── test_official/
+    ├── manifest.json
+    └── SCENE/frame_TOKEN.npz
+```
+
+manifest 放在各 split **内部**，移动整个 split 时不需要移动另一个伴随文件。
+
+| NPZ 字段 | 含义 |
+|---|---|
+| `native_labels_xyz` | `[128,128,14]`，0 Free / 1 Occupied / 255 Unknown，尚未做 RF 分类 |
+| `occupancy_probability` / `bev_probability` | 原精度融合概率，3D / BEV |
+| `observed_mask` | 是否收到过非 Unknown 证据；不等同于最终已分类区域 |
+| `proposal_features` | `[K,42]`，保留 float64，字段顺序绑定 `FEATURE_NAMES` |
+| `proposal_voxels` | `[M,3]` XYZ 索引，按 proposal 顺序拼接 |
+| `proposal_offsets` | `[K+1]`，第 i 个 proposal 为 `voxels[offsets[i]:offsets[i+1]]` |
+| `scene` / `token` / `ordinal` | 帧身份与原始场景内顺序序号 |
+| `format` / `signature` | 格式版本、预处理配置、代码哈希与特征定义 |
+
+**不缓存 GT 或 BG/FG training target**。preprocess 不读取 GT 文件。
+空提案帧保留 `[0,42]` 特征、`[0,3]` 体素、`[0]` offsets，不跳帧。
+每帧 NPZ 和 manifest 使用临时文件后原子替换；中断时缓存仍为 running/failed，
+训练拒绝使用。当前不支持断点续跑；中断后使用新的输出目录完整重跑。
+
+manifest 绑定完整预处理配置（窗口、hit/free/prior、阈值、栅格、DBSCAN）、
+`radar_z`、特征字段和预处理源代码哈希，并记录 PKL SHA256、每个 RPC/pose 的
+SHA256、标定文件 SHA256 / 平移、每帧 NPZ SHA256 和帧清单。
+训练/评估会拒绝配置不匹配、错误 split、缺帧、重复帧、错误 ordinal、损坏 NPZ
+和未完成缓存，不会回退到现场重新建图。模型也记录预处理签名。
+
+默认信任缓存内的标定快照，不访问原始输入。若要检查本机更新后的标定，显式传
+`--calib-root data/K-Radar_calib`，文件内容变化会报错。RPC/pose 原文件如果后来改变，
+须主动重新预处理；缓存消费不会扫描原数据去检测修改。代码更新或更换预处理参数后
+使用新缓存目录；同一套 RF 的训练缓存和测试缓存必须采用相同预处理签名。
+
+`--scenes` / `--max-frames` 可做小样本检查，缓存只包含选中帧。
+完整训练/评估若选中了未缓存的帧会立即报错。全量指标请勿设置这两个限制。
+
+### 重复调 RF，无需重建缓存
+
+```bash
+N_ESTIMATORS=500 bash run_tradition_real.sh train
+N_ESTIMATORS=500 bash run_tradition_real.sh evaluate
+
+# 同树数的其他实验建议用独立 RUN_DIR
+MAX_DEPTH=12 CLASS_WEIGHT=balanced POSITIVE_FRACTION=0.3 \
+  RUN_DIR=work_dirs/tradition_real/rf_depth12 bash run_tradition_real.sh train
+RUN_DIR=work_dirs/tradition_real/rf_depth12 bash run_tradition_real.sh evaluate
+```
+
+可调整 `--n-estimators`、`--max-depth`（0 不限制）、`--min-samples-leaf`、
+`--class-weight balanced_subsample|balanced|none`、`--n-jobs`、`--seed`。
+训练输出 `random_forest.joblib`、`training_features.npz`、`pipeline_config.json`、
+`frames.json`、`run.json`。OOB 是训练内部诊断，不是测试 IoU。
+
+`positive_fraction=0.20` / `negative_fraction=0.05` 是 **GT 提案打标签阈值，
+不是随机采样比例**。提案内有效 GT 的 FG 比例 ≥ positive 标前景；
+FG 比例 ≤ negative 且 BG 比例 ≥ positive 标背景；其他忽略。
+GT 255 不参与比例；Free 为主的提案不会自动作为 BG。
+每次训练都按当次 GT 和阈值重新算标签，改这两个参数无需重新预处理。
 
 ## 完整测试集 + 场景 3 全帧视频
 
 ```bash
-python -m tradition_real evaluate \
-  --annotation data/annotations/kradar_dict_test_official_doppler8.pkl \
-  --radar-root data/K-Radar_rpc \
-  --pose-root data/K-RadarOcc \
-  --calib-root data/K-Radar_calib \
-  --model work_dirs/tradition_real/train/random_forest.joblib \
-  --output work_dirs/tradition_real/test_official \
-  --save-predictions \
-  --video-scene 3 \
-  --camera-dir data/K-Radar/3/cam-front
+CAMERA_DIR=data/K-Radar/3/cam-front bash run_tradition_real.sh evaluate
+
+# 只限制视频为 80–200 帧，指标仍覆盖完整 test_official
+CAMERA_DIR=data/K-Radar/3/cam-front VIDEO_START=80 VIDEO_END=200 \
+  TEST_OUTPUT=work_dirs/tradition_real/rf_200_test_clip bash run_tradition_real.sh evaluate
 ```
 
-把 `--camera-dir` 改为本机真实场景 3 RGB 文件夹。没有 RGB 时省略它即可完成评估。
-**不要加 `--scenes 3` 来做完整测试**：`--video-scene 3` 只控制视频，评估仍遍历所有测试样本。
-仅想渲染 80–200 帧时加 `--video-start 80 --video-end 200`；两端包含，指从 0 开始的
-场景顺序序号，不是文件号或秒。视频限制不裁剪指标的评估范围。
+把 `CAMERA_DIR` 改为本机真实场景 3 RGB 文件夹。不设置它就只评估和保存预测。
+默认场景 3 全帧视频。不要加 `--scenes 3` 来做完整测试：`--video-scene 3`
+只控制视频。视频范围两端包含，指从 0 开始的场景内序号，不是文件号或秒。
+`SAVE_PREDICTIONS=0` 可关闭预测 NPZ；默认保留。
 
 输出：
 
@@ -131,8 +235,9 @@ python -m tradition_real evaluate \
 
 ## 配置与可选 Autoware BBF 对照
 
-训练可用 `--config path/to/config.json`；未写字段使用默认值。测试默认加载模型保存的
-完整配置，显式传入不一致配置会拒绝运行。配置示例：
+预处理可用 `--config path/to/config.json`；未写字段使用默认值。缓存训练默认读取
+manifest 配置，评估默认读取 RF 模型配置；显式 JSON/窗口参数覆盖后仍须通过缓存/模型
+一致性校验。RF 阈值和 Unknown 导出策略不影响预处理缓存，但评估仍须匹配模型配置。配置示例：
 
 ```json
 {
@@ -165,8 +270,9 @@ python -m unittest discover -s tradition_real/tests -v
   g++ 不存在时此组会标记 skipped。
 - 数学/管线：GM2019 公式、Unknown 不更新、因果窗口不重复计数、位姿对齐、
   场景/缺帧重置、高度层隔离、RF 只能修改语义标签。
-- 集成：创建不同编号的合成 RPC/RGB，完整执行 RF 训练、12 帧测试、
-  4 帧选段视频、概率/标签落盘、旧模型拒绝和训练数据泄漏拒绝。
+- 集成：创建不同编号的合成 RPC/RGB，执行在线与缓存两条路径；移除原始 RPC/pose/标定后，
+  禁止调用 map_frame/DBSCAN，仍可缓存训练和评估。逐项对比训练特征、标签、全部预测和指标；
+  检查 4 帧视频、RF 调参、缺失/损坏/未完成缓存、配置/标定冲突和数据泄漏拒绝。
 
 这些验证不代替真实数据训练/评估。当前没有在完整 K-Radar 上运行，
 不能据此承诺真实 IoU、全数据运行速度或与 RadarOcc 相当的精度。

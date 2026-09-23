@@ -4,7 +4,7 @@ import csv
 import numpy as np
 from .paths import _load_infos, _resolve_rpc_radar, _resolve_gt, _scene_variants
 from .pose_reader import RadarOccPoseReader
-from trodition_real.evaluation.radarocc_metrics import load_gt_sparse_xyz
+from tradition_real.evaluation.radarocc_metrics import load_gt_sparse_xyz
 
 
 def scene_translation(calib_root, scene, z=-.7):
@@ -27,7 +27,7 @@ def scene_translation(calib_root, scene, z=-.7):
 class Dataset:
     def __init__(self, annotation, radar_root, pose_root, calib_root,
                  repo_root='.', gt_root=None, gt_order='xyz', radar_z=-.7,
-                 scenes=None, max_frames=None):
+                 scenes=None, max_frames=None, load_mapping=True, load_gt=True):
         self.annotation = Path(annotation).resolve()
         self.infos_all = _load_infos(self.annotation)
         selected = [i for i in self.infos_all if scenes is None or str(i['scene_token']) in scenes]
@@ -43,7 +43,8 @@ class Dataset:
         if len(set(keys)) != len(keys):
             raise ValueError('Duplicate scene/token entries in annotation')
         self.radar_root = Path(radar_root).resolve()
-        self.pose_reader = RadarOccPoseReader(pose_root)
+        self.load_mapping, self.load_gt = load_mapping, load_gt
+        self.pose_reader = RadarOccPoseReader(pose_root) if load_mapping else None
         self.calib_root = Path(calib_root)
         self.repo_root = Path(repo_root).resolve()
         self.gt_root = Path(gt_root).resolve() if gt_root else None
@@ -53,18 +54,19 @@ class Dataset:
     def __iter__(self):
         for info in self.infos:
             scene, token = str(info['scene_token']), str(info['lidar_token'])
-            path = _resolve_rpc_radar(info, self.repo_root, self.radar_root)
-            pose, pose_path = self.pose_reader.read(scene, token)
-            if scene not in self.calibrations:
-                self.calibrations[scene] = scene_translation(self.calib_root, scene, self.radar_z)
-            translation, calibration = self.calibrations[scene]
-            gt_path = _resolve_gt(info, self.repo_root, self.gt_root)
-            # No skipped failures: evaluated frame count must be auditable.
-            yield {
-                'rpc': np.load(path, allow_pickle=False), 'pose': pose,
-                'translation': translation, 'scene': scene, 'token': token,
-                'ordinal': info['_rpc_sequence_ordinal'],
-                'gt': load_gt_sparse_xyz(gt_path, self.gt_order),
-                'rpc_path': str(path), 'gt_path': str(gt_path),
-                'pose_path': str(pose_path), 'calibration': calibration,
-            }
+            frame = {'scene': scene, 'token': token,
+                     'ordinal': info['_rpc_sequence_ordinal']}
+            if self.load_mapping:
+                path = _resolve_rpc_radar(info, self.repo_root, self.radar_root)
+                pose, pose_path = self.pose_reader.read(scene, token)
+                if scene not in self.calibrations:
+                    self.calibrations[scene] = scene_translation(self.calib_root, scene, self.radar_z)
+                translation, calibration = self.calibrations[scene]
+                frame.update(rpc=np.load(path, allow_pickle=False), pose=pose,
+                             translation=translation, rpc_path=str(path),
+                             pose_path=str(pose_path), calibration=calibration)
+            if self.load_gt:
+                gt_path = _resolve_gt(info, self.repo_root, self.gt_root)
+                frame.update(gt=load_gt_sparse_xyz(gt_path, self.gt_order), gt_path=str(gt_path))
+            # No skipped failures: selected and processed counts must agree.
+            yield frame

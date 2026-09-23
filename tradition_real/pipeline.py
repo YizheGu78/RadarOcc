@@ -2,11 +2,11 @@
 from collections import deque
 from dataclasses import dataclass
 import numpy as np
-from trodition_real.config import Config
-from trodition_real.adapters.layers import evidence_maps, transform_points
-from trodition_real.autoware.costmap import apply_bbf
-from trodition_real.gm2019.fusion import LogOddsFusion
-from trodition_real.semantics.features import proposals
+from tradition_real.config import Config
+from tradition_real.adapters.layers import evidence_maps, transform_points
+from tradition_real.autoware.costmap import apply_bbf
+from tradition_real.gm2019.fusion import LogOddsFusion
+from tradition_real.semantics.features import proposals
 
 
 @dataclass

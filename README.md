@@ -194,3 +194,18 @@ Many thanks to these excellent projects:
 - [SurroundOcc](https://github.com/weiyithu/SurroundOcc)
 - [OpenOccupancy](https://github.com/JeffWang987/OpenOccupancy)
 - [VoxFormer](https://github.com/NVlabs/VoxFormer)
+
+## Traditional Autoware + GM2019 + Random Forest baseline
+
+See [tradition_real/README.md](tradition_real/README.md) for the independent baseline,
+cache format, configuration checks, training, complete test-set IoU and scene 3 videos.
+
+```bash
+bash run_tradition_real.sh preprocess  # once: RPC -> occupancy -> DBSCAN -> 42D cache
+bash run_tradition_real.sh train       # cache + GT -> Random Forest
+bash run_tradition_real.sh evaluate    # cache + RF -> predictions and IoU
+```
+
+`N_ESTIMATORS=500 bash run_tradition_real.sh train` reuses the same cache.
+Set `CAMERA_DIR=/path/to/scene3/rgb` for evaluation video. The existing `tradition/`
+pipeline remains separate. Run `bash run_tradition_real.sh help` for path overrides.

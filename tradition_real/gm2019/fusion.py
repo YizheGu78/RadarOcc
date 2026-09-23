@@ -5,7 +5,7 @@ Hit/free probabilities and finite temporal window are project parameters;
 the paper does not specify values sufficient for an exact baseline replay.
 """
 import numpy as np
-from trodition_real.autoware.costmap import FREE_SPACE, LETHAL_OBSTACLE
+from tradition_real.autoware.costmap import FREE_SPACE, LETHAL_OBSTACLE
 
 
 def logit(probability):

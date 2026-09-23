@@ -5,7 +5,7 @@ that layer, not physical 3D rays. No full-height occupied extrusion is used.
 Coordinates passed to the unmodified 2D port are measured in grid cells.
 """
 import numpy as np
-from trodition_real.autoware.costmap import OccupancyGridMap, NO_INFORMATION
+from tradition_real.autoware.costmap import OccupancyGridMap, NO_INFORMATION
 
 
 def transform_points(points, matrix):

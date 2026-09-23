@@ -39,7 +39,7 @@ class RandomForest:
     def load(cls, path, config):
         bundle = joblib.load(path)
         if not isinstance(bundle, dict) or bundle.get('format') != FORMAT:
-            raise ValueError('Requires a trodition_real RF model; old tradition checkpoints are incompatible')
+            raise ValueError('Requires a tradition_real RF model; old tradition checkpoints are incompatible')
         if tuple(bundle.get('feature_names', ())) != FEATURE_NAMES:
             raise ValueError('RF feature names/order mismatch')
         if bundle.get('config') != config.signature():
@@ -50,19 +50,21 @@ class RandomForest:
         return cls(estimator, bundle['metadata'])
 
 
-def train(features, targets, path, config, metadata, n_estimators=200, seed=13):
+def train(features, targets, path, config, metadata, n_estimators=200, seed=13,
+          max_depth=18, min_samples_leaf=2, class_weight="balanced_subsample", n_jobs=-1):
     x, y = np.asarray(features, np.float64), np.asarray(targets, np.int8)
     if x.ndim != 2 or x.shape[1] != 42 or len(x) != len(y) or not np.isfinite(x).all():
         raise ValueError('Expected finite [N,42] training features and N targets')
     if set(y) != {0, 1}:
         raise ValueError('Training proposals must include both occupied Background and Foreground')
-    estimator = RandomForestClassifier(n_estimators=n_estimators, max_depth=18,
-        min_samples_leaf=2, class_weight='balanced_subsample', n_jobs=-1,
+    estimator = RandomForestClassifier(n_estimators=n_estimators, max_depth=max_depth,
+        min_samples_leaf=min_samples_leaf, class_weight=class_weight, n_jobs=n_jobs,
         random_state=seed, oob_score=True)
     estimator.fit(x, y)
     metadata = {**metadata, 'sample_count': len(y), 'background_samples': int((y == 0).sum()),
                 'foreground_samples': int((y == 1).sum()), 'oob_score': float(estimator.oob_score_),
-                'n_estimators': n_estimators, 'seed': seed}
+                'n_estimators': n_estimators, 'seed': seed, 'max_depth': max_depth,
+                'min_samples_leaf': min_samples_leaf, 'class_weight': class_weight, 'n_jobs': n_jobs}
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     joblib.dump({'format': FORMAT, 'feature_names': FEATURE_NAMES, 'config': config.signature(),
                  'estimator': estimator, 'metadata': metadata}, path)

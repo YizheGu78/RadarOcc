@@ -4,6 +4,8 @@ from pathlib import Path
 import pickle
 import tempfile
 import unittest
+from unittest.mock import patch
+import shutil
 import joblib
 import numpy as np
 from tradition_real.cli import main
@@ -73,8 +75,78 @@ class EndToEndTests(unittest.TestCase):
             capture = cv2.VideoCapture(str(root/'test/scene_3.mp4'))
             self.assertEqual(int(capture.get(cv2.CAP_PROP_FRAME_COUNT)), 4)
             capture.release()
+            # Preprocessing does not read GT or train RF.
+            with patch('tradition_real.adapters.dataset.load_gt_sparse_xyz', side_effect=AssertionError('GT read')):
+                for scene in ['1', '3']:
+                    main(['preprocess', '--annotation', str(root/f'{scene}.pkl'),
+                          '--output', str(root/f'cache_{scene}'), *common])
+            manifest = json.loads((root/'cache_1/manifest.json').read_text())
+            self.assertEqual(manifest['status'], 'completed')
+            self.assertEqual(len(manifest['frames']), 12)
+            self.assertIn('sha256', manifest['calibrations']['1'])
+            with np.load(root/'cache_1/1/frame_1_00000.npz', allow_pickle=False) as cached:
+                self.assertEqual(cached['proposal_features'].shape[1], 42)
+                self.assertNotIn('targets', cached.files)
+                self.assertNotIn('gt', cached.files)
+            train_cached = ['train', '--annotation', str(root/'1.pkl'),
+                            '--frame-fusion-root', str(root/'cache_1'),
+                            '--output', str(root/'cached_train'), '--n-estimators', '40']
+            # Explicit changed calibration is rejected even though cache-only
+            # runs normally need no original calibration files.
+            calibration = root/'calib/1/info_calib/calib_radar_lidar.txt'
+            calibration.write_text('frame difference,x,y\n30,-1.54,0.3\n')
+            with self.assertRaisesRegex(ValueError, 'calibration mismatch'):
+                main([*train_cached, '--calib-root', str(root/'calib')])
+            for directory in ['rpc', 'poses', 'calib']:
+                shutil.rmtree(root/directory)
+            with patch('tradition_real.pipeline.Pipeline.map_frame', side_effect=AssertionError('mapping called')), \
+                 patch('tradition_real.semantics.features.DBSCAN', side_effect=AssertionError('DBSCAN called')):
+                main(train_cached)
+                cached_model = root/'cached_train/random_forest.joblib'
+                main(['evaluate', '--annotation', str(root/'3.pkl'), '--model', str(cached_model),
+                      '--frame-fusion-root', str(root/'cache_3'), '--output', str(root/'cached_test'),
+                      '--save-predictions', '--camera-dir', str(root/'camera/3'),
+                      '--video-start', '2', '--video-end', '5'])
+                # RF hyperparameters and label policy change without preprocessing.
+                main([*train_cached, '--output', str(root/'retuned'), '--n-estimators', '50',
+                      '--max-depth', '6', '--class-weight', 'none', '--positive-fraction', '0.5',
+                      '--negative-fraction', '0.01'])
+                tuned = joblib.load(root/'retuned/random_forest.joblib')
+                self.assertEqual(tuned['estimator'].max_depth, 6)
+                self.assertIsNone(tuned['estimator'].class_weight)
+                self.assertEqual(tuned['metadata']['positive_fraction'], .5)
+                with self.assertRaisesRegex(ValueError, 'preprocessing config'):
+                    main([*train_cached, '--temporal-window', '1'])
+                with self.assertRaisesRegex(ValueError, 'preprocessing config'):
+                    main([*train_cached, '--radar-z', '-0.8'])
+            for name in ['features', 'targets']:
+                with np.load(root/'train/training_features.npz') as online, np.load(root/'cached_train/training_features.npz') as cached:
+                    np.testing.assert_array_equal(online[name], cached[name])
+            self.assertEqual(json.loads((root/'cached_test/metrics.json').read_text()), metrics)
+            self.assertEqual(json.loads((root/'cached_test/run.json').read_text())['video_frames'], 4)
+            for prediction in (root/'test/predictions/3').glob('*.npz'):
+                with np.load(prediction) as online, np.load(root/'cached_test/predictions/3'/prediction.name) as cached:
+                    for name in online.files:
+                        np.testing.assert_array_equal(online[name], cached[name])
+            # Incomplete/missing/corrupt caches must fail, never fall back to RPC.
+            cache_file = root/'cache_1/1/frame_1_00000.npz'
+            original = cache_file.read_bytes()
+            cache_file.unlink()
+            with self.assertRaisesRegex(FileNotFoundError, 'Missing cached frame'):
+                main(train_cached)
+            cache_file.write_bytes(b'invalid')
+            with self.assertRaisesRegex(ValueError, 'checksum mismatch'):
+                main(train_cached)
+            cache_file.write_bytes(original)
+            manifest['status'] = 'running'
+            (root/'cache_1/manifest.json').write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, 'incomplete'):
+                main(train_cached)
+            manifest['status'] = 'completed'
+            (root/'cache_1/manifest.json').write_text(json.dumps(manifest))
             with self.assertRaisesRegex(ValueError, 'overlaps'):
-                main(['evaluate', '--annotation', str(root/'1.pkl'), '--model', str(model_path), '--output', str(root/'bad'), *common])
+
+                main(['evaluate', '--annotation', str(root/'1.pkl'), '--model', str(model_path), '--output', str(root/'bad'), '--frame-fusion-root', str(root/'cache_1')])
             old = root/'old.joblib'
             joblib.dump({'estimator': bundle['estimator'], 'feature_names': bundle['feature_names']}, old)
             with self.assertRaisesRegex(ValueError, 'old tradition'):

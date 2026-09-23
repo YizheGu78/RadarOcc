@@ -1,4 +1,4 @@
-"""Run from repository root: python -m tradition_real {train,evaluate}."""
+"""Run from repository root: python -m tradition_real {preprocess,train,evaluate}."""
 import argparse
 from collections import Counter
 from dataclasses import replace
@@ -10,6 +10,7 @@ import re
 import joblib
 import numpy as np
 from .config import Config
+from .frame_fusion import CacheReader, CacheWriter, signature
 from .pipeline import Pipeline
 from .adapters.dataset import Dataset
 from .adapters.paths import _camera_map
@@ -20,23 +21,28 @@ from .evaluation.radarocc_metrics import RadarOccMetricAccumulator, radarocc_met
 
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('command', choices=['train', 'evaluate'])
+    p.add_argument('command', choices=['preprocess', 'train', 'evaluate'])
     p.add_argument('--annotation', required=True, help='Train split for train; test split for evaluate')
     p.add_argument('--radar-root', default='data/K-Radar_rpc')
     p.add_argument('--pose-root', default='data/K-RadarOcc')
-    p.add_argument('--calib-root', default='data/K-Radar_calib')
-    p.add_argument('--radar-z', type=float, default=-.7, help='Radar origin Z in LiDAR coordinates')
+    p.add_argument('--calib-root', help='Raw mode default: data/K-Radar_calib; cache mode: optional validation')
+    p.add_argument('--radar-z', type=float, help='Radar origin Z; defaults to cache/model value or -0.7')
     p.add_argument('--gt-root')
     p.add_argument('--gt-order', choices=['xyz', 'zyx'], default='xyz')
     p.add_argument('--repo-root', default='.')
-    p.add_argument('--output', required=True, help='Separate work_dirs/tradition_real output directory')
+    p.add_argument('--output', required=True, help='preprocess: data/frame_fusion/SPLIT; train/evaluate: work_dirs/tradition_real/RUN')
     p.add_argument('--model', help='Required for evaluate; train defaults to OUTPUT/random_forest.joblib')
-    p.add_argument('--config', help='JSON Config; evaluation defaults to the model configuration')
+    p.add_argument('--config', help='JSON Config overrides; defaults to model/cache configuration')
+    p.add_argument('--frame-fusion-root', help='Read cached mapping + 42D; no RPC/pose/DBSCAN needed')
     p.add_argument('--temporal-window', type=int, help='Optional config override; must match RF when evaluating')
     p.add_argument('--scenes', nargs='+', help='Limit data scenes; omit for complete split evaluation')
     p.add_argument('--max-frames', type=int, help='Smoke test only; omit for complete split')
     p.add_argument('--n-estimators', type=int, default=200)
     p.add_argument('--seed', type=int, default=13)
+    p.add_argument('--max-depth', type=int, default=18, help='0 means unlimited')
+    p.add_argument('--min-samples-leaf', type=int, default=2)
+    p.add_argument('--class-weight', choices=['balanced_subsample', 'balanced', 'none'], default='balanced_subsample')
+    p.add_argument('--n-jobs', type=int, default=-1)
     p.add_argument('--positive-fraction', type=float, default=.2)
     p.add_argument('--negative-fraction', type=float, default=.05)
     p.add_argument('--save-predictions', action='store_true')
@@ -60,12 +66,21 @@ def main(argv=None):
         raise ValueError('Invalid video range or frame rate')
     if args.command == 'evaluate' and not args.model:
         raise ValueError('Evaluation requires --model trained with tradition_real')
-    if args.command == 'train' and args.camera_dir:
+    if args.command != 'evaluate' and args.camera_dir:
         raise ValueError('Video is available for evaluate')
+    if args.command == 'preprocess' and args.frame_fusion_root:
+        raise ValueError('preprocess reads RPC inputs; --frame-fusion-root is for train/evaluate')
+    if args.n_estimators < 1 or args.max_depth < 0 or args.min_samples_leaf < 1 or args.n_jobs == 0:
+        raise ValueError('Invalid RF hyperparameters')
+    cache = CacheReader(args.frame_fusion_root) if args.frame_fusion_root else None
     bundle = joblib.load(args.model) if args.command == 'evaluate' else None
     if bundle is not None and (not isinstance(bundle, dict) or bundle.get('format') != FORMAT):
         raise ValueError('Old tradition RF is incompatible; train tradition_real first')
-    raw_config = json.loads(Path(args.config).read_text()) if args.config else (bundle['config'] if bundle else {})
+    raw_config = dict(bundle['config'] if bundle else (cache.manifest['config'] if cache else {}))
+    if args.config:
+        raw_config.update(json.loads(Path(args.config).read_text()))
+    if args.radar_z is None:
+        args.radar_z = cache.manifest['signature']['radar_z'] if cache else (bundle['metadata']['radar_z'] if bundle else -.7)
     for key in ('shape_xyz', 'min_xyz'):
         if key in raw_config:
             raw_config[key] = tuple(raw_config[key])
@@ -79,13 +94,28 @@ def main(argv=None):
     source_dirs = [Path(__file__).resolve().parent, Path(__file__).resolve().parents[1] / 'tradition']
     if any(output == s or s in output.parents for s in source_dirs):
         raise ValueError('Choose an output directory under work_dirs, outside source code')
+    if cache and (output == cache.root or cache.root in output.parents):
+        raise ValueError('Training/evaluation output must be outside the input cache')
     output.mkdir(parents=True, exist_ok=True)
-    dataset = Dataset(args.annotation, args.radar_root, args.pose_root, args.calib_root,
+    dataset = Dataset(args.annotation, args.radar_root, args.pose_root, args.calib_root or 'data/K-Radar_calib',
                       args.repo_root, args.gt_root, args.gt_order, args.radar_z,
-                      args.scenes, args.max_frames)
+                      args.scenes, args.max_frames, load_mapping=cache is None,
+                      load_gt=args.command != 'preprocess')
+    if cache:
+        cache.validate(cfg, args.radar_z, args.annotation, dataset.infos, args.calib_root)
     model = RandomForest.load(args.model, cfg) if bundle else None
     keys = [(str(i['scene_token']), str(i['lidar_token'])) for i in dataset.infos]
+    preprocessing_signature = signature(cfg, args.radar_z)
     if model:
+        if model.metadata.get('preprocessing_signature', preprocessing_signature) != preprocessing_signature:
+            raise ValueError('RF preprocessing source/signature differs from this cache/run; retrain RF')
+        # Same-scene calibration must agree whenever train/test subsets share a scene.
+        if cache:
+            for scene, calibration in cache.manifest['calibrations'].items():
+                saved = model.metadata.get('calibrations', {}).get(scene)
+                if saved and (saved.get('translation') != calibration['translation'] or
+                              ('sha256' in saved and saved['sha256'] != calibration['sha256'])):
+                    raise ValueError(f'RF/cache calibration mismatch: {scene}')
         overlap = set(keys) & {tuple(k) for k in model.metadata.get('training_frames', [])}
         if overlap or model.metadata.get('annotation_sha256') == annotation_sha256(args.annotation):
             raise ValueError('Evaluation overlaps RF training data; use the held-out test split')
@@ -98,7 +128,11 @@ def main(argv=None):
            'source_manifest_sha256': hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
            'selected_frames': len(keys), 'processed_frames': 0,
            'unknown_export': cfg.unknown_export, 'radar_z': args.radar_z,
-           'gt_order': args.gt_order, 'video_frames': 0}
+           'gt_order': args.gt_order, 'video_frames': 0,
+           'input_mode': 'frame_fusion' if cache else 'rpc',
+           'frame_fusion_root': str(cache.root) if cache else None,
+           'preprocessing_signature': preprocessing_signature}
+    cache_writer = CacheWriter(output, cfg, args.radar_z, args.annotation, dataset.infos) if args.command == 'preprocess' else None
     _json(output / 'pipeline_config.json', cfg.signature())
     _json(output / 'run.json', run)
     pipeline, accumulator = Pipeline(cfg), RadarOccMetricAccumulator()
@@ -113,13 +147,22 @@ def main(argv=None):
         video = Video(output / f'scene_{args.video_scene}.mp4', args.video_fps)
     try:
         for number, frame in enumerate(dataset, 1):
-            mapped = pipeline.map_frame(frame['rpc'], frame['pose'], frame['translation'], frame['scene'], frame['ordinal'])
-            record = {k: frame[k] for k in ['scene', 'token', 'ordinal', 'rpc_path', 'gt_path', 'pose_path', 'calibration']}
-            record.update({'rpc_points': len(frame['rpc']), 'occupied_voxels': int(mapped.occupied.sum()),
+            if cache:
+                mapped, cached_record = cache.load(frame)
+                record = dict(cached_record)
+                record['gt_path'] = frame['gt_path']
+            else:
+                mapped = pipeline.map_frame(frame['rpc'], frame['pose'], frame['translation'], frame['scene'], frame['ordinal'])
+                record = {k: frame[k] for k in ['scene', 'token', 'ordinal', 'rpc_path', 'pose_path', 'calibration']}
+                record['gt_path'] = frame.get('gt_path')
+                record['rpc_points'] = len(frame['rpc'])
+            record.update({'occupied_voxels': int(mapped.occupied.sum()),
                            'unknown_voxels': int((~(mapped.occupied | mapped.free)).sum()),
                            'proposals': len(mapped.candidates)})
             frame_records.append(record)
-            if args.command == 'train':
+            if args.command == 'preprocess':
+                cache_writer.add(mapped, frame)
+            elif args.command == 'train':
                 for candidate in mapped.candidates:
                     target, outcome = training_target(candidate, frame['gt'], args.positive_fraction, args.negative_fraction)
                     counts[outcome] += 1
@@ -149,17 +192,19 @@ def main(argv=None):
         if args.command == 'train':
             metadata = {**run, 'training_frames': keys, 'target_counts': dict(counts),
                         'positive_fraction': args.positive_fraction, 'negative_fraction': args.negative_fraction,
-                        'calibrations': {s: {'translation': t.tolist(), **c} for s, (t, c) in dataset.calibrations.items()}}
+                        'calibrations': cache.manifest['calibrations'] if cache else {s: {'translation': t.tolist(), **c} for s, (t, c) in dataset.calibrations.items()}}
             metadata['status'] = 'completed'
             model_path = Path(args.model) if args.model else output / 'random_forest.joblib'
             if any(model_path.resolve() == s or s in model_path.resolve().parents for s in source_dirs):
                 raise ValueError('Model output must be outside source code')
-            run['training'] = train(features, targets, model_path, cfg, metadata, args.n_estimators, args.seed)
+            run['training'] = train(features, targets, model_path, cfg, metadata, args.n_estimators, args.seed,
+                                    args.max_depth or None, args.min_samples_leaf,
+                                    None if args.class_weight == 'none' else args.class_weight, args.n_jobs)
             run['model'] = str(model_path.resolve())
             np.savez_compressed(output / 'training_features.npz', features=np.asarray(features),
                                 targets=np.asarray(targets), feature_names=FEATURE_NAMES)
             print(f"Saved model: {model_path}", flush=True)
-        else:
+        elif args.command == 'evaluate':
             metrics = radarocc_metric_dict(accumulator.results())
             metrics = {k: float(v) if np.isfinite(v) else None for k, v in metrics.items()}
             _json(output / 'metrics.json', metrics)
@@ -169,8 +214,13 @@ def main(argv=None):
                 writer.writerows(metrics.items())
             np.savez_compressed(output / 'confusions.npz', **{f'range_{r:g}': cm for r, cm in accumulator._confusions.items()})
             print(json.dumps(metrics, indent=2, allow_nan=False), flush=True)
+        if cache_writer:
+            cache_writer.finish()
+            print(f'Saved frame fusion cache: {output}', flush=True)
         run['status'] = 'completed'
     except Exception as error:
+        if cache_writer:
+            cache_writer.finish(error)
         run['status'], run['error'] = 'failed', str(error)
         raise
     finally:
