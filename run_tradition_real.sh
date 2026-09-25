@@ -76,7 +76,10 @@ case "$stage" in
     preprocess_split "$TEST_ANNOTATION" "$TEST_CACHE" "$@"
     ;;
   train) train_rf "$@" ;;
-  evaluate) evaluate_rf "$TEST_ANNOTATION" "$TEST_CACHE" "$TEST_OUTPUT" "$@" ;;
+  evaluate)
+    CAMERA_DIR="${CAMERA_DIR:-/home/user1/projects/RadarOcc/data/K-Radar-RGB/K-Radar/K-Radar-RGB/3/images_rb_switched}"
+    evaluate_rf "$TEST_ANNOTATION" "$TEST_CACHE" "$TEST_OUTPUT" "$@"
+    ;;
   validate) evaluate_rf "$VAL_ANNOTATION" "$VAL_CACHE" "$VAL_OUTPUT" "$@" ;;
   all)
     if (($#)); then
