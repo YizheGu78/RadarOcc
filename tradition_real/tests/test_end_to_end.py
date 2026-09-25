@@ -20,6 +20,12 @@ class EndToEndTests(unittest.TestCase):
             import cv2
         except ImportError:
             self.skipTest('OpenCV required for video integration test')
+        try:
+            import mayavi
+        except ImportError:
+            self.skipTest('Mayavi required for original 3D video integration test')
+        if shutil.which('ffmpeg') is None:
+            self.skipTest('ffmpeg required for original video integration test')
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             cfg = Config()
@@ -75,7 +81,7 @@ class EndToEndTests(unittest.TestCase):
             saved = np.load(root/'test/predictions/3/3_00000.npz')
             self.assertEqual(saved['labels_xyz'].shape, (128, 128, 14))
             self.assertGreater(saved['unknown_mask'].sum(), 0)
-            capture = cv2.VideoCapture(str(root/'test/scene_3.mp4'))
+            capture = cv2.VideoCapture(str(root/'test/scene_3_semantic_overlay.mp4'))
             self.assertEqual(int(capture.get(cv2.CAP_PROP_FRAME_COUNT)), 4)
             capture.release()
             # Preprocessing does not read GT or train RF.
