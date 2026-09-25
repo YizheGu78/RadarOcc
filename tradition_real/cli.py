@@ -51,6 +51,8 @@ def parser():
     p.add_argument('--video-start', type=int, default=0, help='Inclusive zero-based scene ordinal')
     p.add_argument('--video-end', type=int, help='Inclusive scene ordinal; omitted = last frame')
     p.add_argument('--video-fps', type=float, default=10.)
+    p.add_argument('--video-background-prediction-root', help='RadarOcc pred_c.npy root for the original blue visualization base')
+    p.add_argument('--keep-frames', action='store_true', help='Keep the original renderer intermediate PNG frames')
     return p
 
 
@@ -153,11 +155,15 @@ def main(argv=None):
     video = None
     cameras = {}
     if args.camera_dir:
-        from .visualization import Video
+        from tradition.visualization.radarocc_video import RadarOccStyleVideoRenderer
         cameras = _camera_map(dataset.infos_all, args.video_scene, Path(args.camera_dir))
         if not any(scene == args.video_scene for scene, _ in keys):
             raise ValueError('Video scene is not present in the selected evaluation frames')
-        video = Video(output / f'scene_{args.video_scene}.mp4', args.video_fps)
+        video = RadarOccStyleVideoRenderer(
+            output, args.video_scene, fps=args.video_fps,
+            no_rotate=True, keep_frames=args.keep_frames,
+            background_prediction_root=args.video_background_prediction_root,
+        )
     try:
         for number, frame in enumerate(dataset, 1):
             if cache:
@@ -196,12 +202,15 @@ def main(argv=None):
                         observed_mask=mapped.observed, unknown_mask=native == 255,
                         bev_probability=mapped.bev_probability.astype(np.float32))
                 if video and frame['scene'] == args.video_scene and frame['ordinal'] >= args.video_start and (args.video_end is None or frame['ordinal'] <= args.video_end):
-                    video.add(native, frame['gt'], cameras[frame['token']], frame['token'])
+                    video.add_frame(dense, frame['gt'], cameras[frame['token']], frame['token'])
             run['processed_frames'] = number
             print(f"[{number}/{len(keys)}] scene={frame['scene']} token={frame['token']} "
                   f"occupied={record['occupied_voxels']} proposals={record['proposals']}", flush=True)
-        if video and video.frames == 0:
+        if video and video.frame_count == 0:
             raise ValueError('Requested video range has no frames')
+        if video:
+            video.finish()
+            run['video_frames'] = video.frame_count
         if args.command == 'train':
             metadata = {**run, 'training_frames': keys, 'target_counts': dict(counts),
                         'positive_fraction': args.positive_fraction, 'negative_fraction': args.negative_fraction,
@@ -238,8 +247,7 @@ def main(argv=None):
         raise
     finally:
         if video:
-            video.close()
-            run['video_frames'] = video.frames
+            run['video_frames'] = video.frame_count
         _json(output / 'frames.json', frame_records)
         _json(output / 'run.json', run)
 
