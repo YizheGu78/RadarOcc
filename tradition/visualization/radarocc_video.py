@@ -149,8 +149,8 @@ def _render_native_bev(
         dtype=np.uint8,
     )
     bev = _native_bev_categories(native_prediction_xyz, ground_truth_xyz)
-    # X is the image vertical axis: far range at the top, ego at the bottom.
-    image = Image.fromarray(colors[bev[::-1]], mode="RGB")
+    # X: far range at the top, ego at the bottom. Reverse Y as well so\n    # image left/right matches the camera and the existing 3D panel.
+    image = Image.fromarray(colors[bev[::-1, ::-1]], mode="RGB")
     image = image.resize((panel_size, panel_size), Image.Resampling.NEAREST)
     draw = ImageDraw.Draw(image)
     draw.rectangle((0, 0, panel_size - 1, panel_size - 1), outline=(40, 40, 40), width=2)
