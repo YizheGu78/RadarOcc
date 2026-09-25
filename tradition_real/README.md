@@ -253,14 +253,16 @@ GT 255 不参与比例；Free 为主的提案不会自动作为 BG。
 ## 完整测试集 + 场景 3 全帧视频
 
 ```bash
-CAMERA_DIR=data/K-Radar/3/cam-front bash run_tradition_real.sh evaluate
+bash run_tradition_real.sh evaluate
 
 # 只限制视频为 80–200 帧，指标仍覆盖完整 test_official
-CAMERA_DIR=data/K-Radar/3/cam-front VIDEO_START=80 VIDEO_END=200 \
+VIDEO_START=80 VIDEO_END=200 \
   TEST_OUTPUT=work_dirs/tradition_real/octomap_rf_200_test_clip bash run_tradition_real.sh evaluate
 ```
 
-把 `CAMERA_DIR` 改为本机真实场景 3 RGB 文件夹。不设置它就只评估和保存预测。
+`evaluate` 默认使用场景 3 的 RGB 目录 `/home/user1/projects/RadarOcc/data/K-Radar-RGB/K-Radar/K-Radar-RGB/3/images_rb_switched`，可通过 `CAMERA_DIR` 覆盖；`validate` 只有明确设置 `CAMERA_DIR` 才会生成视频。
+旧视频渲染器逐帧用 Mayavi 绘制 3D voxel，并用 ffmpeg 生成 MP4 和 GIF。运行视频前需要 `radarocc-vis` 中的 Mayavi、Pillow，以及 `ffmpeg` 和图形显示环境（远程无显示时用 `xvfb-run`）。
+默认蓝色背景来自 `work_dirs/radarocc_small_fp32_idfix_timealign_v2/visualization_epoch4_test` 中的 RadarOcc Epoch4 `pred_c.npy`；可设置 `VIDEO_BACKGROUND_PREDICTION_ROOT` 覆盖。它只影响视频，不影响预测与 IoU。`KEEP_FRAMES=1` 保留中间 PNG。
 默认场景 3 全帧视频。不要加 `--scenes 3` 来做完整测试：`--video-scene 3`
 只控制视频。视频范围两端包含，指从 0 开始的场景内序号，不是文件号或秒。
 `SAVE_PREDICTIONS=0` 可关闭预测 NPZ；默认保留。
@@ -272,7 +274,7 @@ CAMERA_DIR=data/K-Radar/3/cam-front VIDEO_START=80 VIDEO_END=200 \
 | `metrics.json` / `metrics.csv` | 与旧评估相同的 15 个 `SC*` / `SSC*` 指标 |
 | `confusions.npz` | 51.2 / 25.6 / 12.8 m 全数据混淆矩阵 |
 | `predictions/SCENE/TOKEN.npz` | 三维标签、原生标签、占据概率、observed/unknown 掩码、BEV 概率 |
-| `scene_3.mp4` | Prediction / GT / RGB，Free 蓝、BG 灰、FG 红、Unknown 深灰 |
+| `scene_3_semantic_overlay.mp4` / `.gif` | 原始 3D Prediction + GT overlay / Camera：RadarOcc 蓝色背景、传统预测前景红、GT 前景黄、前景重叠橙 |
 | `frames.json` | 每帧真实 RPC / GT / pose 路径、校准、占据数和提案数 |
 | `run.json` | 配置、选中/处理帧数、成功或失败状态、数据哈希 |
 
@@ -356,7 +358,7 @@ python -m tradition_real.octomap.benchmark --points 1000 --frames 6
 - **端到端**：生成合成 RPC/GT/RGB，执行 Python 在线与 C++ 缓存路径；删除 RPC/pose/标定，
   禁止调用 OctoMap/map_frame/DBSCAN 后仍完成缓存训练和评估。对比特征、标签、全部预测、
   指标和 4 帧视频；检查 RF 调参、缺失/损坏/未完成缓存、配置/标定冲突及数据泄漏拒绝。
-  视频集成测试需要 OpenCV；历史 Autoware/GM2019 测试只验证保留的旧模块。
+  视频集成测试需要 OpenCV、Mayavi 和 ffmpeg；历史 Autoware/GM2019 测试只验证保留的旧模块。
 
 这些验证不代替完整 K-Radar 实验。未在真实全量数据上测量 IoU 或耗时。
 benchmark 是合成数据的本机测量，包括网格导出、DBSCAN 和 42D，但不包含读盘、压缩、GT 或 RF。
