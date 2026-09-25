@@ -202,7 +202,10 @@ def main(argv=None):
                         observed_mask=mapped.observed, unknown_mask=native == 255,
                         bev_probability=mapped.bev_probability.astype(np.float32))
                 if video and frame['scene'] == args.video_scene and frame['ordinal'] >= args.video_start and (args.video_end is None or frame['ordinal'] <= args.video_end):
-                    video.add_frame(dense, native, frame['gt'], cameras[frame['token']], frame['token'])
+                    octomap_native = np.full(cfg.shape_xyz, 255, np.uint8)
+                    octomap_native[mapped.free] = 0
+                    octomap_native[mapped.occupied] = 1
+                    video.add_frame(dense, octomap_native, frame['gt'], cameras[frame['token']], frame['token'])
             run['processed_frames'] = number
             print(f"[{number}/{len(keys)}] scene={frame['scene']} token={frame['token']} "
                   f"occupied={record['occupied_voxels']} proposals={record['proposals']}", flush=True)
