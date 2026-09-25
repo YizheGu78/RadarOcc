@@ -58,6 +58,10 @@ evaluate_rf() {
     video_args+=(--camera-dir "$CAMERA_DIR" --video-scene "${VIDEO_SCENE:-3}" --video-fps "${VIDEO_FPS:-10}")
     if [[ -n "${VIDEO_START:-}" ]]; then video_args+=(--video-start "$VIDEO_START"); fi
     if [[ -n "${VIDEO_END:-}" ]]; then video_args+=(--video-end "$VIDEO_END"); fi
+    if [[ -n "${VIDEO_BACKGROUND_PREDICTION_ROOT:-}" ]]; then
+      video_args+=(--video-background-prediction-root "$VIDEO_BACKGROUND_PREDICTION_ROOT")
+    fi
+    if [[ "${KEEP_FRAMES:-0}" == 1 ]]; then video_args+=(--keep-frames); fi
   fi
   if [[ "${SAVE_PREDICTIONS:-1}" == 1 ]]; then prediction_args+=(--save-predictions); fi
   "$PYTHON_BIN" -m tradition_real evaluate \
@@ -78,6 +82,7 @@ case "$stage" in
   train) train_rf "$@" ;;
   evaluate)
     CAMERA_DIR="${CAMERA_DIR:-/home/user1/projects/RadarOcc/data/K-Radar-RGB/K-Radar/K-Radar-RGB/3/images_rb_switched}"
+    VIDEO_BACKGROUND_PREDICTION_ROOT="${VIDEO_BACKGROUND_PREDICTION_ROOT:-work_dirs/radarocc_small_fp32_idfix_timealign_v2/visualization_epoch4_test}"
     evaluate_rf "$TEST_ANNOTATION" "$TEST_CACHE" "$TEST_OUTPUT" "$@"
     ;;
   validate) evaluate_rf "$VAL_ANNOTATION" "$VAL_CACHE" "$VAL_OUTPUT" "$@" ;;
@@ -89,6 +94,8 @@ case "$stage" in
     preprocess_split "$TRAIN_ANNOTATION" "$TRAIN_CACHE"
     preprocess_split "$TEST_ANNOTATION" "$TEST_CACHE"
     train_rf
+    CAMERA_DIR="${CAMERA_DIR:-/home/user1/projects/RadarOcc/data/K-Radar-RGB/K-Radar/K-Radar-RGB/3/images_rb_switched}"
+    VIDEO_BACKGROUND_PREDICTION_ROOT="${VIDEO_BACKGROUND_PREDICTION_ROOT:-work_dirs/radarocc_small_fp32_idfix_timealign_v2/visualization_epoch4_test}"
     evaluate_rf "$TEST_ANNOTATION" "$TEST_CACHE" "$TEST_OUTPUT"
     ;;
   help|-h|--help)
@@ -104,7 +111,7 @@ First run:  python -m pip install pybind11
             bash run_tradition_real.sh evaluate
 RF tuning:  N_ESTIMATORS=500 bash run_tradition_real.sh train
             N_ESTIMATORS=500 bash run_tradition_real.sh evaluate
-Scene 3:    CAMERA_DIR=/path/to/scene3/rgb bash run_tradition_real.sh evaluate
+Scene 3:    bash run_tradition_real.sh evaluate  # original Mayavi overlay + MP4/GIF
 Validation: VAL_ANNOTATION=/path/to/val.pkl bash run_tradition_real.sh preprocess-val
             VAL_ANNOTATION=/path/to/val.pkl bash run_tradition_real.sh validate
 
@@ -114,6 +121,7 @@ Config: CONFIG TEMPORAL_WINDOW RADAR_Z GT_ROOT GT_ORDER
 RF: N_ESTIMATORS MAX_DEPTH MIN_SAMPLES_LEAF CLASS_WEIGHT N_JOBS SEED
     POSITIVE_FRACTION NEGATIVE_FRACTION
 Video: CAMERA_DIR VIDEO_SCENE VIDEO_START VIDEO_END VIDEO_FPS
+       VIDEO_BACKGROUND_PREDICTION_ROOT KEEP_FRAMES
 Other: PYTHON_BIN SAVE_PREDICTIONS (default 1)
 Backend: TRADITION_REAL_OCTOMAP_BACKEND=cpp (default) or python (reference)
 Build: CXX (default c++); compile once per Python environment, after source updates.
