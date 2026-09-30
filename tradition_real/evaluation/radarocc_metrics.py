@@ -8,12 +8,32 @@ import numpy as np
 
 GRID_SHAPE_XYZ = (128, 128, 14)
 IGNORE_LABEL = 255
+VOXEL_SIZE_M = 0.4
+GRID_MIN_Y_M = -25.6
+RADAROCC_COMMON_HFOV_DEG = 107.0
 RADAROCC_RANGES_M = (51.2, 25.6, 12.8)
 RADAROCC_REGION_SLICES_XYZ = {
     51.2: (slice(0, 128), slice(0, 128), slice(0, 14)),
     25.6: (slice(0, 64), slice(32, 96), slice(0, 14)),
     12.8: (slice(0, 32), slice(48, 80), slice(0, 14)),
 }
+
+
+def _common_hfov_mask_xyz() -> np.ndarray:
+    """RadarOcc common horizontal-FoV evaluation mask on the XYZ voxel grid."""
+    x_centers = (np.arange(GRID_SHAPE_XYZ[0], dtype=np.float64) + 0.5) * VOXEL_SIZE_M
+    y_centers = (
+        GRID_MIN_Y_M
+        + (np.arange(GRID_SHAPE_XYZ[1], dtype=np.float64) + 0.5) * VOXEL_SIZE_M
+    )
+    half_angle_rad = np.deg2rad(RADAROCC_COMMON_HFOV_DEG / 2.0)
+    mask_xy = np.abs(y_centers[None, :]) <= (
+        x_centers[:, None] * np.tan(half_angle_rad)
+    )
+    return np.broadcast_to(mask_xy[:, :, None], GRID_SHAPE_XYZ)
+
+
+RADAROCC_COMMON_HFOV_MASK_XYZ = _common_hfov_mask_xyz()
 
 
 def _simplify_labels(
@@ -120,6 +140,7 @@ class RadarOccMetricAccumulator:
     Labels follow the current RadarOcc K-Radar setup:
       0 = free, 1 = background occupied, 2 = foreground occupied.
 
+    Evaluation is restricted to RadarOcc's 107-degree common horizontal FoV.
     SC IoU collapses classes 1/2 into occupied. SSC mIoU is the mean of
     Background IoU and Foreground IoU, matching the table convention used in
     the RadarOcc paper/reproduction results.
@@ -164,8 +185,12 @@ class RadarOccMetricAccumulator:
 
         for range_m in self.ranges_m:
             region = RADAROCC_REGION_SLICES_XYZ[float(range_m)]
+            pred_region = pred[region]
+            gt_region = gt[region]
+            fov_region = RADAROCC_COMMON_HFOV_MASK_XYZ[region]
             self._confusions[float(range_m)] += self._confusion(
-                pred[region], gt[region]
+                pred_region[fov_region],
+                gt_region[fov_region],
             )
         self.frames += 1
 
