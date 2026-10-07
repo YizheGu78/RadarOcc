@@ -104,12 +104,17 @@ class LoadSparseRadar(object):
 
     def __call__(self, results):
         sparse_radar_path = results['curr']['sparse_radar_path']
-        data = np.load(sparse_radar_path)
-        # results['power'] = data['power_val']
-        # results['range_ind'] = data['range_ind']
-        # results['elevation_ind'] = data['elevation_ind']
-        # results['azimuth_ind'] = data['azimuth_ind']
-        results['sparse_radar'] = data
+
+        # Materialize the NPZ into a plain dict before returning it.
+        # np.lib.npyio.NpzFile keeps an open zip handle and exposes dict_keys;
+        # that object is not reliably picklable under PyTorch's spawn-based
+        # DataLoader workers.  The numeric arrays are unchanged.
+        with np.load(sparse_radar_path, allow_pickle=False) as data:
+            results['sparse_radar'] = {
+                key: data[key].copy()
+                for key in data.files
+            }
+
         return results
 
 
