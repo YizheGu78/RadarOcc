@@ -23,7 +23,10 @@ if [ ! -f "$CHECKPOINT" ]; then
   exit 1
 fi
 
+# Conda deactivate hooks may reference intentionally unset variables.
+set +u
 source "$ROOT/use_radarocc5060.sh"
+set -u
 export PYTHONPATH="$ROOT:${PYTHONPATH:-}"
 
 OLD_CONFIG="projects/configs/baselines/RadarOcc_Small_5060_true_fp32.py"
@@ -54,6 +57,10 @@ echo
 echo "======================================================================"
 echo "2/3 Original RadarOcc evaluation"
 echo "======================================================================"
+# workers_per_gpu=0 is deliberate for regression:
+# the legacy dataset/pipeline contains an unpicklable dict_keys object under
+# the current Python/PyTorch spawn path. Zero workers keeps inference
+# semantics unchanged and avoids multiprocessing serialization entirely.
 PORT="${PORT_OLD:-29514}" \
 bash tools/dist_test.sh \
   "$OLD_CONFIG" \
@@ -61,6 +68,7 @@ bash tools/dist_test.sh \
   1 \
   --cfg-options \
   "data.test.ann_file=$OLD_PKL" \
+  "data.workers_per_gpu=0" \
   2>&1 | tee "$OUT_DIR/original.log"
 
 echo
@@ -74,6 +82,7 @@ bash tools/dist_test.sh \
   1 \
   --cfg-options \
   "data.test.ann_file=$NEW_PKL" \
+  "data.workers_per_gpu=0" \
   2>&1 | tee "$OUT_DIR/temporal_t4_current_only.log"
 
 echo
