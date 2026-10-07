@@ -32,9 +32,17 @@ NEW_CONFIG="projects/configs/baselines/RadarOcc_Small_5060_true_fp32_temporal_t4
 OLD_PKL="data/annotations/kradar_dict_${SPLIT}_official_doppler8.pkl"
 NEW_PKL="data/annotations/kradar_dict_${SPLIT}_official_temporal_doppler8.pkl"
 
-OUT_DIR="outputs/temporal_t4_current_only_regression/${SPLIT}"
+CKPT_PARENT="$(basename "$(dirname "$CHECKPOINT")")"
+CKPT_FILE="$(basename "$CHECKPOINT" .pth)"
+RUN_TAG="${CKPT_PARENT}_${CKPT_FILE}"
+
+OUT_DIR="outputs/temporal_t4_current_only_regression/${RUN_TAG}/${SPLIT}"
 mkdir -p "$OUT_DIR"
 
+echo "======================================================================"
+echo "Checkpoint: $CHECKPOINT"
+echo "Run tag   : $RUN_TAG"
+echo "Split     : $SPLIT"
 echo "======================================================================"
 echo "1/3 Validate temporal PKL and T=4 sequence bookkeeping"
 echo "======================================================================"
