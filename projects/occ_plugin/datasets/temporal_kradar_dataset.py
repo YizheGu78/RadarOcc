@@ -58,12 +58,9 @@ class TemporalKRadarDataset(NuscOCCDataset):
             self.sequence_frame_offsets,
         ) = self._build_sequence_indices()
 
-        if not self.current_only:
-            raise NotImplementedError(
-                "TemporalKRadarDataset currently implements the "
-                "current-only regression stage only. Do not enable real "
-                "multi-frame loading until the regression check passes."
-            )
+        # current_only=True preserves the already validated bookkeeping-only
+        # regression path.  current_only=False enables real T-frame radar
+        # loading while keeping supervision on the current frame only.
 
     @staticmethod
     def _scene_id(info):
@@ -313,6 +310,120 @@ class TemporalKRadarDataset(NuscOCCDataset):
                 ),
             ),
         }
+
+    @staticmethod
+    def _load_sparse_radar_npz(path):
+        """Load one sparse-radar NPZ as a worker-safe plain dict."""
+        with np.load(path, allow_pickle=False) as data:
+            return {
+                key: data[key].copy()
+                for key in data.files
+            }
+
+    def _attach_temporal_payload(self, example, index):
+        """
+        Attach real T-frame radar inputs after the original current-frame
+        pipeline has completed.
+
+        Historical GT is intentionally never loaded.  The final slot is the
+        current frame and reuses the already loaded current sparse_radar to
+        avoid one duplicate disk read.
+        """
+        temporal_info = self.get_temporal_info(index)
+        sequence = self.sequence_indices[index]
+
+        temporal_sparse_radar = []
+
+        for slot, dataset_idx in enumerate(sequence):
+            if (
+                slot == self.frame_nums - 1
+                and "sparse_radar" in example
+                and isinstance(example["sparse_radar"], dict)
+            ):
+                frame_radar = example["sparse_radar"]
+            else:
+                info = self.data_infos[dataset_idx]
+                radar_path = info.get(
+                    "sparse_radar_path",
+                    info.get("radar_path", None),
+                )
+                if not radar_path:
+                    raise KeyError(
+                        f"Missing sparse radar path for temporal "
+                        f"dataset index {dataset_idx}"
+                    )
+                frame_radar = self._load_sparse_radar_npz(
+                    radar_path
+                )
+
+            temporal_sparse_radar.append(frame_radar)
+
+        timestamps = np.asarray(
+            [
+                np.nan if value is None else float(value)
+                for value in temporal_info["timestamps"]
+            ],
+            dtype=np.float64,
+        )
+
+        # These raw numpy/list structures are collated by MMCV/PyTorch into
+        # tensors at DataLoader time.  For B=1 this becomes a list of T radar
+        # dictionaries, each carrying a leading batch dimension.
+        example["temporal_sparse_radar"] = temporal_sparse_radar
+        example["temporal_indices"] = np.asarray(
+            temporal_info["sequence_indices"],
+            dtype=np.int64,
+        )
+        example["frame_offsets"] = temporal_info[
+            "frame_offsets"
+        ].astype(np.int64)
+        example["temporal_valid_mask"] = temporal_info[
+            "valid_mask"
+        ].astype(np.bool_)
+        example["temporal_ego_poses"] = temporal_info[
+            "ego_poses"
+        ].astype(np.float64)
+        example["temporal_timestamps"] = timestamps
+
+        return example
+
+    def prepare_train_data(self, index):
+        input_dict = self.get_data_info(index)
+        if input_dict is None:
+            return None
+
+        self.pre_pipeline(input_dict)
+        example = self.pipeline(input_dict)
+
+        if (
+            example is not None
+            and not self.current_only
+        ):
+            example = self._attach_temporal_payload(
+                example,
+                index,
+            )
+
+        return example
+
+    def prepare_test_data(self, index):
+        input_dict = self.get_data_info(index)
+        if input_dict is None:
+            return None
+
+        self.pre_pipeline(input_dict)
+        example = self.pipeline(input_dict)
+
+        if (
+            example is not None
+            and not self.current_only
+        ):
+            example = self._attach_temporal_payload(
+                example,
+                index,
+            )
+
+        return example
 
     def get_data_info(self, index):
         """
