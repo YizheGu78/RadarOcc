@@ -10,6 +10,9 @@ from mmcv.cnn.bricks.transformer import build_positional_encoding
 from mmdet.models.utils import build_transformer
 import torch.nn as nn
 
+from temporal import build_temporal_plugin
+from temporal.adapters import P1TopKAdapter
+
 
 import numpy as np
 import time
@@ -32,6 +35,7 @@ class RadarOcc_small(BEVDepth):
             occ_encoder_neck=None,
             loss_norm=False,
             embed_dims=192,
+            temporal_cfg=None,
 
             **kwargs):
         super().__init__(**kwargs)
@@ -54,6 +58,18 @@ class RadarOcc_small(BEVDepth):
         self.occ_fuser = builder.build_fusion_layer(occ_fuser) if occ_fuser is not None else None
         
         self.azimuth_indices, self.elevation_indices, self.range_indices = self.init_param_for_inter()
+
+        # DG-STF is optional.  Baseline configs leave temporal_cfg=None and
+        # therefore execute the exact original single-frame path.
+        self.temporal_plugin = build_temporal_plugin(
+            temporal_cfg
+        )
+        self.temporal_adapter = (
+            P1TopKAdapter()
+            if self.temporal_plugin is not None
+            else None
+        )
+        self.temporal_debug = None
 
     # def rdr_cube_encoder(self,rdr_cube):
     #     rdr_cube.shape
@@ -214,58 +230,62 @@ class RadarOcc_small(BEVDepth):
         
         return x, depth, img_feats
 
-    def extract_pts_feat(self, rdr_cube):
-        if self.record_time:
-            torch.cuda.synchronize()
-            t0 = time.time()
-        # B, doppler_dim, range_dim, azimuth_dim, elevation_dim = rdr_cube.size() 
-        
+    def _prepare_p1_frame(self, rdr_cube):
+        """
+        Run the original RadarOcc per-range Top-K selection for one frame.
+
+        This is a literal refactor of the previous first half of
+        extract_pts_feat.  Keeping the ordering/indexing unchanged is the core
+        identity-regression guarantee.
+        """
         power_values = rdr_cube['power_val']
-        range_indices, elevation_indices, azimuth_indices = rdr_cube['range_ind'],rdr_cube['elevation_ind'],rdr_cube['azimuth_ind']
-        
-        dtype = torch.float32
-        # rdr_cube = rdr_cube/1e2
-        # rdr_cube = torch.mean(rdr_cube, dim=1)
-        # start = torch.cuda.Event(enable_timing=True)
-        # end = torch.cuda.Event(enable_timing=True)
+        range_indices = rdr_cube['range_ind']
+        elevation_indices = rdr_cube['elevation_ind']
+        azimuth_indices = rdr_cube['azimuth_ind']
+
         batch_size = B = 1
         list_sparse_rdr_cubes = []
         list_sp_indices = []
+
         for batch_idx in range(B):
             original_k = 250
             n_ranges = 175
-            power_val = power_values[batch_idx][:,:original_k*n_ranges]
-            elevation_ind = elevation_indices[batch_idx][:original_k*n_ranges]
-            azimuth_ind = azimuth_indices[batch_idx][:original_k*n_ranges]
-            range_ind = range_indices[batch_idx][:original_k*n_ranges]
 
-            # Change the order to azimuth, range, elevation
-            elevation_ind = elevation_ind
-            azimuth_ind = azimuth_ind
-            range_ind = range_ind
-            
-            # Step 4: Filter the data to keep only the top k
+            power_val = power_values[
+                batch_idx
+            ][:, :original_k * n_ranges]
+            elevation_ind = elevation_indices[
+                batch_idx
+            ][:original_k * n_ranges]
+            azimuth_ind = azimuth_indices[
+                batch_idx
+            ][:original_k * n_ranges]
+            range_ind = range_indices[
+                batch_idx
+            ][:original_k * n_ranges]
+
             k = 250
 
+            # Channel 2 remains the ranking channel used by the validated
+            # idfix/timealign baseline.
+            power_val = power_val[2]
+            reshaped_power_vals = power_val.view(
+                n_ranges,
+                original_k,
+            )
 
-            # Reshape power values to separate each set of 400
-            # power_val = torch.max(power_val, dim=0).values # Doppler max pooling 
-            power_val= power_val[2]
-            reshaped_power_vals = power_val.view(n_ranges, original_k) 
-
-            # Sort and take top k values from each range bin
-            values, indices = torch.sort(reshaped_power_vals, dim=1, descending=True)
+            values, indices = torch.sort(
+                reshaped_power_vals,
+                dim=1,
+                descending=True,
+            )
             top_k_values = values[:, :k]
-
-            # Get the corresponding indices for top k values
             top_k_indices = indices[:, :k]
 
-            # top_k_indices 是每个 range 内的局部索引。
-            # 加上每个 range 的偏移，得到 flattened power_val 的全局索引。
             range_offsets = (
                 torch.arange(
                     n_ranges,
-                    device=top_k_indices.device
+                    device=top_k_indices.device,
                 ).unsqueeze(1) * original_k
             )
             flat_top_k_indices = (
@@ -274,45 +294,195 @@ class RadarOcc_small(BEVDepth):
 
             top_k_range_inds = torch.arange(
                 n_ranges,
-                device=top_k_indices.device
+                device=top_k_indices.device,
             ).unsqueeze(1).repeat(1, k)
-            top_k_elevation_inds = elevation_ind.view(n_ranges, original_k).gather(1, top_k_indices)
-            top_k_azimuth_inds = azimuth_ind.view(n_ranges, original_k).gather(1, top_k_indices)
 
-            # Flattening the results if necessary
+            top_k_elevation_inds = elevation_ind.view(
+                n_ranges,
+                original_k,
+            ).gather(1, top_k_indices)
+
+            top_k_azimuth_inds = azimuth_ind.view(
+                n_ranges,
+                original_k,
+            ).gather(1, top_k_indices)
+
             final_range_inds = top_k_range_inds.flatten()
-            final_elevation_inds = top_k_elevation_inds.flatten()
-            final_azimuth_inds = top_k_azimuth_inds.flatten()
-            #37,107,256
-            power_val = rdr_cube['power_val'][batch_idx]
-            # 原来的id混用
-            # sparse_rdr_cube = torch.swapaxes(
-            #     power_val, 0, 1
-            # )[top_k_indices.flatten(), :]
+            final_elevation_inds = (
+                top_k_elevation_inds.flatten()
+            )
+            final_azimuth_inds = (
+                top_k_azimuth_inds.flatten()
+            )
 
-            sparse_rdr_cube = torch.swapaxes( 
-                power_val, 0, 1
+            # IMPORTANT: gather all P1 descriptor channels with the corrected
+            # flattened global IDs.  Do not reintroduce the historical idmix
+            # indexing bug.
+            power_val = rdr_cube['power_val'][batch_idx]
+            sparse_rdr_cube = torch.swapaxes(
+                power_val,
+                0,
+                1,
             )[flat_top_k_indices, :]
 
-
-            list_sparse_rdr_cubes.append(sparse_rdr_cube)
-
+            list_sparse_rdr_cubes.append(
+                sparse_rdr_cube
+            )
 
             N, C = sparse_rdr_cube.shape
-  
-            batch_indices = torch.full((N, 1), batch_idx, dtype=torch.long).cuda()
-            sp_indices = torch.cat((batch_indices, final_elevation_inds.unsqueeze(-1),final_range_inds.unsqueeze(-1),final_azimuth_inds.unsqueeze(-1)), dim=-1)
+            batch_indices = torch.full(
+                (N, 1),
+                batch_idx,
+                dtype=torch.long,
+                device=sparse_rdr_cube.device,
+            )
+
+            sp_indices = torch.cat(
+                (
+                    batch_indices,
+                    final_elevation_inds.unsqueeze(-1),
+                    final_range_inds.unsqueeze(-1),
+                    final_azimuth_inds.unsqueeze(-1),
+                ),
+                dim=-1,
+            )
+
             list_sp_indices.append(sp_indices)
 
-        sparse_rdr_cube_all_batches = torch.cat(list_sparse_rdr_cubes, dim=0).float()
-        sp_indices_all_batches = torch.cat(list_sp_indices, dim=0).cuda()
-        with torch.autocast(device_type="cuda", enabled=False):
-            pts_enc_feats = self.pts_middle_encoder(sparse_rdr_cube_all_batches, sp_indices_all_batches, batch_size)
+        sparse_rdr_cube_all_batches = torch.cat(
+            list_sparse_rdr_cubes,
+            dim=0,
+        ).float()
+
+        sp_indices_all_batches = torch.cat(
+            list_sp_indices,
+            dim=0,
+        ).to(
+            device=sparse_rdr_cube_all_batches.device
+        )
+
+        return (
+            sparse_rdr_cube_all_batches,
+            sp_indices_all_batches,
+            batch_size,
+        )
+
+    def extract_pts_feat(
+        self,
+        rdr_cube,
+        temporal_rdr_cubes=None,
+        temporal_ego_poses=None,
+        frame_offsets=None,
+        temporal_valid_mask=None,
+        temporal_timestamps=None,
+    ):
+        if self.record_time:
+            torch.cuda.synchronize()
+            t0 = time.time()
+
+        dtype = torch.float32
+
+        if self.temporal_plugin is not None:
+            if temporal_rdr_cubes is None:
+                raise KeyError(
+                    "temporal_cfg is enabled but temporal_sparse_radar "
+                    "was not provided by TemporalKRadarDataset."
+                )
+
+            frame_p1_features = []
+            frame_p1_indices = []
+            batch_size = None
+
+            for temporal_frame in temporal_rdr_cubes:
+                (
+                    frame_features,
+                    frame_indices,
+                    frame_batch_size,
+                ) = self._prepare_p1_frame(
+                    temporal_frame
+                )
+
+                if batch_size is None:
+                    batch_size = frame_batch_size
+                elif batch_size != frame_batch_size:
+                    raise ValueError(
+                        "Temporal frames disagree on batch size."
+                    )
+
+                frame_p1_features.append(
+                    frame_features
+                )
+                frame_p1_indices.append(
+                    frame_indices
+                )
+
+            temporal_inputs = self.temporal_adapter(
+                frame_p1_features,
+                frame_p1_indices,
+            )
+
+            temporal_output, temporal_debug = (
+                self.temporal_plugin(
+                    features=temporal_inputs[
+                        "features"
+                    ],
+                    coords=temporal_inputs[
+                        "coords"
+                    ],
+                    poses=temporal_ego_poses,
+                    frame_offsets=frame_offsets,
+                    doppler=temporal_inputs[
+                        "doppler"
+                    ],
+                    valid_mask=temporal_valid_mask,
+                    timestamps=temporal_timestamps,
+                )
+            )
+
+            # P1 sparse encoder still anchors on the current frame's sparse
+            # indices.  Future fusion will produce features on these current
+            # anchors as well.
+            if temporal_output.ndim != 3:
+                raise ValueError(
+                    "P1 TemporalPlugin must return [B,N,C], got "
+                    f"{tuple(temporal_output.shape)}"
+                )
+            if temporal_output.shape[0] != 1:
+                raise ValueError(
+                    "RadarOcc_small temporal identity currently requires B=1."
+                )
+
+            sparse_rdr_cube_all_batches = (
+                temporal_output[0].float()
+            )
+            sp_indices_all_batches = (
+                frame_p1_indices[-1]
+            )
+            self.temporal_debug = temporal_debug
+
+        else:
+            (
+                sparse_rdr_cube_all_batches,
+                sp_indices_all_batches,
+                batch_size,
+            ) = self._prepare_p1_frame(rdr_cube)
+
+        with torch.autocast(
+            device_type="cuda",
+            enabled=False,
+        ):
+            pts_enc_feats = self.pts_middle_encoder(
+                sparse_rdr_cube_all_batches,
+                sp_indices_all_batches,
+                batch_size,
+            )
 
         if self.record_time:
             torch.cuda.synchronize()
             t1 = time.time()
-            self.time_stats['sparse_encoder'].append(t1 - t0)
+            self.time_stats[
+                'sparse_encoder'
+            ].append(t1 - t0)
 
         if self.record_time:
             torch.cuda.synchronize()
@@ -402,13 +572,28 @@ class RadarOcc_small(BEVDepth):
 
         return voxel_feat.float(), pts_feats
 
-    def extract_feat(self, rdr_cube):
-        """Extract features from images and points."""
+    def extract_feat(
+        self,
+        rdr_cube,
+        temporal_rdr_cubes=None,
+        temporal_ego_poses=None,
+        frame_offsets=None,
+        temporal_valid_mask=None,
+        temporal_timestamps=None,
+    ):
+        """Extract features from radar inputs."""
         img_voxel_feats = None
         pts_voxel_feats, pts_feats = None, None
         depth, img_feats = None, None
 
-        pts_voxel_feats, pts_feats = self.extract_pts_feat(rdr_cube)
+        pts_voxel_feats, pts_feats = self.extract_pts_feat(
+            rdr_cube,
+            temporal_rdr_cubes=temporal_rdr_cubes,
+            temporal_ego_poses=temporal_ego_poses,
+            frame_offsets=frame_offsets,
+            temporal_valid_mask=temporal_valid_mask,
+            temporal_timestamps=temporal_timestamps,
+        )
 
         if self.record_time:
             torch.cuda.synchronize()
@@ -506,7 +691,24 @@ class RadarOcc_small(BEVDepth):
 
         sparse_radar = kwargs['sparse_radar']
 
-        voxel_feats, img_feats, pts_feats, depth = self.extract_feat(rdr_cube=sparse_radar)
+        voxel_feats, img_feats, pts_feats, depth = self.extract_feat(
+            rdr_cube=sparse_radar,
+            temporal_rdr_cubes=kwargs.get(
+                'temporal_sparse_radar'
+            ),
+            temporal_ego_poses=kwargs.get(
+                'temporal_ego_poses'
+            ),
+            frame_offsets=kwargs.get(
+                'frame_offsets'
+            ),
+            temporal_valid_mask=kwargs.get(
+                'temporal_valid_mask'
+            ),
+            temporal_timestamps=kwargs.get(
+                'temporal_timestamps'
+            ),
+        )
 
         
         # training losses
@@ -582,7 +784,24 @@ class RadarOcc_small(BEVDepth):
             gt_occ=None, visible_mask=None, **kwargs):
         rdr_cube = kwargs['sparse_radar']
 
-        voxel_feats, img_feats, pts_feats, depth = self.extract_feat(rdr_cube=rdr_cube)
+        voxel_feats, img_feats, pts_feats, depth = self.extract_feat(
+            rdr_cube=rdr_cube,
+            temporal_rdr_cubes=kwargs.get(
+                'temporal_sparse_radar'
+            ),
+            temporal_ego_poses=kwargs.get(
+                'temporal_ego_poses'
+            ),
+            frame_offsets=kwargs.get(
+                'frame_offsets'
+            ),
+            temporal_valid_mask=kwargs.get(
+                'temporal_valid_mask'
+            ),
+            temporal_timestamps=kwargs.get(
+                'temporal_timestamps'
+            ),
+        )
 
         transform = img[1:8] if img is not None else None
         if self.record_time:        
