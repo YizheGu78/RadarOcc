@@ -69,3 +69,9 @@ second checkpoint argument to `train` only when intentionally fine-tuning.
 The inherited OccEfficiencyHook is disabled because its single-frame
 forward_dummy does not supply temporal payloads. This removes only the startup
 FPS/FLOPs measurement; epoch validation and checkpoint saving remain enabled.
+
+The temporal configuration sets `occ_encoder_neck.checkpoint_use_reentrant=False`.
+This keeps FPN activation checkpointing enabled while avoiding DDP's
+mark-ready-twice failure with `find_unused_parameters=True`. Original configs
+retain the default reentrant mode. Static-graph DDP is not enabled because the
+valid-history branch can change between samples.

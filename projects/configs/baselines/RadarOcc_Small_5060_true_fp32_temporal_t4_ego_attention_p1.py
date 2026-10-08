@@ -1,6 +1,7 @@
 _base_ = ['./RadarOcc_Small_5060_true_fp32_temporal_t4_identity_p1.py']
 
-model = dict(temporal_cfg=dict(
+model = dict(occ_encoder_neck=dict(checkpoint_use_reentrant=False),
+             temporal_cfg=dict(
     _delete_=True,
     type='TemporalPlugin', mode='ego_attention', position='P1',
     alignment=dict(bins_path='data/K-Radar-official-meta/resources/info_arr.mat',

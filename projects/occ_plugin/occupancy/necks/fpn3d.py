@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import numpy as np
 import torch
+from torch.utils.checkpoint import checkpoint
 from mmcv.cnn import build_conv_layer, build_norm_layer, build_upsample_layer
 from mmcv.runner import BaseModule, auto_fp16
 from torch import nn as nn
@@ -31,6 +32,7 @@ class FPN3D(BaseModule):
                  conv_cfg=dict(type='Conv3d'),
                  act_cfg=dict(type='ReLU'),
                  with_cp=False,
+                 checkpoint_use_reentrant=True,
                  upsample_cfg=dict(mode='trilinear'),
                  init_cfg=None):
         super(FPN3D, self).__init__(init_cfg=init_cfg)
@@ -40,6 +42,7 @@ class FPN3D(BaseModule):
         self.fp16_enabled = False
         self.upsample_cfg = upsample_cfg
         self.with_cp = with_cp
+        self.checkpoint_use_reentrant = checkpoint_use_reentrant
         
         self.num_out = len(self.in_channels)
         self.lateral_convs = nn.ModuleList()
@@ -82,7 +85,8 @@ class FPN3D(BaseModule):
         laterals = []
         for i, lateral_conv in enumerate(self.lateral_convs):
             if self.with_cp:
-                lateral_i = torch.utils.checkpoint.checkpoint(lateral_conv, inputs[i])
+                lateral_i = checkpoint(lateral_conv, inputs[i],
+                                       use_reentrant=self.checkpoint_use_reentrant)
             else:
                 lateral_i = lateral_conv(inputs[i])
             laterals.append(lateral_i)
@@ -100,7 +104,8 @@ class FPN3D(BaseModule):
         outs = []
         for i, fpn_conv in enumerate(self.fpn_convs):
             if self.with_cp:
-                out_i = torch.utils.checkpoint.checkpoint(fpn_conv, laterals[i])
+                out_i = checkpoint(fpn_conv, laterals[i],
+                                   use_reentrant=self.checkpoint_use_reentrant)
             else:
                 out_i = fpn_conv(laterals[i])
             outs.append(out_i)
