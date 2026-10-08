@@ -10,7 +10,8 @@ compensation in this stage.
 P1 indices are [range, azimuth, elevation]. Supply the actual bin tables used
 to generate the sparse tensors. `--bins` accepts K-Radar `info_arr.mat` with
 `arrRange`, `arrAzimuth`, `arrElevation`, or NPZ with `range_m`, `azimuth_rad`,
-`elevation_rad`. Angles must be radians. For cropped/downsampled/flipped tensors,
+`elevation_rad`. Official MAT angles are degrees and converted to radians on load;
+NPZ angle arrays must already be radians. For cropped/downsampled/flipped tensors,
 the lookup arrays must have the same bin ordering as those tensors. Do not use
 the network's coarse spherical feature-grid resolution to decode raw P1 bins.
 

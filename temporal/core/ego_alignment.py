@@ -30,7 +30,7 @@ class RadarBinGeometry:
     """Actual bin lookup; angles in radians, XYZ x-forward/y-left/z-up.
 
     NPZ keys: range_m, azimuth_rad, elevation_rad.
-    K-Radar MAT keys: arrRange, arrAzimuth, arrElevation (angles in radians).
+    K-Radar MAT keys: arrRange, arrAzimuth, arrElevation (angles in degrees).
     Signs are explicit overrides for source angle-axis conventions.
     """
     def __init__(self, range_m, azimuth_rad, elevation_rad, azimuth_sign=1, elevation_sign=1):
@@ -52,8 +52,8 @@ class RadarBinGeometry:
         if path.suffix.lower() == ".mat":
             from scipy.io import loadmat
             data = loadmat(path)
-            keys = ("arrRange", "arrAzimuth", "arrElevation")
-            return cls(*(data[k] for k in keys), **kwargs)
+            return cls(data['arrRange'], np.deg2rad(np.asarray(data['arrAzimuth'], dtype=np.float64)),
+                       np.deg2rad(np.asarray(data['arrElevation'], dtype=np.float64)), **kwargs)
         with np.load(path, allow_pickle=False) as data:
             return cls(*(data[k] for k in ("range_m", "azimuth_rad", "elevation_rad")), **kwargs)
 

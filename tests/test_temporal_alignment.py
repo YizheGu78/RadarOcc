@@ -2,6 +2,7 @@
 import importlib.util
 from pathlib import Path
 import unittest
+import tempfile
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -11,6 +12,21 @@ spec.loader.exec_module(alignment)
 
 
 class AlignmentTests(unittest.TestCase):
+    def test_official_mat_degrees_and_npz_radians_agree(self):
+        from scipy.io import savemat
+        with tempfile.TemporaryDirectory() as directory:
+            mat = Path(directory) / 'info_arr.mat'
+            npz = Path(directory) / 'bins.npz'
+            # Include a small degree angle that would pass a radians range check.
+            r, a, e = np.array([0, 0.462890625, 20]), np.array([-53, 1, 53]), np.array([-18, 0, 18])
+            savemat(mat, dict(arrRange=r[None], arrAzimuth=a[None], arrElevation=e[None]))
+            np.savez(npz, range_m=r, azimuth_rad=np.deg2rad(a), elevation_rad=np.deg2rad(e))
+            coords = [[2, 0, 0], [2, 1, 1], [2, 2, 2]]
+            actual = alignment.RadarBinGeometry.from_file(mat).to_xyz(coords)
+            expected = alignment.RadarBinGeometry.from_file(npz).to_xyz(coords)
+            np.testing.assert_allclose(actual, expected, atol=1e-12)
+            np.testing.assert_allclose(actual[1], [20*np.cos(np.pi/180), 20*np.sin(np.pi/180), 0])
+
     def test_static_world_points_translation_rotation_and_lever_arm(self):
         poses = np.tile(np.eye(4), (1, 4, 1, 1))
         for t, angle in enumerate([0, .1, .3, .5]):
