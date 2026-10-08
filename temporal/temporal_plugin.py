@@ -2,15 +2,16 @@ import torch
 import torch.nn as nn
 from .core.ego_alignment import RadarBinGeometry, align_to_current
 from .debug.temporal_recorder import TemporalRecorder
+from .fusion.local_attention import LocalTemporalAttention
 
 
 class TemporalPlugin(nn.Module):
     """
     DG-STF temporal plugin.
 
-    The first implementation is intentionally identity-only.  It verifies that
-    real T-frame loading, the P1 adapter, and the temporal interface can be
-    inserted without changing the RadarOcc baseline.
+    Identity mode verifies that
+    real T-frame loading preserves the RadarOcc baseline. ego_attention adds
+    local history fusion on current P1 anchors.
 
     Expected canonical interface:
         output, debug = plugin(
@@ -30,6 +31,7 @@ class TemporalPlugin(nn.Module):
         position="P1",
         alignment=None,
         debug=None,
+        attention=None,
     ):
         super().__init__()
         self.mode = str(mode).lower()
@@ -48,11 +50,13 @@ class TemporalPlugin(nn.Module):
         if self.recorder is not None and self.geometry is None:
             raise ValueError('Alignment recording requires alignment.bins_path')
 
-        if self.mode != "identity":
-            raise NotImplementedError(
-                "Only mode='identity' is implemented in the current "
-                "regression stage."
-            )
+        if self.mode not in ('identity', 'ego_attention'):
+            raise ValueError(f'Unsupported temporal mode: {self.mode}')
+        self.fusion = None
+        if self.mode == 'ego_attention':
+            if self.geometry is None:
+                raise ValueError('ego_attention requires alignment.bins_path')
+            self.fusion = LocalTemporalAttention(**dict(attention or {}))
 
         if self.position != "P1":
             raise NotImplementedError(
@@ -106,6 +110,7 @@ class TemporalPlugin(nn.Module):
         output = features[:, -1]
 
         alignment_debug = {}
+        fusion_debug = {}
         if self.geometry is not None:
             def cpu_array(value):
                 return value.detach().cpu().numpy() if torch.is_tensor(value) else value
@@ -115,6 +120,14 @@ class TemporalPlugin(nn.Module):
                 radar_to_lidar=self.alignment_cfg.get('radar_to_lidar'),
                 valid_mask=cpu_array(valid_mask),
             )
+            if self.fusion is not None:
+                import numpy as np
+                mask = (np.ones(features.shape[:2], dtype=bool) if valid_mask is None
+                        else cpu_array(valid_mask))
+                if frame_offsets is None:
+                    raise ValueError('ego_attention requires relative frame_offsets')
+                output, fusion_debug = self.fusion(
+                    features, aligned_xyz, cpu_array(frame_offsets), mask)
             alignment_debug = dict(coords_raw_xyz=raw_xyz,
                                    coords_aligned_xyz=aligned_xyz,
                                    transforms=transforms,
@@ -134,7 +147,10 @@ class TemporalPlugin(nn.Module):
             "used_history": False,
             "coord_type": "spherical_index_range_azimuth_elevation",
         }
-        debug.update(alignment_debug)
+        debug.update(fusion_debug)
+        # Do not retain large CPU debug arrays on the detector during training.
+        if self.fusion is None or self.recorder is not None:
+            debug.update(alignment_debug)
 
         return output, debug
 
