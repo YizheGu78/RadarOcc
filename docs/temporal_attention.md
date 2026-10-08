@@ -42,9 +42,8 @@ python -m unittest discover -s tests -p 'test_temporal*.py'
 bash run_temporal_t4_ego_attention_p1.sh val \
   work_dirs/radarocc_small_fp32_idfix_timealign_v2/epoch_4.pth
 
-# Fresh optimizer/schedule, initialized from validated single-frame weights.
-bash run_temporal_t4_ego_attention_p1.sh train \
-  work_dirs/radarocc_small_fp32_idfix_timealign_v2/epoch_4.pth
+# Train from scratch, without loading the single-frame checkpoint.
+bash run_temporal_t4_ego_attention_p1.sh train
 
 # Evaluate a trained temporal checkpoint, not the initialization checkpoint.
 bash run_temporal_t4_ego_attention_p1.sh test \
@@ -63,3 +62,10 @@ frames, radius rejection, T=1, Doppler ID preservation, and pose-dependent match
 End-to-end MMCV/spconv inference, GPU memory and real-data IoU must be verified
 in the radarocc5060 environment. This change does not implement temporal averaging
 or establish that attention improves occupancy accuracy.
+
+Training defaults to `load_from=None`, `resume_from=None`. Pass an explicit
+second checkpoint argument to `train` only when intentionally fine-tuning.
+`workers_per_gpu=0` avoids the observed spawn-worker dict_keys pickling error.
+The inherited OccEfficiencyHook is disabled because its single-frame
+forward_dummy does not supply temporal payloads. This removes only the startup
+FPS/FLOPs measurement; epoch validation and checkpoint saving remain enabled.

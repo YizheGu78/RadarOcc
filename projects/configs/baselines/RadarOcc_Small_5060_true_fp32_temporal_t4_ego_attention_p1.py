@@ -11,9 +11,16 @@ model = dict(temporal_cfg=dict(
     debug=dict(enabled=False),
 ))
 
-# Start a fresh optimizer/schedule while loading the validated single-frame weights.
-load_from = 'work_dirs/radarocc_small_fp32_idfix_timealign_v2/epoch_4.pth'
+# Train from scratch for the single-frame / temporal comparison.
+load_from = None
 resume_from = None
 work_dir = 'work_dirs/radarocc_small_temporal_t4_ego_attention_p1'
 # Beginning-of-scene samples can have no valid history.
 find_unused_parameters = True
+
+# Spawn workers currently encounter an unpicklable dict_keys in the dataset
+# pipeline. Load in the main process for both training and validation.
+data = dict(workers_per_gpu=0)
+# The inherited efficiency hook calls a single-frame forward_dummy and omits
+# temporal inputs. Disable its pre-training benchmark; epoch IoU eval remains.
+custom_hooks = []
