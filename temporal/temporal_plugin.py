@@ -1,5 +1,7 @@
 import torch
 import torch.nn as nn
+from .core.ego_alignment import RadarBinGeometry, align_to_current
+from .debug.temporal_recorder import TemporalRecorder
 
 
 class TemporalPlugin(nn.Module):
@@ -26,10 +28,25 @@ class TemporalPlugin(nn.Module):
         self,
         mode="identity",
         position="P1",
+        alignment=None,
+        debug=None,
     ):
         super().__init__()
         self.mode = str(mode).lower()
         self.position = str(position).upper()
+        self.alignment_cfg = dict(alignment or {})
+        self.geometry = None
+        if self.alignment_cfg:
+            self.geometry = RadarBinGeometry.from_file(
+                self.alignment_cfg['bins_path'],
+                azimuth_sign=self.alignment_cfg.get('azimuth_sign', 1),
+                elevation_sign=self.alignment_cfg.get('elevation_sign', 1),
+            )
+        debug = dict(debug or {})
+        self.recorder = (TemporalRecorder(debug['output_dir'], debug.get('save_every', 50))
+                         if debug.get('enabled', False) else None)
+        if self.recorder is not None and self.geometry is None:
+            raise ValueError('Alignment recording requires alignment.bins_path')
 
         if self.mode != "identity":
             raise NotImplementedError(
@@ -88,6 +105,24 @@ class TemporalPlugin(nn.Module):
         # (modulo view/stack semantics), and do not use history in any way.
         output = features[:, -1]
 
+        alignment_debug = {}
+        if self.geometry is not None:
+            def cpu_array(value):
+                return value.detach().cpu().numpy() if torch.is_tensor(value) else value
+            raw_xyz = self.geometry.to_xyz(cpu_array(coords))
+            aligned_xyz, transforms = align_to_current(
+                raw_xyz, cpu_array(poses),
+                radar_to_lidar=self.alignment_cfg.get('radar_to_lidar'),
+                valid_mask=cpu_array(valid_mask),
+            )
+            alignment_debug = dict(coords_raw_xyz=raw_xyz,
+                                   coords_aligned_xyz=aligned_xyz,
+                                   transforms=transforms,
+                                   valid_mask=cpu_array(valid_mask),
+                                   frame_offsets=cpu_array(frame_offsets))
+            if self.recorder is not None:
+                self.recorder.record(**alignment_debug)
+
         debug = {
             "mode": self.mode,
             "position": self.position,
@@ -98,5 +133,7 @@ class TemporalPlugin(nn.Module):
             "used_history": False,
             "coord_type": "spherical_index_range_azimuth_elevation",
         }
+        debug.update(alignment_debug)
 
         return output, debug
+
