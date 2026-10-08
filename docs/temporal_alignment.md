@@ -39,6 +39,7 @@ From the repository root in the radarocc5060 environment:
 python tools/temporal_vis/vis_alignment.py \
   --ann-file data/annotations/kradar_dict_val_official_temporal_doppler8.pkl \
   --bins /absolute/path/to/info_arr.mat \
+  --camera-dir /absolute/path/to/scene3/camera_images \
   --scene 3 --current-order 80 --frame-nums 4
 ```
 
@@ -49,6 +50,28 @@ exports include all 43,750 P1 points per frame. Each before/after view uses the
 same selected IDs, axis limits and camera view. Outputs under
 `outputs/temporal_alignment`: PNG (BEV and 3D), NPZ (full coordinates and
 transforms), JSON (frame IDs, mask and geometry settings). No GT is loaded.
+
+The main PNG now includes current RGB above the before/after BEV and 3D views.
+An additional `_power.png` includes the same RGB and individual local-frame
+BEV return-strength panels, sharing one color scale. Color is the stored
+descriptor's channel 2, used for P1 ranking; no additional logarithm or dB
+interpretation is applied. RGB is a visual reference and is not projected
+onto radar coordinates or used for fusion.
+
+RGB association first uses metadata `cams[*].data_path` when available.
+With multiple camera keys, specify `--camera-name`. The current Doppler8
+metadata has empty `cams`, so supply the RGB directory for the selected scene.
+Images are naturally sorted and paired by scene ordinal, following the existing
+camera/occupancy visualization. Radar filename numbers are not camera IDs.
+At zero offset the RGB count must equal the reference scene sample count.
+For a subset annotation, `--camera-reference-ann-file` supplies a complete-scene
+annotation and the current `lidar_token` locates its ordinal there. For a known
+ordinal shift use `--camera-offset`; it does not mean the radar/LiDAR frame
+difference. The selected image and mapping are printed and saved to JSON.
+To explicitly choose the current image, pass `--rgb-image /path/current.png`.
+Use `--no-rgb` to reproduce radar-only rendering. Count agreement checks the
+mapping structure; users should still verify the image content corresponds to
+the current observation.
 
 Static structures should overlap more after alignment. Moving objects can
 remain separated. Inspect multiple current frames, particularly turns. These
@@ -65,9 +88,13 @@ forwards while preserving identity features. Use one GPU for this debug path.
 
 ```bash
 python tools/temporal_vis/vis_alignment.py \
-  --debug-file outputs/temporal_alignment_debug/alignment_000000.npz
+  --debug-file outputs/temporal_alignment_debug/alignment_000000.npz \
+  --rgb-image /absolute/path/to/current_rgb.png
 ```
 
 Recording copies coordinates to CPU, so disable it for runtime benchmarks.
+Debug dumps do not carry frame identity, so they require an explicit RGB image
+or `--no-rgb`. New dumps include power scores; older dumps still render the
+alignment panel but cannot produce a strength panel.
 After geometry validation, implement local retrieval and masked temporal
 averaging as a separate stage.

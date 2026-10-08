@@ -120,6 +120,7 @@ class TemporalPlugin(nn.Module):
                                    transforms=transforms,
                                    valid_mask=cpu_array(valid_mask),
                                    frame_offsets=cpu_array(frame_offsets))
+            alignment_debug['power_scores'] = cpu_array(features[..., 2])
             if self.recorder is not None:
                 self.recorder.record(**alignment_debug)
 
