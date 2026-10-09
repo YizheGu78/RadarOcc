@@ -59,6 +59,12 @@ def custom_train_detector(model,
             device_ids=[torch.cuda.current_device()],
             broadcast_buffers=False,
             find_unused_parameters=find_unused_parameters)
+
+        # Legacy MMCV's eval forward reads this private attribute, removed
+        # from recent PyTorch DDP. Match the existing tools/test.py shim so
+        # epoch validation uses the ordinary wrapped module as well.
+        if not hasattr(model, '_use_replicated_tensor_module'):
+            model._use_replicated_tensor_module = False
     else:
         model = MMDataParallel(
             model.cuda(cfg.gpu_ids[0]), device_ids=cfg.gpu_ids)
