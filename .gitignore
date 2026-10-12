@@ -202,3 +202,7 @@ work_dirs/
 
 # Local generated annotation files
 data/annotations/*.pkl
+
+# output directories
+outputs/
+
