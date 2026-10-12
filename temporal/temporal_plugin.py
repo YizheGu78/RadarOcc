@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import numpy as np
 from .core.ego_alignment import RadarBinGeometry, align_to_current
 from .debug.temporal_recorder import TemporalRecorder
 from .fusion.local_attention import LocalTemporalAttention
@@ -32,12 +33,19 @@ class TemporalPlugin(nn.Module):
         alignment=None,
         debug=None,
         attention=None,
+        power_mask=None,
     ):
         super().__init__()
         self.mode = str(mode).lower()
         self.position = str(position).upper()
         self.alignment_cfg = dict(alignment or {})
         self.geometry = None
+        self.power_mask_cfg = dict(power_mask or {})
+        self.power_mask_enabled = bool(self.power_mask_cfg.get('enabled', False))
+        self.power_mask_radius = float(self.power_mask_cfg.get('radius_m', 3.7))
+        if self.power_mask_enabled and (not np.isfinite(self.power_mask_radius)
+                                        or self.power_mask_radius <= 0):
+            raise ValueError('power_mask.radius_m must be finite and positive')
         if self.alignment_cfg:
             self.geometry = RadarBinGeometry.from_file(
                 self.alignment_cfg['bins_path'],
@@ -45,6 +53,8 @@ class TemporalPlugin(nn.Module):
                 elevation_sign=self.alignment_cfg.get('elevation_sign', 1),
             )
         debug = dict(debug or {})
+        if self.power_mask_enabled and self.geometry is None:
+            raise ValueError('power_mask requires alignment.bins_path for physical coordinates')
         self.recorder = (TemporalRecorder(debug['output_dir'], debug.get('save_every', 50))
                          if debug.get('enabled', False) else None)
         if self.recorder is not None and self.geometry is None:
@@ -115,19 +125,36 @@ class TemporalPlugin(nn.Module):
             def cpu_array(value):
                 return value.detach().cpu().numpy() if torch.is_tensor(value) else value
             raw_xyz = self.geometry.to_xyz(cpu_array(coords))
+            point_valid = None
+            if self.power_mask_enabled:
+                if channels != 8:
+                    raise ValueError('Power masking expects the 8-channel P1 descriptor')
+                # Local XY mask, before any pose transform, in every frame
+                # including the current one. Never edit caller/source tensors.
+                excluded = np.hypot(raw_xyz[..., 0], raw_xyz[..., 1]) <= self.power_mask_radius
+                point_valid = ~excluded
+                keep = torch.as_tensor(point_valid, device=features.device)
+                features = features.clone()
+                for channel in (0, 1, 2, 6, 7):
+                    features[..., channel] = features[..., channel].masked_fill(~keep, 0)
+                output = features[:, -1]
+                fusion_debug.update(power_mask_enabled=True,
+                    power_mask_radius_m=self.power_mask_radius,
+                    power_masked_per_frame=excluded.sum(axis=-1).tolist())
             aligned_xyz, transforms = align_to_current(
                 raw_xyz, cpu_array(poses),
                 radar_to_lidar=self.alignment_cfg.get('radar_to_lidar'),
                 valid_mask=cpu_array(valid_mask),
             )
             if self.fusion is not None:
-                import numpy as np
                 mask = (np.ones(features.shape[:2], dtype=bool) if valid_mask is None
                         else cpu_array(valid_mask))
                 if frame_offsets is None:
                     raise ValueError('ego_attention requires relative frame_offsets')
-                output, fusion_debug = self.fusion(
-                    features, aligned_xyz, cpu_array(frame_offsets), mask)
+                output, attention_debug = self.fusion(
+                    features, aligned_xyz, cpu_array(frame_offsets), mask,
+                    point_valid_mask=point_valid)
+                fusion_debug.update(attention_debug)
             alignment_debug = dict(coords_raw_xyz=raw_xyz,
                                    coords_aligned_xyz=aligned_xyz,
                                    transforms=transforms,

@@ -5,26 +5,35 @@ import torch
 from torch import nn
 
 
-def local_neighbors(xyz, valid_mask, k=8, radius_m=2.0):
+def local_neighbors(xyz, valid_mask, k=8, radius_m=2.0, point_valid_mask=None):
     """Return [B,N,(T-1)*K] flattened history IDs and validity.
 
     A separate tree per frame prevents one dense frame taking every slot.
-    No intensity threshold or self-vehicle exclusion is applied.
+    Optional point mask excludes both historical candidates and current queries.
     """
     b, t, n, _ = xyz.shape
+    point_mask = (np.ones((b,t,n), dtype=bool) if point_valid_mask is None
+                  else np.asarray(point_valid_mask, dtype=bool))
+    if point_mask.shape != (b,t,n):
+        raise ValueError('point_valid_mask must be [B,T,N]')
     ids = np.zeros((b, n, (t-1)*k), dtype=np.int64)
     mask = np.zeros_like(ids, dtype=bool)
     for batch in range(b):
         for frame in range(t-1):
             if not valid_mask[batch, frame]:
                 continue
-            dist, ix = cKDTree(xyz[batch, frame]).query(
-                xyz[batch, -1], k=list(range(1, k+1)),
+            candidates = np.flatnonzero(point_mask[batch, frame])
+            queries = np.flatnonzero(point_mask[batch, -1])
+            if candidates.size == 0 or queries.size == 0:
+                continue
+            dist, ix = cKDTree(xyz[batch, frame, candidates]).query(
+                xyz[batch, -1, queries], k=list(range(1, k+1)),
                 distance_upper_bound=radius_m, workers=1)
-            good = np.isfinite(dist) & (ix < n)
+            good = np.isfinite(dist) & (ix < len(candidates))
+            original_ix = candidates[np.minimum(ix, len(candidates)-1)]
             slots = slice(frame*k, (frame+1)*k)
-            ids[batch, :, slots] = np.where(good, ix + frame*n, 0)
-            mask[batch, :, slots] = good
+            ids[batch, queries, slots] = np.where(good, original_ix + frame*n, 0)
+            mask[batch, queries, slots] = good
     return ids, mask
 
 
@@ -53,14 +62,15 @@ class LocalTemporalAttention(nn.Module):
         nn.init.zeros_(self.output.weight)
         nn.init.zeros_(self.output.bias)
 
-    def forward(self, features, aligned_xyz, frame_offsets, valid_mask):
+    def forward(self, features, aligned_xyz, frame_offsets, valid_mask, point_valid_mask=None):
         current = features[:, -1]
         if features.shape[-1] != 8 or not torch.isfinite(features).all():
             raise ValueError('P1 descriptors must be finite with 8 channels')
         b, t, n, _ = features.shape
         if t == 1:
             return current, dict(used_history=False, queries_with_history=0)
-        ids_np, mask_np = local_neighbors(aligned_xyz, valid_mask, self.k, self.radius_m)
+        ids_np, mask_np = local_neighbors(aligned_xyz, valid_mask, self.k, self.radius_m,
+                                        point_valid_mask=point_valid_mask)
         if not mask_np.any():
             return current, dict(used_history=False, queries_with_history=0)
         device = features.device
