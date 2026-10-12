@@ -245,7 +245,8 @@ class MultiLayerRangeAttentionNoD(nn.Module):
         return output.view(self.num_ranges*self.K, 1)
 
 class MultiLayerRangeAttention(nn.Module):
-    def __init__(self, num_layers=2, num_ranges=175, K=250, embed_dim=16,doppler= 3):
+    def __init__(self, num_layers=2, num_ranges=175, K=250, embed_dim=16,doppler= 3,
+                 allow_zero_power=False):
         super(MultiLayerRangeAttention, self).__init__()
         self.num_layers = num_layers
         self.num_ranges = num_ranges
@@ -253,6 +254,7 @@ class MultiLayerRangeAttention(nn.Module):
         self.dropout = nn.Dropout(0.1)
         self.norm = nn.ReLU()
         self.doppler = doppler
+        self.allow_zero_power = bool(allow_zero_power)
         # Embeddings for elevation and azimuth
         self.elevation_embed = nn.Embedding(37, 3)
         self.azimuth_embed = nn.Embedding(107, 3)
@@ -263,6 +265,16 @@ class MultiLayerRangeAttention(nn.Module):
             for _ in range(num_layers)
         ])
 
+    def power_log10(self, values):
+        if not self.allow_zero_power:
+            return torch.log10(values)
+        if not torch.isfinite(values).all() or (values < 0).any():
+            raise ValueError('Power log encoding requires finite nonnegative values')
+        zero = values == 0
+        # Do not evaluate log10(0), including in the backward graph.
+        safe_values = values.masked_fill(zero, 1)
+        return torch.log10(safe_values).masked_fill(zero, 0)
+
     def forward(self, power_vals, ele_indices, azi_indices):
         if self.doppler >= 4:
             max_doppler = 5
@@ -270,9 +282,9 @@ class MultiLayerRangeAttention(nn.Module):
             max_doppler = 3
         # Assume power_vals is [N, 8], where N = num_ranges * K
         self.k = power_vals.shape[0] // self.num_ranges
-        top_values = torch.log10(power_vals[:,:self.doppler]).view(self.num_ranges,  self.K,-1)
+        top_values = self.power_log10(power_vals[:,:self.doppler]).view(self.num_ranges,  self.K,-1)
         top_indices = power_vals[:,max_doppler:max_doppler+self.doppler].view(self.num_ranges, self.K,-1).int()
-        mean_variance = torch.log10(power_vals[:,-2:]).view(self.num_ranges,  self.K,-1)
+        mean_variance = self.power_log10(power_vals[:,-2:]).view(self.num_ranges,  self.K,-1)
 
         doppler_embeddings = self.doppler_embed(top_indices)
         doppler_embeddings = doppler_embeddings.flatten(2).to(torch.float32)
@@ -487,7 +499,7 @@ class RadarEncV8(nn.Module):
 @MIDDLE_ENCODERS.register_module()
 class RadarEncV8small(nn.Module):
     def __init__(self, input_channel, norm_cfg, base_channel, out_channel, 
-                sparse_shape_xyz, top_k=250,**kwargs):
+                sparse_shape_xyz, top_k=250,allow_zero_power=False,**kwargs):
         super().__init__()
         self.record_time = False
         block = post_act_block
@@ -517,7 +529,8 @@ class RadarEncV8small(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-        self.range_attn = MultiLayerRangeAttention(num_layers=4,K=top_k,num_ranges=175)
+        self.range_attn = MultiLayerRangeAttention(num_layers=4,K=top_k,num_ranges=175,
+                                                   allow_zero_power=allow_zero_power)
 
     def forward(self, voxel_features, coors, batch_size):
         assert batch_size == 1 #

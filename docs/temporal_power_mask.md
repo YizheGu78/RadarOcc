@@ -62,3 +62,21 @@ full-input baseline. For full-input training use the original config/work_dir.
 This optional experiment combines power zeroing and excluding those points from
 temporal neighbors. Compare it to the completed full-input training, with
 otherwise matching data, optimizer, epochs and val selection rule.
+
+## Finite log encoding for zero power
+
+Small's actual MultiLayerRangeAttention applies log10 to the five continuous
+power/statistic channels. The masked config therefore also sets
+`pts_middle_encoder.allow_zero_power=True`: exact raw zeros encode as 0 after
+log conversion, while strictly positive values retain their original log10
+values. The logarithm receives 1 in zero slots before those encoded slots are
+set to 0, so neither forward nor backward evaluates log10(0). Negative or
+nonfinite power is rejected rather than silently repaired. Original configs
+keep allow_zero_power=False and the original log path; checkpoint shapes and
+parameter names remain unchanged. Raw power is still zero inside the region,
+not replaced by epsilon in the fusion input.
+
+Regression tests run the actual range-attention classes on CPU: reproduce
+nonfinite outputs on zero inputs in the old path, verify finite forward/backward
+in the new path, and exact matching on strictly positive inputs. CUDA sparse
+convolution and full occupancy training still require the radarocc5060 machine.
