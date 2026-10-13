@@ -26,7 +26,7 @@ def verify_sources(root):
     checks = {
         DETECTOR: ['r_res=0.46*scale', 'theta_res=1*scale*(torch.pi/180)',
                    'phi_res=1*scale*(torch.pi/180)',
-                   'spherical_shape=[h,w,z],scale=2', 'h,w,z=[128,128,14]'],
+                   'spherical_shape=[h,w,z],scale=2'],
         ENCODER: ['ele_ind=coors[:,1]*2+(56-37*2)//2',
                   'range_ind=coors[:,2]*2', 'azi_ind=coors[:,3]*2+(512-107*2)//2'],
     }
@@ -39,6 +39,35 @@ def verify_sources(root):
             tree = next(n for n in tree.body if isinstance(n, ast.ClassDef)
                         and n.name == 'RadarEncV8small')
         text = ''.join(ast.unparse(tree).split())
+        if path == DETECTOR:
+            # Check h/w/z semantically rather than requiring list or tuple syntax.
+            # Do not silently accept a changed feature shape: audit() assumes 128x128x14.
+            spatial_assignments = []
+            shape_matches = False
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Assign):
+                    continue
+                for target in node.targets:
+                    if not isinstance(target, (ast.Tuple, ast.List)):
+                        continue
+                    names = [elt.id if isinstance(elt, ast.Name) else None
+                             for elt in target.elts]
+                    if names != ['h', 'w', 'z']:
+                        continue
+                    spatial_assignments.append(ast.unparse(node))
+                    try:
+                        dims = ast.literal_eval(node.value)
+                    except (ValueError, TypeError):
+                        continue
+                    if isinstance(dims, (list, tuple)) and list(dims) == [128, 128, 14]:
+                        shape_matches = True
+            if not shape_matches:
+                raise ValueError(
+                    f'{path}: expected an active h,w,z=(128,128,14) assignment; '
+                    f'found: {spatial_assignments or "none"}. '
+                    'This audit hardcodes shape (128,128,14); check the actual model '
+                    'rather than skipping this guard.'
+                )
         for needle in needles:
             if needle not in text:
                 raise ValueError(f'{path}: unsupported formula {needle}; re-audit source')
