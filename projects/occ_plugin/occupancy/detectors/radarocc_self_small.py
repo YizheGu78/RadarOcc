@@ -131,7 +131,7 @@ class RadarOcc_small(BEVDepth):
         rs, thetas, phis = self.cartesian_to_spherical(ref_3d[:, 0], ref_3d[:, 1], ref_3d[:, 2])
 
         # Scale spherical coordinates to fit into the target grid
-        r_res = 0.46 * scale
+        r_res = 0.46 * scale # offically 0.462890625, but we use 0.46 to avoid out of range
         theta_res = 1 * scale* (torch.pi / 180)  # Convert degrees to radians
         phi_res = 1 * scale* (torch.pi / 180)    # Convert degrees to radians
         azi_shape = spherical_shape[0]
