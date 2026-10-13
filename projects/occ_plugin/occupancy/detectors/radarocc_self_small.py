@@ -131,16 +131,33 @@ class RadarOcc_small(BEVDepth):
         rs, thetas, phis = self.cartesian_to_spherical(ref_3d[:, 0], ref_3d[:, 1], ref_3d[:, 2])
 
         # Scale spherical coordinates to fit into the target grid
-        r_res = 0.46 * scale # offically 0.462890625, but we use 0.46 to avoid out of range
+        # Original RadarOcc Small distance resolution (preserved for comparison):
+        # r_res = 0.46 * scale # offically 0.462890625, but we use 0.46 to avoid out of range
+        # Corrected: K-Radar info_arr.mat arrRange is spaced by exactly
+        # 0.462890625 m/bin. The active Small Cross-Attention uses scale=2.
+        r_res = 0.462890625 * scale
         theta_res = 1 * scale* (torch.pi / 180)  # Convert degrees to radians
         phi_res = 1 * scale* (torch.pi / 180)    # Convert degrees to radians
         azi_shape = spherical_shape[0]
         range_shape = spherical_shape[1]
         ele_shape = spherical_shape[2]
 
-        rs_index = (rs / r_res) / range_shape
-        thetas_index = (((thetas) / theta_res) + (azi_shape//2)) / azi_shape
-        phis_index = (((phis) / phi_res)  + ele_shape//2)/ ele_shape
+        # Original RadarOcc Small normalization (preserved for comparison):
+        # rs_index = (rs / r_res) / range_shape
+        # thetas_index = (((thetas) / theta_res) + (azi_shape//2)) / azi_shape
+        # phis_index = (((phis) / phi_res)  + ele_shape//2)/ ele_shape
+        #
+        # Corrected nominal feature-centre alignment for the active scale=2:
+        #   sparse R feature index = (2 * raw_range_idx) / 4 = raw_range_idx / 2
+        #   sparse A feature index = (2 * raw_azimuth_idx + 149) / 4
+        #   sparse E feature index = (2 * raw_elevation_idx - 9) / 4
+        # The VoxFormer CUDA sampler turns a normalized location into
+        # feature_index = normalized * dimension - 0.5.
+        # Thus add 0.5 in Range and 0.25 in Azimuth/Elevation before dividing
+        # by the corresponding feature dimension. No VoxFormer code is changed.
+        rs_index = ((rs / r_res) + 0.5) / range_shape
+        thetas_index = ((thetas / theta_res) + (azi_shape // 2) + 0.25) / azi_shape
+        phis_index = ((phis / phi_res) + (ele_shape // 2) + 0.25) / ele_shape
         ref_3d_spherical = torch.stack([thetas_index,rs_index,phis_index],-1) #azi,range,ele
         return ref_3d_spherical
 
