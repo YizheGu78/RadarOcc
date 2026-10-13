@@ -213,6 +213,8 @@ class CrossAttentionCapture:
                     "reference": ref_sample,
                     "spatial_shapes": spatial.cpu(),
                     "reference_batch": int(ref.shape[0]),
+                    "offset_linear_batch": int(args[0].shape[1] if not module.batch_first else args[0].shape[0]),
+                    "module": module,
                 }
 
             def offset_hook(module, args, output, key=name):
@@ -332,9 +334,9 @@ def main():
         importlib.import_module(module_path)
     test_data_cfg = copy.deepcopy(cfg.data[args.split])
     test_data_cfg.test_mode = True
-    if args.index >= len(build_dataset(copy.deepcopy(test_data_cfg))):
-        parser.error(f"--index is past the end of {args.split} dataset")
     dataset = build_dataset(test_data_cfg)
+    if args.index >= len(dataset):
+        parser.error(f"--index is past the end of {args.split} dataset")
     loader = build_dataloader(
         dataset, samples_per_gpu=1, workers_per_gpu=0, dist=False, shuffle=False
     )
@@ -345,9 +347,6 @@ def main():
     model.eval().cuda()
     capture = CrossAttentionCapture(args.queries)
     capture.attach(model)
-    for name, module in model.named_modules():
-        if name in capture.modules:
-            capture.frames.setdefault(name, {})["module"] = module
     wrapped = MMDataParallel(model, device_ids=[torch.cuda.current_device()])
     try:
         data = None
