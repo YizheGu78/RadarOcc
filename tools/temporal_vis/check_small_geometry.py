@@ -21,15 +21,66 @@ ENCODER = 'projects/occ_plugin/occupancy/voxel_encoder/sparse_lidar_enc.py'
 KERNEL = 'third_party/VoxFormer/deform_attn_3d/csrc/ms_deform_attn_cuda_kernel.cuh'
 
 
+# The historical implementation is kept as comments in RadarOcc Small.
+# Only examine ACTIVE AST assignments, so commented lines cannot fool the audit.
+FORMULAE = {
+    'legacy': {
+        'r_res': '0.46 * scale',
+        'rs_index': '(rs / r_res) / range_shape',
+        'thetas_index': '(((thetas) / theta_res) + (azi_shape//2)) / azi_shape',
+        'phis_index': '(((phis) / phi_res) + ele_shape//2) / ele_shape',
+    },
+    'corrected': {
+        'r_res': '0.462890625 * scale',
+        'rs_index': '((rs / r_res) + 0.5) / range_shape',
+        'thetas_index': '((thetas / theta_res) + (azi_shape // 2) + 0.25) / azi_shape',
+        'phis_index': '((phis / phi_res) + (ele_shape // 2) + 0.25) / ele_shape',
+    },
+}
+
+
+def detect_detector_formula(tree):
+    """Identify the active RadarOcc Small reference formula from its AST."""
+    methods = [node for node in ast.walk(tree)
+               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+               and node.name == 'get_reference_points_spherical']
+    if len(methods) != 1:
+        raise ValueError('Expected exactly one get_reference_points_spherical method')
+    assignments = {}
+    for node in methods[0].body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    assignments[target.id] = node.value
+    matched = []
+    for formula, expected in FORMULAE.items():
+        if all(
+            name in assignments and
+            ast.dump(assignments[name], include_attributes=False) ==
+            ast.dump(ast.parse(expression, mode='eval').body,
+                     include_attributes=False)
+            for name, expression in expected.items()
+        ):
+            matched.append(formula)
+    if len(matched) != 1:
+        found = {name: ast.unparse(assignments[name])
+                 for name in FORMULAE['corrected'] if name in assignments}
+        raise ValueError(
+            'Unsupported or mixed active Small reference formula; '
+            f'cannot audit safely. Found: {found}')
+    return matched[0]
+
+
 def verify_sources(root):
-    """Fail on changed formulas rather than silently audit obsolete constants."""
+    """Fail on unknown model geometry instead of auditing obsolete constants."""
     checks = {
-        DETECTOR: ['r_res=0.46*scale', 'theta_res=1*scale*(torch.pi/180)',
+        DETECTOR: ['theta_res=1*scale*(torch.pi/180)',
                    'phi_res=1*scale*(torch.pi/180)',
                    'spherical_shape=[h,w,z],scale=2'],
         ENCODER: ['ele_ind=coors[:,1]*2+(56-37*2)//2',
                   'range_ind=coors[:,2]*2', 'azi_ind=coors[:,3]*2+(512-107*2)//2'],
     }
+    active_formula = None
     hashes = {}
     for path, needles in checks.items():
         content = (root / path).read_text()
@@ -40,6 +91,7 @@ def verify_sources(root):
                         and n.name == 'RadarEncV8small')
         text = ''.join(ast.unparse(tree).split())
         if path == DETECTOR:
+            active_formula = detect_detector_formula(tree)
             # Check h/w/z semantically rather than requiring list or tuple syntax.
             # Do not silently accept a changed feature shape: audit() assumes 128x128x14.
             spatial_assignments = []
@@ -82,7 +134,7 @@ def verify_sources(root):
             if f'{axis}_im=loc_{axis}*spatial_{axis}-0.5' not in compact:
                 raise ValueError('CUDA sampler centre convention changed')
         hashes[KERNEL] = hashlib.sha256(content.encode()).hexdigest()
-    return hashes, kernel.exists()
+    return hashes, kernel.exists(), active_formula
 
 
 def load_bins(path):
@@ -106,8 +158,14 @@ def xyz(spherical):
                             r*np.cos(e)*np.sin(a), r*np.sin(e)))
 
 
-def audit(indices, bins):
-    """All vectors ordered range, azimuth, elevation; errors signed query-true."""
+def audit(indices, bins, formula='corrected'):
+    """All vectors ordered range, azimuth, elevation; errors signed query-true.
+
+    formula='corrected' matches the active reference coordinates after the fix.
+    formula='legacy' independently reproduces the original calculations.
+    """
+    if formula not in FORMULAE:
+        raise ValueError(f'Unsupported formula: {formula}')
     indices = np.asarray(indices)
     if indices.ndim != 2 or indices.shape[1] != 3 or not np.isfinite(indices).all():
         raise ValueError('Expected finite [N,3] R/A/E indices')
@@ -122,8 +180,15 @@ def audit(indices, bins):
     padded = indices * 2 + np.array([0, 149, -9])
     expected_feature = padded / 4.0
     shape = np.array([128, 128, 14])  # R/A/E; dimensions passed to attention
-    scale_steps = np.array([0.92, 2., 2.])
-    pre_normalized = true_spherical / scale_steps + np.array([0, 64, 7])
+    if formula == 'corrected':
+        scale_steps = np.array([0.462890625 * 2., 2., 2.])
+        # Offset is expressed in feature-index units, before normalization.
+        # CUDA subtracts 0.5 from each dimension's normalized coordinate.
+        shifts = np.array([0.5, 64.25, 7.25])
+    else:
+        scale_steps = np.array([0.46 * 2., 2., 2.])
+        shifts = np.array([0., 64., 7.])
+    pre_normalized = true_spherical / scale_steps + shifts
     normalized = pre_normalized / shape
     # Pinned VoxFormer CUDA kernel: f = normalized * size - 0.5.
     query_feature = normalized * shape - 0.5
@@ -159,8 +224,11 @@ def main():
     p.add_argument('--radar-npz', type=Path, help='Optional real NPZ; first 175*250 candidates')
     p.add_argument('--source-root', type=Path, default=ROOT)
     p.add_argument('--out-dir', type=Path, default=Path('work_dirs/small_geometry_audit'))
+    p.add_argument('--compare-legacy', action='store_true',
+                   help='Also calculate old-formula errors on exactly the same valid samples')
     args = p.parse_args()
-    hashes, local_kernel_verified = verify_sources(args.source_root)
+    hashes, local_kernel_verified, active_formula = verify_sources(args.source_root)
+    print('Detected ACTIVE detector formula:', active_formula)
     bins = load_bins(args.bins)
     if args.radar_npz:
         with np.load(args.radar_npz, allow_pickle=False) as d:
@@ -173,11 +241,12 @@ def main():
     else:
         indices = np.stack(np.meshgrid(np.arange(175),np.arange(107),np.arange(37),
                                        indexing='ij'),axis=-1).reshape(-1,3)
-    result = audit(indices,bins)
+    result = audit(indices,bins,formula=active_formula)
     mask = result['valid']
     if not mask.any():
         raise ValueError('No valid points for statistics')
     report = dict(scope='Nominal base-reference geometry, zero learned sampling offsets; not prediction/GT error',
+                  active_detector_formula=active_formula,
                   source_sha256=hashes, local_cuda_source_verified=local_kernel_verified,
                   sampler_source='YizheGu78/VoxFormer@2b25090051643aecf331914bb4bfbe3b5b59e8ff',
                   sampler_convention='f = normalized * size - 0.5',
@@ -194,7 +263,7 @@ def main():
     examples = []
     for r in (10.,30.,50.,80.):
         ir = int(np.argmin(abs(bins[0]-r)))
-        sample = audit([[ir,53,18]],bins)
+        sample = audit([[ir,53,18]],bins,formula=active_formula)
         examples.append(dict(range_m=float(sample['true_spherical'][0,0]),
                              signed_range_error_m=float(sample['spherical_error'][0,0]),
                              azimuth_error_deg=float(sample['spherical_error'][0,1]),
@@ -202,6 +271,23 @@ def main():
                              xyz_error_m=float(sample['euclidean_error'][0]),
                              within_first_175_ranges=bool(ir<175)))
     report['zero_angle_examples'] = examples
+    if args.compare_legacy:
+        legacy = audit(indices,bins,formula='legacy')
+        common = legacy['valid'] & result['valid']
+        if not common.any():
+            raise ValueError('No samples valid under BOTH legacy and active formulas')
+        report['comparison_same_valid'] = {
+            'valid_for_both': int(common.sum()),
+            'active_formula': active_formula,
+            'active_xyz_error_m': stats(result['euclidean_error'][common]),
+            'legacy_xyz_error_m': stats(legacy['euclidean_error'][common]),
+            'active_signed_spherical_error_RAE': {
+                name: stats(result['spherical_error'][common,k])
+                for k,name in enumerate(('range_m','azimuth_deg','elevation_deg'))},
+            'legacy_signed_spherical_error_RAE': {
+                name: stats(legacy['spherical_error'][common,k])
+                for k,name in enumerate(('range_m','azimuth_deg','elevation_deg'))},
+        }
     args.out_dir.mkdir(parents=True,exist_ok=True)
     (args.out_dir/'summary.json').write_text(json.dumps(report,indent=2)+'\n')
     np.savez_compressed(args.out_dir/'coordinates.npz',**result)
