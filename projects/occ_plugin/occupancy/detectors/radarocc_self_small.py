@@ -151,6 +151,7 @@ class RadarOcc_small(BEVDepth):
         #   sparse R feature index = (2 * raw_range_idx) / 4 = raw_range_idx / 2
         #   sparse A feature index = (2 * raw_azimuth_idx + 149) / 4
         #   sparse E feature index = (2 * raw_elevation_idx - 9) / 4
+        
         # The VoxFormer CUDA sampler turns a normalized location into
         # feature_index = normalized * dimension - 0.5.
         # Thus add 0.5 in Range and 0.25 in Azimuth/Elevation before dividing
