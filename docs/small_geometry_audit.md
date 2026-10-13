@@ -1,43 +1,61 @@
-# Small base-coordinate audit
+# RadarOcc Small nominal geometry audit
 
-Run from the RadarOcc repository root; no torch, CUDA or checkpoint required:
+Runs with CPU/NumPy/SciPy only. No checkpoint, model forward, GPU or training.
+The script **inspects the ACTIVE detector AST**, detects either the historical
+or corrected Small reference formula, and rejects other/mixed formulas.
+
+From the RadarOcc repository root, after updating the existing branch:
+
+```bash
+git switch radarocc-5060-reproduction
+git pull --ff-only
+conda activate radarocc5060
+
+python -m unittest discover -s tests -p 'test_small_geometry_audit.py' -v
+
+python tools/temporal_vis/check_small_geometry.py \
+  --bins data/K-Radar-official-meta/resources/info_arr.mat \
+  --compare-legacy \
+  --out-dir work_dirs/small_geometry_audit_corrected
+```
+
+Check a real NPZ's first 175 x 250 radar candidates:
 
 ```bash
 python tools/temporal_vis/check_small_geometry.py \
-  --bins data/info_arr.mat
+  --bins data/K-Radar-official-meta/resources/info_arr.mat \
+  --radar-npz data/RadarOcc_8doppler/1/radar_tensor_8doppler/EAsparse_00001.npz \
+  --compare-legacy \
+  --out-dir work_dirs/small_geometry_audit_corrected_npz
 ```
 
-To restrict statistics to a real training frame's first 175 x 250 candidates:
+Outputs: `summary.json`, `examples.csv`, `coordinates.npz`. Printed
+`active_detector_formula` must say `corrected` for commit c26ecfd+.
+The top-level `xyz_error_m` and `signed_spherical_error_RAE` are for the
+active formula. `comparison_same_valid` compares old and new on the
+**same subset** of queries, accounting for differing spatial validity masks.
 
-```bash
-python tools/temporal_vis/check_small_geometry.py \
-  --bins data/info_arr.mat \
-  --radar-npz data/RadarOcc_8doppler/1/radar_tensor_8doppler/EAsparse_00001.npz
-```
+Geometry:
+- Official range step: `0.462890625 m` per raw bin, versus old 0.46 m.
+- Small sparse padding in R/A/E: `[2*r,2*a+149,2*e-9]`.
+- Two stride-2 sparse convolution blocks imply nominal feature indices
+  `[r/2,(2*a+149)/4,(2*e-9)/4]`.
+- Current Small spherical query uses
+  `r_res = 0.462890625 * scale` and at `scale=2` the pre-normalization
+  shifts `[+0.5,+64.25,+7.25]` in R/A/E.
+- The 3D VoxFormer sampler maps normalized feature coordinates through
+  `feature_index = normalized * feature_size - 0.5`.
+  These equations should produce ~zero relative static geometric error
+  for valid bins, up to floating-point roundoff.
 
-Writes `work_dirs/small_geometry_audit/summary.json`, `examples.csv`, and
-`coordinates.npz`. All coordinate vectors are ordered range/azimuth/elevation.
-Errors are signed query minus official position; XYZ distance is in metres.
 Statistics exclude invalid padded encoder coordinates, out-of-table queries,
-out-of-feature-centre queries and zero range. Counts are reported separately.
-NPZ mode does not power-weight statistics or change Small's input selection.
+out-of-feature-centre queries and zero range; exclusion counts overlap and
+should not be summed. NPZ mode is **not** power-weighted; it does not affect
+which candidates are selected during model execution.
 
-The source guards verify the active Small formulas and stride blocks. The CUDA
-centre rule is checked locally when the submodule source exists; otherwise the
-pinned source `YizheGu78/VoxFormer@2b25090051643aecf331914bb4bfbe3b5b59e8ff`
-is assumed and a warning is printed. An installed binary may differ from source.
-
-Derivation: padded indices R/A/E are `[2*r, 2*a+149, 2*e-9]`. Two k3/p1/s2
-convolutions have nominal receptive centres at four times the output index.
-CUDA samples at `normalized * feature_size - 0.5`. Invert the encoder's
-continuous index map, then use the official physical table to interpret that
-sample position. This does not round to the nearest bin and does not include
-nearest-grid quantization in the measured bias.
-
-This is a nominal base-reference audit, **not the measured location of learned
-feature evidence**, and not prediction-to-GT alignment or an IoU estimate.
-Convolutions and self-attention mix features. Cross-attention adds learned
-sampling offsets, which require a real checkpoint forward pass to measure.
-The zero-degree examples use the source's positive azimuth/elevation convention;
-this script does not verify radar preprocessing axis flips or external poses.
-The Small model is not modified.
+**Scope:** This checks theoretical base-reference positions only. It does not
+prove that individual sparse-convolution feature evidence is centred exactly
+there, that padding out-of-bounds inputs are dropped, that learned attention
+offsets are compensated, or that prediction-to-GT IoU improves. Sparse layers
+and self-attention mix features. The CUDA centre rule is checked against local
+submodule source when available; an installed compiled extension could differ.
