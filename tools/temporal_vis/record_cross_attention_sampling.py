@@ -329,9 +329,9 @@ def main():
         from mmcv.utils import import_modules_from_strings
         import_modules_from_strings(**cfg.custom_imports)
     if cfg.get("plugin", False):
-        plugin_dir = cfg.get("plugin_dir", args.config)
-        module_path = ".".join(Path(plugin_dir).parent.parts)
-        importlib.import_module(module_path)
+        plugin_dir = cfg.get("plugin_dir", None)
+        module_dir = plugin_dir.rstrip("/") if plugin_dir else str(Path(args.config).parent)
+        importlib.import_module(module_dir.replace("/", "."))
     test_data_cfg = copy.deepcopy(cfg.data[args.split])
     test_data_cfg.test_mode = True
     dataset = build_dataset(test_data_cfg)
