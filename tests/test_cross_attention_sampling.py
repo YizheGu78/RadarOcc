@@ -19,7 +19,7 @@ class CrossSamplingAuditTests(unittest.TestCase):
         logits = np.zeros((1, 8, 1, 4))
         stats, arrays = audit.analyze_samples(ref, offsets, logits, [[128, 128, 14]])
         np.testing.assert_allclose(arrays["base_feature"][0, 0], [63.5, 63.5, 6.5])
-        np.testing.assert_allclose(arrays["sampling_feature_indices"][0], offsets + [63.5, 63.5, 6.5])
+        np.testing.assert_allclose(arrays["sampling_feature_indices"][0], offsets[0] + [63.5, 63.5, 6.5])
         np.testing.assert_allclose(arrays["attention_weights"], 0.25)
         np.testing.assert_allclose(arrays["nominal_correction_feature_indices"][0, [0, 2]], 0.25)
         self.assertEqual(stats["sampled_queries"], 1)
