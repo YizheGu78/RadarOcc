@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Create deterministic 20% scene-level K-Radar temporal PKL subsets.
+"""Create deterministic 20% contiguous-per-scene K-Radar temporal PKL subsets.
 
 Only TRAIN and VAL are subsetted. Never change the official TEST set.
 The source PKL is a NuScenes-style dict containing an infos list; all
 other top-level fields and per-frame records are preserved verbatim.
 
-This script deliberately selects *whole scenes*. TemporalKRadarDataset
-reconstructs [t-3,t-2,t-1,t] using scene_id/order_in_scene, so selecting
-arbitrary individual frames would create false cross-gap history windows.
+This script retains *every scene*, drawing a single consecutive 20% window
+from each scene. TemporalKRadarDataset reconstructs [t-3,t-2,t-1,t]
+using scene_id/order_in_scene: scattered frame subsampling would silently
+create false cross-gap historical neighbors.
 """
 
 import argparse
@@ -67,36 +68,31 @@ def load_and_validate(path):
     return data, groups, gaps
 
 
-def choose_complete_scenes(groups, fraction=FRACTION, seed=42, trials=1024):
-    """Return a deterministic scene set approximately matching target frame count.
+def choose_contiguous_windows(groups, fraction=FRACTION, seed=42, frame_nums=4):
+    """Select one seeded, contiguous window from *every* scene.
 
-    Randomized scene-prefix search avoids favoring numeric scene IDs. Each
-    candidate uses *whole* scenes; exact 20% may be impossible for the source
-    scene sizes, so the actual achieved fraction is always reported.
+    Each window contains round(fraction * scene_size) samples, with at least
+    frame_nums samples where available. A valid window's order_in_scene values
+    must be consecutive integers, so TemporalKRadarDataset never bridges gaps.
     """
-    sizes = {scene: len(orders) for scene, orders in groups.items()}
-    scenes = sorted(sizes)
-    total = sum(sizes.values())
-    target = total * fraction
     rng = random.Random(seed)
-    best = None
-    best_score = None
-    for _ in range(max(1, trials)):
-        rng.shuffle(scenes)
-        chosen = []
-        count = 0
-        for scene in scenes:
-            chosen.append(scene)
-            count += sizes[scene]
-            # Favor a closer frame count, then more scene diversity. The
-            # seeded order breaks any remaining ties deterministically.
-            score = (abs(count - target), -len(chosen))
-            if best_score is None or score < best_score:
-                best = frozenset(chosen)
-                best_score = score
-            if count >= target:
-                break
-    return best
+    windows = {}
+    for scene in sorted(groups):
+        orders = sorted(groups[scene])
+        count = min(len(orders), max(frame_nums, round(len(orders) * fraction)))
+        valid_starts = [
+            i for i in range(len(orders) - count + 1)
+            if orders[i + count - 1] - orders[i] == count - 1
+        ]
+        if not valid_starts:
+            raise ValueError(
+                f'Scene {scene}: cannot find {count} consecutive frames out of '
+                f'{len(orders)} source records. Check order_in_scene gaps; '
+                'refusing to create a false temporal sequence.'
+            )
+        start_idx = rng.choice(valid_starts)
+        windows[scene] = (orders[start_idx], orders[start_idx + count - 1])
+    return windows
 
 
 def write_atomic(path, contents, binary=False):
@@ -118,30 +114,44 @@ def write_atomic(path, contents, binary=False):
 
 def plan_subset(input_path, output_dir, seed):
     source, groups, source_gaps = load_and_validate(input_path)
-    selected_scenes = choose_complete_scenes(groups, seed=seed)
-    retained = [info for info in source['infos'] if get_scene_id(info) in selected_scenes]
-    assert len(retained) == sum(len(groups[scene]) for scene in selected_scenes)
+    windows = choose_contiguous_windows(groups, seed=seed)
+    retained = [
+        info for info in source['infos']
+        if windows[get_scene_id(info)][0] <= int(info['order_in_scene'])
+        <= windows[get_scene_id(info)][1]
+    ]
+    expected = sum(end - start + 1 for start, end in windows.values())
+    if len(retained) != expected:
+        raise AssertionError('Selected window size does not match retained infos')
     output = dict(source)
     output['infos'] = retained
     output_path = output_dir / (input_path.stem + '_20pct.pkl')
     manifest_path = output_path.with_suffix('.selection.json')
+    per_scene = {
+        scene: {
+            'source_frames': len(groups[scene]),
+            'selected_frames': end - start + 1,
+            'start_order_in_scene': start,
+            'end_order_in_scene': end,
+        }
+        for scene, (start, end) in sorted(windows.items())
+    }
     report = {
         'source': str(input_path),
         'subset': str(output_path),
         'fraction_requested': FRACTION,
         'fraction_actual': len(retained) / len(source['infos']),
         'seed': seed,
-        'selection_unit': 'complete_scene',
+        'selection_unit': 'one_contiguous_window_per_scene',
         'total_frames': len(source['infos']),
         'selected_frames': len(retained),
         'total_scenes': len(groups),
-        'selected_scenes': sorted(selected_scenes),
-        'selected_scene_frame_counts': {
-            scene: len(groups[scene]) for scene in sorted(selected_scenes)
-        },
+        'selected_scenes': sorted(windows),
+        'scene_windows': per_scene,
         'source_nonconsecutive_order_pairs': source_gaps,
-        'note': ('PKL records and metadata are unchanged except infos filtering. '
-                 'Any order gaps reported already exist in source; no new gaps are created.'),
+        'note': ('Every source scene is retained with one contiguous window. '
+                 'Original info records and metadata remain unchanged. '
+                 'Window starts are reproducible for the supplied seed.'),
     }
     return output_path, manifest_path, output, report
 
@@ -177,13 +187,14 @@ def main(argv=None):
     for out_path, manifest, data, report in plans:
         print(f"{out_path}: {report['selected_frames']}/{report['total_frames']} frames "
               f"({report['fraction_actual']:.2%}), "
-              f"{len(report['selected_scenes'])}/{report['total_scenes']} complete scenes")
+              f"{len(report['selected_scenes'])}/{report['total_scenes']} scenes, "
+              'one consecutive window each')
         if abs(report['fraction_actual'] - FRACTION) > 0.02:
-            print('  NOTE: complete-scene selection cannot closely match 20%; '
-                  'check the actual fraction and scene coverage.')
+            print('  NOTE: rounding and minimum T-frame windows change the '
+                  'exact frame fraction; inspect the manifest.')
         if report['source_nonconsecutive_order_pairs']:
             print(f"  WARNING: source has {report['source_nonconsecutive_order_pairs']} "
-                  'nonconsecutive within-scene order pairs; this subset does not introduce them.')
+                  'nonconsecutive within-scene order pairs; selected windows remain continuous.')
         if not args.dry_run:
             write_atomic(out_path, data, binary=True)
             write_atomic(manifest, report)
