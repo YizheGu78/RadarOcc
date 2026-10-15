@@ -189,6 +189,10 @@ def main(argv=None):
               f"({report['fraction_actual']:.2%}), "
               f"{len(report['selected_scenes'])}/{report['total_scenes']} scenes, "
               'one consecutive window each')
+        for scene, item in report['scene_windows'].items():
+            print(f"  scene {scene}: orders "
+                  f"{item['start_order_in_scene']}-{item['end_order_in_scene']}, "
+                  f"{item['selected_frames']}/{item['source_frames']} frames")
         if abs(report['fraction_actual'] - FRACTION) > 0.02:
             print('  NOTE: rounding and minimum T-frame windows change the '
                   'exact frame fraction; inspect the manifest.')
