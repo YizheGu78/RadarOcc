@@ -4,6 +4,7 @@ import numpy as np
 from .core.ego_alignment import RadarBinGeometry, align_to_current
 from .debug.temporal_recorder import TemporalRecorder
 from .fusion.local_attention import LocalTemporalAttention
+from .fusion.ra_adta import RangeAwareDeformableTemporalAttention
 
 
 class TemporalPlugin(nn.Module):
@@ -12,7 +13,8 @@ class TemporalPlugin(nn.Module):
 
     Identity mode verifies that
     real T-frame loading preserves the RadarOcc baseline. ego_attention adds
-    local history fusion on current P1 anchors.
+    local history fusion on current P1 anchors. ra_adta adds a separate,
+    configurable range-aware deformable fusion path on the same anchors.
 
     Expected canonical interface:
         output, debug = plugin(
@@ -60,13 +62,18 @@ class TemporalPlugin(nn.Module):
         if self.recorder is not None and self.geometry is None:
             raise ValueError('Alignment recording requires alignment.bins_path')
 
-        if self.mode not in ('identity', 'ego_attention'):
+        if self.mode not in ('identity', 'ego_attention', 'ra_adta'):
             raise ValueError(f'Unsupported temporal mode: {self.mode}')
         self.fusion = None
         if self.mode == 'ego_attention':
             if self.geometry is None:
                 raise ValueError('ego_attention requires alignment.bins_path')
             self.fusion = LocalTemporalAttention(**dict(attention or {}))
+        elif self.mode == 'ra_adta':
+            if self.geometry is None:
+                raise ValueError('ra_adta requires alignment.bins_path')
+            self.fusion = RangeAwareDeformableTemporalAttention(
+                geometry=self.geometry, **dict(attention or {}))
 
         if self.position != "P1":
             raise NotImplementedError(
@@ -150,7 +157,7 @@ class TemporalPlugin(nn.Module):
                 mask = (np.ones(features.shape[:2], dtype=bool) if valid_mask is None
                         else cpu_array(valid_mask))
                 if frame_offsets is None:
-                    raise ValueError('ego_attention requires relative frame_offsets')
+                    raise ValueError(f'{self.mode} requires relative frame_offsets')
                 output, attention_debug = self.fusion(
                     features, aligned_xyz, cpu_array(frame_offsets), mask,
                     point_valid_mask=point_valid)
