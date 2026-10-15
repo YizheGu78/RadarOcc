@@ -1,6 +1,6 @@
 # DG-STF: 20% temporal PKL subsets
 
-Generate fixed, deterministic small-data annotations for **train** and **validation** only. Leave the official test set untouched. The script has no extra dependencies beyond the Python standard library.
+Generate fixed, deterministic **20% consecutive-frame windows within every scene** of both train and validation. All 17 training scenes and both validation scenes remain represented; the official test set is untouched. The script has no extra dependencies beyond the Python standard library.
 
 Run from the RadarOcc repository root:
 
@@ -22,7 +22,7 @@ Default generated files:
 - data/annotations/kradar_dict_train_official_temporal_doppler8_20pct.pkl
 - data/annotations/kradar_dict_val_official_temporal_doppler8_20pct.pkl
 
-Each generated PKL has a sibling .selection.json manifest listing selected scenes, selected and total frame counts, random seed, and the **actual achieved fraction**. The script does not overwrite existing outputs unless --overwrite is passed. Custom source/destination paths: --train-pkl, --val-pkl, --output-dir.
+Each generated PKL has a sibling .selection.json manifest listing **every scene's chosen start/end order_in_scene**, selected and total frame counts, random seed, and the **actual achieved fraction**. The script does not overwrite existing outputs unless --overwrite is passed. Custom source/destination paths: --train-pkl, --val-pkl, --output-dir.
 
 ## Train P1 on the 20% subset
 
@@ -40,11 +40,30 @@ bash tools/dist_train.sh \
 
 Use the **same 20% validation subset** for all P1–P5 architecture comparisons. Do not use the official test IoU to select the architecture; after selection, retrain the winner on 100% train, select the checkpoint using validation, and run the official 100% test for the final RadarOcc comparison.
 
-## Why complete scenes?
+## Why one continuous 20% window in every scene?
 
-TemporalKRadarDataset generates T=4 frame windows by sorting scene_id/scene_token and order_in_scene. Random individual-frame subsampling can silently treat widely separated time steps as consecutive, corrupting history matching.
+TemporalKRadarDataset generates T=4 frame windows by sorting scene_id/scene_token
+and order_in_scene. Random individual-frame subsampling can silently treat
+widely separated time steps as consecutive. Instead, each original scene stays
+present, but contributes **one randomly positioned, seeded, contiguous segment**
+of approximately 20% of its frames. Segment length uses per-scene rounding,
+with a minimum of 4 frames when available, so the overall ratio may differ
+slightly from 20%.
 
-This tool selects **complete scenes**, retains original info ordering, and does not alter poses, radar/GT paths, Doppler, metadata or other record fields. Depending on scene sizes, exact 20% may be impossible: **review the actual percent and selected scene coverage**. It warns if the source itself contains gaps in order_in_scene; it does not introduce new gaps. Whole-scene sampling also does not guarantee balance of foreground/background or driving conditions.
+Example: a validation split with scenes of 462 and 597 frames will keep
+roughly 92 and 119 consecutive frames respectively (~211/1059 in total),
+rather than the previous incorrect 462/1059 from one whole scene.
+
+The script preserves original info ordering, poses, radar/GT paths, Doppler,
+metadata, and other record fields; only infos is filtered. It refuses to
+select a segment that contains gaps in order_in_scene, rather than producing
+invalid T=4 history windows. If the source has no sufficiently long
+continuous run for a scene, selection fails with an explicit error.
+
+A fixed segment per scene speeds up architecture screening but cannot guarantee
+perfect balance of dynamic/foreground events. Use the **same generated 20%
+train and 20% val** for all candidate architectures and return to full
+train/val and official test for the final comparison.
 
 ## CPU-only tests
 
