@@ -33,7 +33,7 @@ class TemporalSubsetTests(unittest.TestCase):
             pickle.dump(data, f)
         return data
 
-    def test_full_scenes_preserve_schema_and_determinism(self):
+    def test_per_scene_contiguous_windows_preserve_schema_and_determinism(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             sizes = {str(i): 10 + i * 2 for i in range(1, 12)}
@@ -54,16 +54,62 @@ class TemporalSubsetTests(unittest.TestCase):
                 self.assertEqual(source['metadata'], result['metadata'])
                 self.assertEqual(source['extra'], result['extra'])
                 self.assertGreater(len(result['infos']), 0)
-                selected = set(report['selected_scenes'])
-                self.assertEqual(result['infos'], [x for x in source['infos']
-                                                    if x['scene_id'] in selected])
-                self.assertLess(abs(report['fraction_actual'] - .2), .05)
+                self.assertEqual(set(report['selected_scenes']), set(sizes))
+                windows = report['scene_windows']
+                self.assertEqual(set(windows), set(sizes))
+                chosen = []
+                for scene in sorted(sizes):
+                    rows = [x for x in result['infos'] if x['scene_id'] == scene]
+                    orders = sorted(x['order_in_scene'] for x in rows)
+                    self.assertEqual(
+                        orders,
+                        list(range(windows[scene]['start_order_in_scene'],
+                                   windows[scene]['end_order_in_scene'] + 1))
+                    )
+                    self.assertEqual(len(rows), windows[scene]['selected_frames'])
+                chosen = [
+                    x for x in source['infos']
+                    if windows[x['scene_id']]['start_order_in_scene']
+                    <= x['order_in_scene']
+                    <= windows[x['scene_id']]['end_order_in_scene']
+                ]
+                self.assertEqual(result['infos'], chosen)
+                self.assertLess(abs(report['fraction_actual'] - .2), .02)
                 first_results[stem] = name.read_bytes()
             subsets.main(args + ['--overwrite'])
             for stem in ('train', 'val'):
                 self.assertEqual(first_results[stem],
                                  (output_dir / (stem + '_20pct.pkl')).read_bytes())
             self.assertEqual(train, pickle.loads((root / 'train.pkl').read_bytes()))
+
+    def test_two_scene_val_retains_both_and_near_20_percent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_source(root / 'val.pkl', {'scene3': 462, 'scene7': 597})
+            out_path, _, subset, report = subsets.plan_subset(
+                root / 'val.pkl', root, seed=43
+            )
+            self.assertTrue(out_path.name.endswith('_20pct.pkl'))
+            self.assertEqual(report['total_scenes'], 2)
+            self.assertEqual(report['selected_scenes'], ['scene3', 'scene7'])
+            self.assertLess(abs(report['fraction_actual'] - .2), .005)
+            self.assertEqual(
+                len(subset['infos']),
+                sum(row['selected_frames']
+                    for row in report['scene_windows'].values())
+            )
+
+    def test_source_gaps_require_actual_consecutive_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = self.make_source(root / 'train.pkl', {'scene': 30})
+            # No continuous run of >= 6 records exists.
+            for i, row in enumerate(source['infos']):
+                row['order_in_scene'] = 2 * i
+            with (root / 'train.pkl').open('wb') as f:
+                pickle.dump(source, f)
+            with self.assertRaisesRegex(ValueError, 'cannot find'):
+                subsets.plan_subset(root / 'train.pkl', root, seed=42)
 
     def test_dry_run_and_no_overwrite(self):
         with tempfile.TemporaryDirectory() as directory:
