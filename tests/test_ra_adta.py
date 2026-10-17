@@ -231,6 +231,50 @@ class RAADTATest(unittest.TestCase):
         out.square().mean().backward()
         self.assertGreater(module.output.weight.grad.abs().sum(), 0)
 
+    def test_anisotropic_knn8_optimized_chunk_equivalence(self):
+        # Larger search/attention chunks must preserve the selected neighbours,
+        # forward values and the gradients of the deformable attention.
+        baseline = self.module(search_mode='anisotropic_knn',
+                               candidate_pool_size=8, chunk_size=3,
+                               search_chunk_size=1)
+        with torch.no_grad():
+            baseline.output.weight.normal_(std=0.03)
+        optimized = copy.deepcopy(baseline)
+        optimized.chunk_size = 9
+        optimized.search_chunk_size = 32
+
+        reference, reference_debug = baseline(
+            self.features, self.xyz, self.offsets, self.mask)
+        actual, actual_debug = optimized(
+            self.features, self.xyz, self.offsets, self.mask)
+        torch.testing.assert_close(actual, reference, atol=1e-6, rtol=1e-6)
+        self.assertEqual(actual_debug, reference_debug)
+
+        reference.sum().backward()
+        actual.sum().backward()
+        for (name, a), (_, b) in zip(baseline.named_parameters(),
+                                     optimized.named_parameters()):
+            self.assertIsNotNone(a.grad, name)
+            self.assertIsNotNone(b.grad, name)
+            torch.testing.assert_close(a.grad, b.grad, atol=2e-5, rtol=1e-4,
+                                       msg=name)
+
+    def test_bulk_candidate_upload_matches_previous_chunk_upload(self):
+        geometry = RangeAnisotropicGeometry(physical_bins())
+        ids_np, valid_np, local_np = anisotropic_knn_candidates(
+            self.xyz, self.mask, geometry, candidate_pool_size=8,
+            search_chunk_size=3)
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        for array in (ids_np, valid_np, local_np):
+            bulk = torch.as_tensor(array, device=device)
+            for batch in range(array.shape[0]):
+                for start in range(0, array.shape[1], 4):
+                    end = start + 4
+                    original_chunk = torch.as_tensor(
+                        array[batch, start:end], device=device)
+                    torch.testing.assert_close(bulk[batch, start:end],
+                                               original_chunk, rtol=0, atol=0)
+
     def test_plugin_alignment_masking_and_existing_knn_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'bins.npz'
@@ -284,6 +328,8 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(ra.model.temporal_cfg.mode, 'ra_adta')
         self.assertEqual(ra.model.temporal_cfg.attention.search_mode, 'anisotropic_knn')
         self.assertEqual(ra.model.temporal_cfg.attention.candidate_pool_size, 8)
+        self.assertEqual(ra.model.temporal_cfg.attention.chunk_size, 512)
+        self.assertEqual(ra.model.temporal_cfg.attention.search_chunk_size, 1024)
         self.assertNotIn('radius_m', ra.model.temporal_cfg.attention)
         self.assertNotIn('neighbors_per_frame', ra.model.temporal_cfg.attention)
         for key in ('data', 'runner', 'evaluation', 'optimizer', 'load_from', 'resume_from'):
