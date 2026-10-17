@@ -12,7 +12,8 @@ from temporal.core.ego_alignment import RadarBinGeometry
 from temporal.core.range_anisotropic_geometry import RangeAnisotropicGeometry, normalized_displacement
 from temporal.fusion.local_attention import LocalTemporalAttention
 from temporal.fusion.ra_adta import RangeAwareDeformableTemporalAttention
-from temporal.fusion.sparse_deformable_sampler import anisotropic_candidates, sparse_sample
+from temporal.fusion.sparse_deformable_sampler import (anisotropic_candidates,
+    anisotropic_knn_candidates, sparse_sample)
 
 
 def physical_bins():
@@ -82,6 +83,44 @@ class GeometryTest(unittest.TestCase):
                 selected = ids[batch, :, frame][good[batch, :, frame]]
                 self.assertTrue(points[batch, frame, selected % 31].all())
                 self.assertTrue((selected // 31 == frame).all())
+
+    def test_anisotropic_knn8_chunk_masks_and_azimuth_wrap(self):
+        geometry = RangeAnisotropicGeometry(physical_bins())
+        rng = np.random.default_rng(12)
+        xyz = rng.normal(scale=0.3, size=(2, 4, 31, 3))
+        xyz[..., 0] += 20
+        points = rng.random((2, 4, 31)) > 0.3
+        frames = np.ones((2, 4), dtype=bool)
+        frames[0, 1] = False
+        short = anisotropic_knn_candidates(
+            xyz, frames, geometry, candidate_pool_size=8,
+            search_chunk_size=1, point_valid_mask=points)
+        full = anisotropic_knn_candidates(
+            xyz, frames, geometry, candidate_pool_size=8,
+            search_chunk_size=31, point_valid_mask=points)
+        for left, right in zip(short, full):
+            np.testing.assert_allclose(left, right)
+        ids, mask, local = short
+        self.assertEqual(ids.shape, (2, 31, 3, 8))
+        self.assertFalse(mask[0, :, 1].any())
+        self.assertTrue(np.isfinite(local).all())
+        for batch in range(2):
+            self.assertFalse(mask[batch, ~points[batch, -1]].any())
+            for frame in range(3):
+                picked = ids[batch, :, frame][mask[batch, :, frame]]
+                self.assertTrue(points[batch, frame, picked % 31].all())
+                self.assertTrue((picked // 31 == frame).all())
+
+        # Across -pi/pi these points are close, not opposite directions.
+        seam = np.array([[[[-20, -0.04, 0]], [[-20, 0.04, 0]]]])
+        _, valid, _ = anisotropic_knn_candidates(seam, [[True, True]], geometry)
+        self.assertTrue(valid[0, 0, 0, 0])
+
+        # Nearest in spherical coordinates is not necessarily a valid match.
+        far = np.zeros((1, 2, 2, 3))
+        far[0, 0, :, 0], far[0, 1, :, 0] = 1000, 10
+        _, valid, _ = anisotropic_knn_candidates(far, [[True, True]], geometry)
+        self.assertFalse(valid.any())
 
 
 class SamplerTest(unittest.TestCase):
@@ -182,6 +221,16 @@ class RAADTATest(unittest.TestCase):
         self.assertTrue(torch.equal(fallback, source[:, -1]))
         self.assertFalse(debug['used_history'])
 
+    def test_anisotropic_knn8_forward_and_backward(self):
+        module = self.module(search_mode='anisotropic_knn',
+                             candidate_pool_size=8, chunk_size=4)
+        out, debug = module(self.features, self.xyz, self.offsets, self.mask)
+        self.assertTrue(torch.equal(out, self.features[:, -1]))
+        self.assertEqual(debug['candidate_pool_size'], 8)
+        self.assertTrue(debug['used_history'])
+        out.square().mean().backward()
+        self.assertGreater(module.output.weight.grad.abs().sum(), 0)
+
     def test_plugin_alignment_masking_and_existing_knn_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'bins.npz'
@@ -233,6 +282,8 @@ class ConfigTest(unittest.TestCase):
         ra = Config.fromfile(str(root / (prefix + 'ra_adta_p1_20pct.py')))
         self.assertEqual(knn.model.temporal_cfg.mode, 'ego_attention')
         self.assertEqual(ra.model.temporal_cfg.mode, 'ra_adta')
+        self.assertEqual(ra.model.temporal_cfg.attention.search_mode, 'anisotropic_knn')
+        self.assertEqual(ra.model.temporal_cfg.attention.candidate_pool_size, 8)
         self.assertNotIn('radius_m', ra.model.temporal_cfg.attention)
         self.assertNotIn('neighbors_per_frame', ra.model.temporal_cfg.attention)
         for key in ('data', 'runner', 'evaluation', 'optimizer', 'load_from', 'resume_from'):
