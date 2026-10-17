@@ -11,7 +11,7 @@ model = dict(temporal_cfg=dict(
         alpha_range=3.0, alpha_azimuth=3.0, alpha_elevation=3.0,
         min_angular_scale_m=0.25, offset_bound=0.5,
         temperature=0.5, interpolation_cutoff=2.0,
-        chunk_size=256, search_chunk_size=256, checkpoint_chunks=True,
+        chunk_size=512, search_chunk_size=1024, checkpoint_chunks=True,
         time_scale_frames=3.0, max_log_correction=0.5,
     ),
 ))
