@@ -6,7 +6,8 @@ model = dict(temporal_cfg=dict(
     attention=dict(
         _delete_=True,  # Do not inherit KNN-only radius_m/neighbors_per_frame.
         channels=8, embed_dims=32, num_heads=4,
-        sampling_points_per_head=2, candidate_pool_size=24,
+        sampling_points_per_head=2, candidate_pool_size=8,
+        search_mode='anisotropic_knn',
         alpha_range=3.0, alpha_azimuth=3.0, alpha_elevation=3.0,
         min_angular_scale_m=0.25, offset_bound=0.5,
         temperature=0.5, interpolation_cutoff=2.0,
