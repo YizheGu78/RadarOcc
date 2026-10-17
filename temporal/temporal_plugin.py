@@ -167,7 +167,11 @@ class TemporalPlugin(nn.Module):
                                    transforms=transforms,
                                    valid_mask=cpu_array(valid_mask),
                                    frame_offsets=cpu_array(frame_offsets))
-            alignment_debug['power_scores'] = cpu_array(features[..., 2])
+            # RA-ADTA does not return alignment_debug when recording is off.
+            # Avoid an unused GPU-to-CPU copy/synchronization in that path;
+            # keep the ordinary KNN path and enabled recorder unchanged.
+            if self.mode != 'ra_adta' or self.recorder is not None:
+                alignment_debug['power_scores'] = cpu_array(features[..., 2])
             if self.recorder is not None:
                 self.recorder.record(**alignment_debug)
 
