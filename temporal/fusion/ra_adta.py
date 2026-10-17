@@ -121,6 +121,12 @@ class RangeAwareDeformableTemporalAttention(nn.Module):
         history_value = self.v(history).view(b, -1, self.heads, self.dim)
         relative_time = torch.as_tensor(frame_offsets[:, :-1] - frame_offsets[:, -1:],
                                         device=device, dtype=torch.float32)
+        # Upload lookup results once per forward, rather than issuing three
+        # CPU-to-device copies for every attention chunk. Shapes, dtype,
+        # neighbour IDs, masks and normalized coordinates are unchanged.
+        ids = torch.as_tensor(ids_np, device=device)
+        good = torch.as_tensor(good_np, device=device)
+        local = torch.as_tensor(local_np, device=device)
         result, counts = [], []
         for batch in range(b):
             chunks = []
@@ -128,9 +134,9 @@ class RangeAwareDeformableTemporalAttention(nn.Module):
                 end = min(start + self.chunk_size, n)
                 args = (encoded[batch, -1, start:end], history[batch], history_key[batch],
                         history_value[batch],
-                        torch.as_tensor(ids_np[batch, start:end], device=device),
-                        torch.as_tensor(good_np[batch, start:end], device=device),
-                        torch.as_tensor(local_np[batch, start:end], device=device),
+                        ids[batch, start:end],
+                        good[batch, start:end],
+                        local[batch, start:end],
                         relative_time[batch])
                 if self.checkpoint_chunks and self.training and torch.is_grad_enabled():
                     correction, has_history = checkpoint(self._fuse_chunk, *args, use_reentrant=False)
