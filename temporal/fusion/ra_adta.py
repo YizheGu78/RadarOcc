@@ -7,7 +7,8 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 from ..core.range_anisotropic_geometry import RangeAnisotropicGeometry
-from .sparse_deformable_sampler import anisotropic_candidates, masked_softmax, sparse_sample
+from .sparse_deformable_sampler import (anisotropic_candidates, anisotropic_knn_candidates,
+                                        masked_softmax, sparse_sample)
 
 
 class RangeAwareDeformableTemporalAttention(nn.Module):
@@ -17,7 +18,8 @@ class RangeAwareDeformableTemporalAttention(nn.Module):
                  min_angular_scale_m=0.25, offset_bound=0.5,
                  temperature=0.5, interpolation_cutoff=2.0, chunk_size=256,
                  search_chunk_size=256, time_scale_frames=3.0,
-                 max_log_correction=0.5, checkpoint_chunks=True):
+                 max_log_correction=0.5, checkpoint_chunks=True,
+                 search_mode='radius_anchor'):
         super().__init__()
         sizes = (embed_dims, num_heads, sampling_points_per_head, candidate_pool_size,
                  chunk_size, search_chunk_size)
@@ -35,6 +37,9 @@ class RangeAwareDeformableTemporalAttention(nn.Module):
         self.chunk_size, self.search_chunk_size = chunk_size, search_chunk_size
         self.bound, self.temperature, self.cutoff = offset_bound, temperature, interpolation_cutoff
         self.time_scale, self.max_correction = time_scale_frames, max_log_correction
+        if search_mode not in ('radius_anchor', 'anisotropic_knn'):
+            raise ValueError('Unsupported RA-ADTA search_mode')
+        self.search_mode = search_mode
         self.checkpoint_chunks = bool(checkpoint_chunks)
         self.input = nn.Sequential(nn.Linear(channels, embed_dims), nn.LayerNorm(embed_dims))
         self.q = nn.Linear(embed_dims, embed_dims)
@@ -100,7 +105,9 @@ class RangeAwareDeformableTemporalAttention(nn.Module):
         current = features[:, -1]
         if t == 1 or not valid_mask[:, :-1].any():
             return current, dict(used_history=False, queries_with_history=0)
-        ids_np, good_np, local_np = anisotropic_candidates(aligned_xyz, valid_mask,
+        candidate_search = (anisotropic_knn_candidates if self.search_mode == 'anisotropic_knn'
+                            else anisotropic_candidates)
+        ids_np, good_np, local_np = candidate_search(aligned_xyz, valid_mask,
             self.geometry, self.pool, self.bound, self.cutoff, self.search_chunk_size,
             point_valid_mask)
         if not good_np.any():
