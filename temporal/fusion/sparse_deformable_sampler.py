@@ -106,6 +106,77 @@ def anisotropic_candidates(xyz, valid_mask, geometry, candidate_pool_size=24,
     return ids, good, local
 
 
+
+def anisotropic_knn_candidates(xyz, valid_mask, geometry, candidate_pool_size=8,
+                               offset_bound=0.5, interpolation_cutoff=2.0,
+                               search_chunk_size=256, point_valid_mask=None):
+    """Return at most K neighbours per history frame in normalized radar-bin space.
+
+    KNN operates on range/azimuth/elevation normalized by sensor resolution
+    (and the RA-ADTA alpha scales), not fixed-metre XYZ. After retrieval,
+    preserve the original query-local anisotropic sampling-support gate.
+    """
+    xyz = np.asarray(xyz, dtype=np.float64)
+    if xyz.ndim != 4 or xyz.shape[-1] != 3 or not np.isfinite(xyz).all():
+        raise ValueError('aligned_xyz must be finite [B,T,N,3]')
+    b, t, n, _ = xyz.shape
+    valid_mask = np.asarray(valid_mask, dtype=bool)
+    if valid_mask.shape != (b, t) or not valid_mask[:, -1].all():
+        raise ValueError('valid_mask must be [B,T] with valid current slots')
+    point_mask = (np.ones((b, t, n), dtype=bool) if point_valid_mask is None
+                  else np.asarray(point_valid_mask, dtype=bool))
+    if point_mask.shape != (b, t, n):
+        raise ValueError('point_valid_mask must be [B,T,N]')
+    if candidate_pool_size <= 0 or search_chunk_size <= 0:
+        raise ValueError('K and search_chunk_size must be positive')
+    shape = (b, n, t - 1, candidate_pool_size)
+    ids, good = np.zeros(shape, dtype=np.int64), np.zeros(shape, dtype=bool)
+    local = np.zeros(shape + (3,), dtype=np.float32)
+
+    # Physical bin tables define the units. The wrapped azimuth dimension
+    # handles the -pi/pi seam without duplicating points in the search tree.
+    dr, da, de = (float(np.median(axis[1])) for axis in geometry.tables)
+    x, y, z = np.moveaxis(xyz, -1, 0)
+    horizontal = np.hypot(x, y)
+    ranges = np.hypot(horizontal, z)
+    azimuth = np.arctan2(y, x)
+    elevation = np.arctan2(z, horizontal)
+    az_period = 2 * np.pi / (geometry.alpha[1] * da)
+    radar_coords = np.stack((
+        ranges / (geometry.alpha[0] * dr),
+        np.remainder((azimuth + np.pi) / (geometry.alpha[1] * da), az_period),
+        elevation / (geometry.alpha[2] * de),
+    ), axis=-1)
+    basis, scales = geometry.query_geometry(xyz[:, -1])
+
+    for batch in range(b):
+        queries = np.flatnonzero(point_mask[batch, -1])
+        for frame in range(t - 1):
+            if not valid_mask[batch, frame]:
+                continue
+            candidates = np.flatnonzero(point_mask[batch, frame])
+            if not candidates.size:
+                continue
+            tree = cKDTree(radar_coords[batch, frame, candidates],
+                           boxsize=[0, az_period, 0])
+            k = min(candidate_pool_size, candidates.size)
+            for start in range(0, len(queries), search_chunk_size):
+                chunk = queries[start:start + search_chunk_size]
+                _, nearest = tree.query(radar_coords[batch, -1, chunk],
+                                        k=k, workers=1)
+                nearest = np.asarray(nearest).reshape(len(chunk), k)
+                chosen = candidates[nearest]
+                coords = normalized_displacement(
+                    xyz[batch, frame, chosen], xyz[batch, -1, chunk, None],
+                    basis[batch, chunk, None], scales[batch, chunk, None])
+                distance_to_cube = np.maximum(np.abs(coords) - offset_bound, 0)
+                keep = (distance_to_cube ** 2).sum(-1) <= interpolation_cutoff ** 2
+                ids[batch, chunk, frame, :k] = np.where(keep, chosen + frame * n, 0)
+                good[batch, chunk, frame, :k] = keep
+                local[batch, chunk, frame, :k] = np.where(keep[..., None], coords, 0)
+    return ids, good, local
+
+
 def masked_softmax(logits, mask, dim):
     """Finite all-masked rows, with exactly zero mass on invalid slots."""
     weights = logits.masked_fill(~mask, -1e9).softmax(dim=dim) * mask
