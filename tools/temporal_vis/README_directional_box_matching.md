@@ -94,3 +94,28 @@ python -m unittest discover -s tests -p test_dynamic_object_audit.py -v
 包括等体积与方向镜像、去除自车运动和旋转后的 GT 方向、方向筛选能改善固定 K 的例子、
 Coverage 高但 Top-K 依然漏选的例子、保持原 Query 距离排序、KDTree 与穷举逐项对照、
 闭区间边界及同距候选的确定性选择。
+
+## 正确方向框的 K=8 / 32 / 64 对比
+
+这是离线候选匹配实验，无需模型训练。新增 `--box-methods` 可只运行正确方向框；
+默认仍运行原有三组对照。以下命令保持相同样本和框参数，仅改变 K：
+
+```bash
+conda activate radarocc5060
+for audit_k in 8 32 64; do
+  python tools/temporal_vis/audit_dynamic_objects.py box \
+    --box-methods correct_direction \
+    --scene 3 --start-order 80 --end-order 200 --stride 5 --max-frames 25 \
+    --gaps 1 2 3 --box-lengths 4 6 8 \
+    --box-reverse 0.5 --box-y-half 1.5 --box-z-half 1.0 \
+    --k "$audit_k" \
+    --output-dir "outputs/dynamic_object_audit/scene3_correct_box_k${audit_k}" || break
+done
+```
+
+各目录的 `box_summary_by_history.csv` 与 `box_results.md` 报告 Recall@对应的 K，
+而非固定 Recall@8。Coverage、Outside Box 和有效查询应保持不变，Recall 随 K 非递减。
+`mean_selected` 是每个有效查询实际选中的平均候选数；框内不足 K 时不会补点或复制候选。
+Precision 的分母是实际选中的候选数，不能假设恰好等于 K×有效查询数。
+K=32/64 的匹配改善只表示更大的候选池包含更多正确回波，不代表仍选 8 个时会改善，
+也不代表 Attention、时序融合或 Occupancy 精度已改善。

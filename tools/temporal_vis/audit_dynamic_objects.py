@@ -376,6 +376,9 @@ def parser():
     p.add_argument('--gaps', type=int, nargs='+', default=[1,2,3])
     p.add_argument('--history-mode', choices=['dataset', 'scene-order'], default='dataset',
                    help='gaps are preceding split slots (model default) or exact scene-order gaps')
+    p.add_argument('--box-methods', nargs='+', choices=['symmetric','correct_direction','wrong_direction'],
+                   default=['symmetric','correct_direction','wrong_direction'],
+                   help='Run only the selected box methods')
     p.add_argument('--box-lengths', type=float, nargs='+', default=[4.,6.,8.],
                    help='Main-direction X extensions paired with --gaps')
     p.add_argument('--box-reverse', type=float, default=.5)
@@ -416,6 +419,8 @@ def main():
     if args.experiment == 'occupancy' and (args.single_root is None or args.knn_root is None):
         p.error('occupancy requires --single-root and --knn-root')
     if args.experiment == 'box':
+        if len(set(args.box_methods)) != len(args.box_methods):
+            p.error('--box-methods must not contain duplicates')
         if len(args.box_lengths) != len(args.gaps) or not np.isfinite(args.box_lengths).all() or min(args.box_lengths) <= 0:
             p.error('One finite positive --box-lengths entry per --gaps entry required')
         box_values = [args.box_reverse,args.box_y_half,args.box_z_half,args.min_direction_dx,args.min_longitudinal_cos]

@@ -74,6 +74,23 @@ class DirectionalBoxTests(unittest.TestCase):
                 self.assertEqual([actual[k] for k in ['n_covered','n_success','n_selected','n_selected_same','n_candidates']],
                                  [covered,success,selected,same_selected,candidates])
 
+    def test_k8_32_64_rescue_ranks_and_do_not_pad_small_pools(self):
+        history=np.zeros((80,3))
+        history[:40,0]=np.arange(1,41)/10
+        history[40:,0]=100+np.arange(1,41)/10
+        labels=np.full(80,-1);labels[19]=0;labels[79]=0
+        search=BoxSearch(history,labels,4,.5,1.5,1.)
+        queries=np.array([[0.,0,0],[100.,0,0]])
+        results=[search.counts(queries,0,'correct_direction',1,k) for k in [8,32,64]]
+        self.assertEqual([r['n_success'] for r in results],[0,1,2])
+        self.assertEqual([r['n_topk_miss'] for r in results],[2,1,0])
+        self.assertEqual([r['n_selected'] for r in results],[16,64,80])
+        for r in results:
+            self.assertEqual(r['n_eligible'],2)
+            self.assertEqual(r['n_covered'],2)
+            self.assertEqual(r['n_candidates'],80)
+            self.assertEqual(r['n_outside_box'],0)
+
     def test_inclusive_edges_and_original_index_ties(self):
         history=np.array([[4.,1.5,1.],[-.5,-1.5,-1.],[4.001,0,0],[.2,0,0],[-.2,0,0]])
         search=BoxSearch(history,np.array([0,0,0,-1,0]),4,.5,1.5,1.)

@@ -99,6 +99,7 @@ def metrics(counts):
     return dict(candidate_coverage=ratio(counts['n_covered'], counts['n_eligible']),
                 same_object_recall_at_k=ratio(counts['n_success'], counts['n_eligible']),
                 selected_same_precision=ratio(counts['n_selected_same'], counts['n_selected']),
+                mean_selected=ratio(counts['n_selected'], counts['n_eligible']),
                 mean_candidates=ratio(counts['n_candidates'], counts['n_eligible']),
                 mean_same_candidates=ratio(counts['n_same_candidates'], counts['n_eligible']))
 
@@ -123,15 +124,18 @@ def plot_summary(path, summary, k):
     import matplotlib.pyplot as plt
     slots = sorted({r['history_slot'] for r in summary})
     fig, axes = plt.subplots(1, 3, figsize=(13, 4), sharey=True)
-    colors = ['#777777', '#16855b', '#c55442']
+    colors = dict(zip(METHODS, ['#777777', '#16855b', '#c55442']))
+    methods = [method for method in METHODS if any(r['method'] == method for r in summary)]
+    bar_width = .72 / len(methods)
     for ax, metric, title in zip(axes,
             ['candidate_coverage', 'same_object_recall_at_k', 'selected_same_precision'],
             ['Candidate coverage', f'Same-object Recall@{k}', 'Selected same precision']):
-        for m, (method, color) in enumerate(zip(METHODS, colors)):
+        for m, method in enumerate(methods):
+            color = colors[method]
             values = [next(r[metric] for r in summary if r['method'] == method and r['history_slot'] == slot)
                       for slot in slots]
-            ax.bar(np.arange(len(slots)) + (m-1)*.25,
-                   [100*v if v is not None else np.nan for v in values], .24, color=color, label=method)
+            ax.bar(np.arange(len(slots)) + (m-(len(methods)-1)/2)*bar_width,
+                   [100*v if v is not None else np.nan for v in values], bar_width*.95, color=color, label=method)
         ax.set(title=title, ylim=(0,100), ylabel='Percent')
         ax.set_xticks(np.arange(len(slots)), [f't-{slot}' for slot in slots])
         ax.grid(axis='y', alpha=.2)
@@ -141,6 +145,7 @@ def plot_summary(path, summary, k):
 
 def run(args, data):
     rows, excluded = [], []
+    methods = tuple(args.box_methods)
     parameters = dict(zip(args.gaps, args.box_lengths))
     selected = data.selected()
     for order in selected:
@@ -183,7 +188,7 @@ def run(args, data):
                     continue
                 direction = 1 if delta[0] > 0 else -1
                 pair_rows = []
-                for method in METHODS:
+                for method in methods:
                     counts = search.counts(queries, int(idx[0]), method, direction, args.k)
                     low, high = box_limits(method, direction, extension, args.box_reverse, args.box_y_half, args.box_z_half)
                     row = dict(**base, method=method, history_direction=direction, k=args.k,
@@ -211,11 +216,11 @@ def run(args, data):
     report = ['# Directional box matching (GT direction oracle)', '',
               f'Scene {args.scene}, orders {args.start_order}–{args.end_order}, '
               f'{len(selected)} selected current frames, stride {args.stride}, K={args.k}.', '',
-              'All three arms use paired queries and equal box volumes; distance ranking remains relative to the original query.', '',
+              f'Selected methods: {", ".join(methods)}. Identical query sampling and box dimensions; distance ranking remains relative to the original query.', '',
               '| History | Method | Eligible | Coverage | Recall@K | Precision | Outside box | Top-K miss |',
               '|---|---|---:|---:|---:|---:|---:|---:|']
     for slot in sorted(parameters):
-        for method in METHODS:
+        for method in methods:
             matches = [r for r in summary if r['history_slot']==slot and r['method']==method]
             if not matches:
                 continue
@@ -228,8 +233,8 @@ def run(args, data):
                'Near-zero X displacement is excluded equally from all methods. No sphere search or attention is run.',
                'Repeated queries, tracks, and frames are correlated; these descriptive totals do not establish statistical significance.', '']
     (args.output_dir / 'box_results.md').write_text('\n'.join(report))
-    protocol = dict(methods=METHODS, selected_orders=selected,
-                    n_paired_object_histories=len(rows)//3, n_excluded_object_histories=len(excluded),
+    protocol = dict(methods=methods, selected_orders=selected,
+                    n_paired_object_histories=len(rows)//len(methods), n_excluded_object_histories=len(excluded),
                     direction='sign of aligned historical geometric centre minus current centre, in current radar X',
                     symmetric_x='[-(L+reverse)/2, +(L+reverse)/2]',
                     volume='(L+reverse) * (2*y_half) * (2*z_half)',
