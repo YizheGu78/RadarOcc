@@ -363,7 +363,7 @@ def occupancy(args, data):
 
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('experiment', choices=['match','occupancy'])
+    p.add_argument('experiment', choices=['match','box','occupancy'])
     p.add_argument('--ann-file', type=Path, default=Path('data/annotations/kradar_dict_test_official_temporal_doppler8.pkl'))
     p.add_argument('--bbox-root', type=Path, default=Path('data/K-RadarOcc/train'))
     p.add_argument('--bins', type=Path, default=Path('data/K-Radar-official-meta/resources/info_arr.mat'))
@@ -376,6 +376,15 @@ def parser():
     p.add_argument('--gaps', type=int, nargs='+', default=[1,2,3])
     p.add_argument('--history-mode', choices=['dataset', 'scene-order'], default='dataset',
                    help='gaps are preceding split slots (model default) or exact scene-order gaps')
+    p.add_argument('--box-lengths', type=float, nargs='+', default=[4.,6.,8.],
+                   help='Main-direction X extensions paired with --gaps')
+    p.add_argument('--box-reverse', type=float, default=.5)
+    p.add_argument('--box-y-half', type=float, default=1.5)
+    p.add_argument('--box-z-half', type=float, default=1.)
+    p.add_argument('--min-direction-dx', type=float, default=1e-6,
+                   help='Exclude near-zero absolute GT history dx from all three arms')
+    p.add_argument('--min-longitudinal-cos', type=float, default=0.,
+                   help='Optional minimum abs(dx)/norm(dx,dy); zero keeps lateral pairs')
     p.add_argument('--radius', type=float, default=2.)
     p.add_argument('--k', type=int, default=8)
     p.add_argument('--ego-mask-radius', type=float, default=0.)
@@ -406,11 +415,21 @@ def main():
         p.error('pc-range upper bounds must exceed lower bounds')
     if args.experiment == 'occupancy' and (args.single_root is None or args.knn_root is None):
         p.error('occupancy requires --single-root and --knn-root')
+    if args.experiment == 'box':
+        if len(args.box_lengths) != len(args.gaps) or not np.isfinite(args.box_lengths).all() or min(args.box_lengths) <= 0:
+            p.error('One finite positive --box-lengths entry per --gaps entry required')
+        box_values = [args.box_reverse,args.box_y_half,args.box_z_half,args.min_direction_dx,args.min_longitudinal_cos]
+        if not np.isfinite(box_values).all() or args.box_reverse < 0 or min(args.box_y_half,args.box_z_half) <= 0 or args.min_direction_dx < 0 or not 0 <= args.min_longitudinal_cos <= 1:
+            p.error('Invalid box dimensions or direction thresholds')
     args.output_dir.mkdir(parents=True, exist_ok=True)
     data = Dataset(args)
     if not data.selected():
         p.error('No selected frames')
-    (match if args.experiment == 'match' else occupancy)(args, data)
+    if args.experiment == 'box':
+        from tools.temporal_vis.directional_box_matching import run
+        run(args, data)
+    else:
+        (match if args.experiment == 'match' else occupancy)(args, data)
     metadata = {key: str(value) if isinstance(value,Path) else value for key,value in vars(args).items()}
     metadata.update(box_truth='Processed expanded bbox proxy; overlapping P1 membership excluded',
                     free_space='valid-mask restricted benchmark empty' if args.valid_mask_template else 'benchmark empty within geometric FoV; not observed-free ground truth',

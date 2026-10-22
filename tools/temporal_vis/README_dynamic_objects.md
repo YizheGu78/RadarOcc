@@ -140,3 +140,9 @@ python -m unittest discover -s tests -p test_dynamic_object_audit.py -v
 
 测试覆盖三类有效匹配结果和无历史回波、旋转框与重叠排除、XYZ/ZYX 与越界检查、
 实际模型的 split 历史选择、去除自车运动后的速度、TFPR/目标召回/匹配关联与有效 mask。
+
+## 第一阶段方向性方框实验
+
+新增独立 `box` 命令，同时比较等体积的对称框、GT 正确方向框与反方向框；
+保持 K=8 和原 Query 欧氏距离排序，不运行球形对照或修改模型。
+完整命令、指标和坐标约定见 [README_directional_box_matching.md](README_directional_box_matching.md)。
