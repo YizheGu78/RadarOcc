@@ -40,7 +40,7 @@ def local_neighbors(xyz, valid_mask, k=8, radius_m=2.0, point_valid_mask=None):
 class LocalTemporalAttention(nn.Module):
     def __init__(self, channels=8, embed_dims=32, num_heads=4,
                  neighbors_per_frame=8, radius_m=2.0, chunk_size=1024,
-                 time_scale_frames=3.0, max_log_correction=0.5):
+                 time_scale_frames=3.0, max_log_correction=0.5, selection=None):
         super().__init__()
         if channels != 8 or embed_dims % num_heads or min(
                 embed_dims, num_heads, neighbors_per_frame, chunk_size) <= 0:
@@ -51,6 +51,12 @@ class LocalTemporalAttention(nn.Module):
         self.heads, self.dim = num_heads, embed_dims // num_heads
         self.time_scale = time_scale_frames
         self.max_correction = max_log_correction
+        self.selector = None
+        if selection is not None:
+            from ..core.learned_topk import BoxTopKSelector
+            self.selector = BoxTopKSelector(**dict(selection))
+            if neighbors_per_frame != 8:
+                raise ValueError('Box Top-8 selection requires neighbors_per_frame=8')
         self.input = nn.Sequential(nn.Linear(channels, embed_dims), nn.LayerNorm(embed_dims))
         self.q = nn.Linear(embed_dims, embed_dims)
         self.k_proj = nn.Linear(embed_dims, embed_dims)
@@ -62,15 +68,20 @@ class LocalTemporalAttention(nn.Module):
         nn.init.zeros_(self.output.weight)
         nn.init.zeros_(self.output.bias)
 
-    def forward(self, features, aligned_xyz, frame_offsets, valid_mask, point_valid_mask=None):
+    def forward(self, features, aligned_xyz, frame_offsets, valid_mask, point_valid_mask=None,
+                timestamps=None):
         current = features[:, -1]
         if features.shape[-1] != 8 or not torch.isfinite(features).all():
             raise ValueError('P1 descriptors must be finite with 8 channels')
         b, t, n, _ = features.shape
         if t == 1:
             return current, dict(used_history=False, queries_with_history=0)
-        ids_np, mask_np = local_neighbors(aligned_xyz, valid_mask, self.k, self.radius_m,
-                                        point_valid_mask=point_valid_mask)
+        if self.selector is None:
+            ids_np, mask_np = local_neighbors(aligned_xyz, valid_mask, self.k, self.radius_m,
+                                            point_valid_mask=point_valid_mask)
+        else:
+            ids_np, mask_np = self.selector(features, aligned_xyz, valid_mask,
+                timestamps=timestamps, point_valid_mask=point_valid_mask)
         if not mask_np.any():
             return current, dict(used_history=False, queries_with_history=0)
         device = features.device
@@ -115,3 +126,4 @@ class LocalTemporalAttention(nn.Module):
             result.append(torch.cat(chunks, dim=0))
         return torch.stack(result), dict(used_history=True,
             queries_with_history=int(mask_np.any(axis=-1).sum()))
+

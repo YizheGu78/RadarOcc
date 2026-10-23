@@ -158,9 +158,12 @@ class TemporalPlugin(nn.Module):
                         else cpu_array(valid_mask))
                 if frame_offsets is None:
                     raise ValueError(f'{self.mode} requires relative frame_offsets')
+                selection_args = {}
+                if self.mode == 'ego_attention' and self.fusion.selector is not None:
+                    selection_args['timestamps'] = cpu_array(timestamps)
                 output, attention_debug = self.fusion(
                     features, aligned_xyz, cpu_array(frame_offsets), mask,
-                    point_valid_mask=point_valid)
+                    point_valid_mask=point_valid, **selection_args)
                 fusion_debug.update(attention_debug)
             alignment_debug = dict(coords_raw_xyz=raw_xyz,
                                    coords_aligned_xyz=aligned_xyz,
@@ -191,4 +194,5 @@ class TemporalPlugin(nn.Module):
             debug.update(alignment_debug)
 
         return output, debug
+
 
