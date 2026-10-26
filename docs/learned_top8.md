@@ -132,7 +132,54 @@ detach，后续梯度保持正常。
 
 ## 检查
 
+### 完整模型选点索引缓存（加速冻结选点器）
+
+这与 train_dedup/val_dedup 监督缓存不同。使用完整模型实际 Dataset、GPU P1
+排序和所有 Query，缓存最终 24 个历史索引及 mask，不缓存 Attention 特征。
+预生成在 Selector 返回后截断，不运行 Attention/Occupancy/backward，不更新权重，
+无需提供 Occupancy checkpoint。train/val 各自沿用原数据划分；GT 不参与索引计算。
+
 ```bash
+# 先验证 train/val 各前 5 个样本；再运行一次可测量缓存命中的耗时。
+TOP8_CACHE_DIR=data/top8_selection bash run_temporal_t4_box64_top8_p1.sh \
+  cache-check work_dirs/p1_top8_ranker/best.pth
+
+# 全量预生成 train+val。中断可重新运行，已完成条目自动跳过计算。
+TOP8_CACHE_DIR=data/top8_selection bash run_temporal_t4_box64_top8_p1.sh \
+  cache work_dirs/p1_top8_ranker/best.pth
+
+# 默认严格只读缓存，缺少任何条目立即报错，不悄悄恢复慢速在线选点。
+TOP8_CACHE_DIR=data/top8_selection bash run_temporal_t4_box64_top8_p1.sh \
+  train work_dirs/p1_top8_ranker/best.pth
+
+# 已有该 learned-top8 完整模型的 epoch checkpoint 时，可续训保留优化器/轮次。
+TOP8_CACHE_DIR=data/top8_selection \
+TOP8_RESUME_FROM=work_dirs/radarocc_small_temporal_t4_box64_learned_top8_p1/epoch_1.pth \
+  bash run_temporal_t4_box64_top8_p1.sh train work_dirs/p1_top8_ranker/best.pth
+```
+
+验证比较索引/mask 和非零 Attention 输出完全一致，并打印在线/缓存选点时间；首次
+缺失时包含在线选点和写盘，第二次才反映读缓存时间。完整模型 step 时间仍需实际训练日志测量。
+未设 TOP8_CACHE_DIR 的原命令继续在线计算；TOP8_CACHE_MODE=readwrite 可边训练边补齐，
+第一遍仍然较慢，后续 epoch 读取缓存。cache 默认 train+val，test 需显式
+TOP8_CACHE_SPLITS=test 预生成；缓存验证/测试输入不更新任何模型权重。
+
+采用输入内容哈希而非假设 NPZ 序号与 GPU 排序一致：原始特征、排列顺序、对齐坐标、
+时间、帧/点 mask、搜索策略、实际加载的选点器权重、实现版本、设备及数值设置进入校验。
+相同输入及排列直接复用索引；排序或增强发生变化时只读模式报 miss，不会指向错误的点。
+全模型 resume/load 后重新计算选点器权重签名，避免与传入 ranker 不一致。条目 metadata
+记录预生成时的 split、数据集序号、场景、帧序列和雷达路径；不依赖 GT/ID。
+不缓存原始特征，命中时仍有一次输入拷贝和校验；不能承诺达到单帧训练速度。
+
+每条用 int32 索引和 packbits mask，未压缩存储减少每 epoch 解压：43750 Query、
+T=4 时约 4.33 MB/当前帧（含少量元数据），总容量按实际样本数估计。
+不要把缓存放在很慢的网络盘。没有更改任何 Occ loss、Attention 公式和已有 checkpoint 结构。
+
+使用 20% 子集时，用实际 20% 配置运行 tools/temporal/cache_top8_selection.py，再用
+相同配置训练；快捷脚本依然默认官方完整训练集。需保持相同的 GPU/数值设置。
+
+```bash
+python -m unittest discover -s tests -p test_selection_cache.py -v
 python -m unittest discover -s tests -p test_learned_top8.py -v
 python -m unittest discover -s tests -p test_temporal_attention.py -v
 python -m unittest discover -s tests -p test_directional_box_matching.py -v

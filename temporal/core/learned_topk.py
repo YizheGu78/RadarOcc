@@ -1,6 +1,8 @@
 """Fixed-descriptor pair ranking; never predicts offsets or edits coordinates."""
 from contextlib import nullcontext
 from pathlib import Path
+import hashlib
+import json
 
 import numpy as np
 import torch
@@ -106,7 +108,7 @@ class BoxTopKSelector(nn.Module):
     """64 -> 8 per frame. Ranks detached fixed descriptors, returns indices only."""
     def __init__(self, method='learned', checkpoint=None, frozen=True, candidate_k=64,
                  top_k=8, x_half_by_history=(4., 6., 8.), y_half=1.5, z_half=1.,
-                 query_chunk_size=512):
+                 query_chunk_size=512, cache_dir=None, cache_mode='readwrite'):
         super().__init__()
         if method not in ('learned', 'distance') or candidate_k != 64 or top_k != 8:
             raise ValueError('This experiment uses learned/distance 64-candidate Top-8')
@@ -126,6 +128,35 @@ class BoxTopKSelector(nn.Module):
             self.ranker, _ = load_ranker(checkpoint, self.policy)
             self.ranker.requires_grad_(False)
             self.ranker.eval()
+        from .selection_cache import SelectionCache
+        self.cache = SelectionCache(cache_dir, cache_mode) if cache_dir else None
+        self.cache_metadata = {}
+        self._cache_weights = None
+        self.register_load_state_dict_post_hook(self._reset_cache_weights)
+
+    def _reset_cache_weights(self, module, incompatible_keys):
+        self._cache_weights = None
+
+    def _cache_namespace(self, features):
+        from .selection_cache import update_array
+        if self._cache_weights is None:
+            digest = hashlib.sha256()
+            if self.ranker is not None:
+                for name, value in self.ranker.state_dict().items():
+                    digest.update(name.encode())
+                    update_array(digest, value.detach().cpu().numpy())
+            self._cache_weights = digest.hexdigest()
+        source = hashlib.sha256()
+        for name in ('learned_topk.py', 'box_candidates.py', 'selection_cache.py'):
+            source.update(Path(__file__).with_name(name).read_bytes())
+        device = features.device
+        return json.dumps(dict(format='selection_indices_v1', policy=self.policy,
+            method=self.method, weights=self._cache_weights, source=source.hexdigest(),
+            torch=str(torch.__version__), device=str(device),
+            hardware=torch.cuda.get_device_name(device) if device.type == 'cuda' else 'cpu',
+            matmul_precision=torch.get_float32_matmul_precision(),
+            allow_tf32=torch.backends.cuda.matmul.allow_tf32,
+            chunk=self.query_chunk_size), sort_keys=True)
 
     def train(self, mode=True):
         super().train(mode)
@@ -135,6 +166,31 @@ class BoxTopKSelector(nn.Module):
 
     @torch.no_grad()
     def forward(self, features, xyz, valid_mask, timestamps=None, point_valid_mask=None):
+        if self.cache is None:
+            return self._select_online(features, xyz, valid_mask, timestamps, point_valid_mask)
+        b, t, n, c = features.shape
+        if c != 8 or np.shape(xyz) != (b, t, n, 3) or t < 2:
+            raise ValueError('Selection cache expects P1 [B,T,N,8] and T>=2')
+        raw = features.detach().float().cpu().numpy()
+        namespace = self._cache_namespace(features)
+        indices, masks = [], []
+        for batch in range(b):
+            xyz_one = np.asarray(xyz)[batch:batch+1]
+            frames = np.asarray(valid_mask)[batch:batch+1]
+            times = None if timestamps is None else np.asarray(timestamps)[batch:batch+1]
+            points = None if point_valid_mask is None else np.asarray(point_valid_mask)[batch:batch+1]
+            key = self.cache.key(namespace, raw[batch:batch+1], xyz_one, frames, times, points)
+            selected = self.cache.load(key, (1, n, (t-1)*8), (t-1)*n)
+            if selected is None:
+                selected = self._select_online(features[batch:batch+1], xyz_one, frames, times, points)
+                self.cache.save(key, *selected, metadata=dict(namespace=json.loads(namespace),
+                    sample=self.cache_metadata, input_sha256=key))
+            indices.append(selected[0])
+            masks.append(selected[1])
+        return np.concatenate(indices), np.concatenate(masks)
+
+    @torch.no_grad()
+    def _select_online(self, features, xyz, valid_mask, timestamps=None, point_valid_mask=None):
         b, t, n, _ = features.shape
         if features.shape[-1] != 8 or np.shape(xyz) != (b, t, n, 3):
             raise ValueError('Expected matching [B,T,N,8] descriptors and [B,T,N,3] XYZ')
