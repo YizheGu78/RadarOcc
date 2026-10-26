@@ -8,6 +8,7 @@ import argparse
 import copy
 import importlib
 import json
+import math
 from pathlib import Path
 import sys
 import time
@@ -18,6 +19,13 @@ sys.path.insert(0, str(ROOT))
 
 class SelectionReady(Exception):
     pass
+
+
+def format_duration(seconds):
+    seconds = max(0, math.ceil(seconds))
+    hours, seconds = divmod(seconds, 3600)
+    minutes, seconds = divmod(seconds, 60)
+    return f'{hours:02d}:{minutes:02d}:{seconds:02d}'
 
 
 def main():
@@ -104,6 +112,9 @@ def main():
             dataset = custom_build_dataset(dataset_cfg)
             loader = build_dataloader(dataset, 1, 0, dist=False, shuffle=False)
             parallel.train(split == 'train')
+            target = min(args.max_samples, len(dataset)) if args.max_samples else len(dataset)
+            print(f'Caching split={split} target={target} dataset_total={len(dataset)}; '
+                  'ETA estimates the current split only', flush=True)
             start = time.perf_counter()
             count = 0
             for index, batch in enumerate(loader):
@@ -121,8 +132,13 @@ def main():
                     else:
                         raise RuntimeError('Selector was not reached; refusing incomplete cache')
                 count += 1
-                print(f'{split} {count}/{len(dataset)} hits={selector.cache.hits} '
-                      f'misses={selector.cache.misses} elapsed={time.perf_counter()-start:.1f}s', flush=True)
+                elapsed = time.perf_counter()-start
+                average = elapsed/count
+                remaining = average * max(0, target-count)
+                print(f'{split} {count}/{target} ({100*count/target:.2f}%) '
+                      f'hits={selector.cache.hits} misses={selector.cache.misses} '
+                      f'elapsed={format_duration(elapsed)} avg={average:.3f}s/frame '
+                      f'ETA({split})={format_duration(remaining)}', flush=True)
                 if args.max_samples and count >= args.max_samples:
                     break
             reports.append(dict(split=split, processed=count, total=len(dataset),
