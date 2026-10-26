@@ -43,6 +43,36 @@ def write_json(path, value):
     temporary.replace(path)
 
 
+def unique_id_mask(ids):
+    _, inverse, counts = np.unique(np.asarray(ids).astype(str), return_inverse=True, return_counts=True)
+    return counts[inverse] == 1
+
+
+def ranker_memberships(points, frame_boxes, frame_ids):
+    labels = memberships(points, frame_boxes)
+    # Duplicate IDs do not identify either box reliably. Keep their points in
+    # geometric search, but never teach them as positives OR negatives.
+    ambiguous_boxes = np.flatnonzero(~unique_id_mask(frame_ids))
+    labels[np.isin(labels, ambiguous_boxes)] = -2
+    return labels
+
+
+class RankerDataset(Dataset):
+    @lru_cache(maxsize=32)
+    def annotation(self, order):
+        info = self.by_order[order]
+        path = self.args.bbox_root / str(self.args.scene) / 'bbox'
+        index = int(info['occ_frame_idx'])
+        geometry = np.load(path/f'bbox{index}.npy', allow_pickle=False).reshape(-1, 7)
+        ids = np.load(path/f'bbox_token{index}.npy', allow_pickle=False).reshape(-1).astype(str)
+        categories = np.load(path/f'object_category{index}.npy', allow_pickle=False).reshape(-1)
+        if not (len(geometry) == len(ids) == len(categories)):
+            raise ValueError(f'Inconsistent bbox/ID/category lengths: scene={self.args.scene} order={order}')
+        if not np.isfinite(geometry).all() or np.any(geometry[:, 3:6] <= 0):
+            raise ValueError(f'Invalid box geometry: scene={self.args.scene} order={order}')
+        return geometry, ids, categories
+
+
 def prepare(args):
     if args.split == 'train' and 'test' in args.ann_file.name.lower():
         raise ValueError('A test annotation file cannot be declared a training cache')
@@ -53,6 +83,7 @@ def prepare(args):
     scenes = args.scenes or sorted({str(f.get('scene_id', f.get('scene_token')))
                                    for f in va.read_infos(args.ann_file)})
     shards, used_frames, exclusions = [], set(), defaultdict(int)
+    duplicate_frames = {}
     raw_hash = digest_file(args.ann_file)
     for scene in scenes:
         cfg = SimpleNamespace(ann_file=args.ann_file, scene=scene, bbox_root=args.bbox_root,
@@ -60,7 +91,7 @@ def prepare(args):
             start_order=args.start_order, end_order=args.end_order, stride=args.stride,
             max_frames=args.max_frames_per_scene or sys.maxsize, history_mode='dataset',
             gaps=[1, 2, 3])
-        data = Dataset(cfg)
+        data = RankerDataset(cfg)
 
         @lru_cache(maxsize=4)
         def p1_frame(order):
@@ -78,12 +109,22 @@ def prepare(args):
             values, xyz = values[order_ids], xyz[order_ids]
             if values.shape[1] != 8 or not np.isfinite(values).all():
                 raise ValueError(f'Invalid raw Doppler8 descriptors at {scene}/{order}')
-            frame_boxes, _, _ = data.annotation(order)
-            return xyz, values, memberships(transform(xyz, data.ext), frame_boxes)
+            frame_boxes, frame_ids, _ = data.annotation(order)
+            duplicate = ~unique_id_mask(frame_ids)
+            if duplicate.any():
+                key = f'{scene}/{order}'
+                if key not in duplicate_frames:
+                    duplicate_frames[key] = dict(scene=str(scene), order=order,
+                        ids={str(token): np.flatnonzero(frame_ids == token).tolist()
+                             for token in np.unique(frame_ids[duplicate])})
+                    print(f'WARNING scene={scene} order={order}: duplicate IDs '
+                          f'{list(duplicate_frames[key]["ids"])}; exclude ambiguous supervision', flush=True)
+            return xyz, values, ranker_memberships(transform(xyz, data.ext), frame_boxes, frame_ids)
 
         for order in data.selected():
             current, current_features, labels = p1_frame(order)
             current_boxes, object_ids, _ = data.annotation(order)
+            unique_current = unique_id_mask(object_ids)
             current_pose = data.pose(order)
             for _, historical_order in data.histories(order):
                 slot = data.positions[order]-data.positions[historical_order]
@@ -99,7 +140,13 @@ def prepare(args):
                 # Same Stage A paired cohort. GT defines supervision/evaluation
                 # membership only; neither direction nor displacement is a scorer input.
                 for object_index, token in enumerate(object_ids):
+                    if not unique_current[object_index]:
+                        exclusions['duplicate_current_id_box_history_pairs'] += 1
+                        continue
                     matching = np.flatnonzero(history_ids == token)
+                    if len(matching) > 1:
+                        exclusions['duplicate_historical_id_object_history_pairs'] += 1
+                        continue
                     if not len(matching):
                         exclusions['no_same_id_historical_box'] += 1
                         continue
@@ -147,7 +194,10 @@ def prepare(args):
         data.annotation.cache_clear()
     if not shards:
         raise ValueError('No paired queries; check annotations, scenes, poses and bbox paths')
+    write_json(args.output_dir/'duplicate_ids.json', list(duplicate_frames.values()))
     write_json(args.output_dir/'manifest.json', dict(format=FORMAT, split=args.split,
+        duplicate_id_policy='exclude_all_ambiguous_boxes_from_supervision_v1',
+        duplicate_id_frames=len(duplicate_frames),
         policy=DEFAULT_POLICY, annotation_sha256=raw_hash, bins_sha256=digest_file(args.bins),
         extrinsic_sha256=digest_file(args.extrinsic) if args.extrinsic else 'repository_default',
         frames=sorted(used_frames), shards=shards, exclusions=dict(exclusions),

@@ -12,7 +12,8 @@ from temporal.core.learned_topk import (DEFAULT_POLICY, FORMAT, BoxTopKSelector,
     PairRanker, load_ranker, masked_topk, normalize_descriptors, ranking_loss, save_ranker)
 from temporal.fusion.local_attention import LocalTemporalAttention
 from temporal.temporal_plugin import TemporalPlugin
-from tools.temporal.train_top8_ranker import PairCache, ensure_disjoint, evaluate
+from tools.temporal.train_top8_ranker import (PairCache, ensure_disjoint, evaluate,
+    unique_id_mask, ranker_memberships, RankerDataset)
 
 torch.set_num_threads(2)
 
@@ -206,6 +207,39 @@ class RankerTests(unittest.TestCase):
 
 
 class CacheTests(unittest.TestCase):
+    def test_duplicate_ids_ignore_both_boxes_but_preserve_unique_targets(self):
+        ids = np.array(['111', '136', '136'])
+        np.testing.assert_array_equal(unique_id_mask(ids), [True, False, False])
+        geometry = np.array([[10, 0, 0, 2, 2, 2, 0],
+                             [20, 0, 0, 2, 2, 2, 0],
+                             [30, 0, 0, 2, 2, 2, 0]], dtype=float)
+        points = np.array([[10, 0, 1], [20, 0, 1], [30, 0, 1], [40, 0, 1]])
+        labels = ranker_memberships(points, geometry, ids)
+        np.testing.assert_array_equal(labels, [0, -2, -2, -1])
+        # Both repeated boxes are ignored by the loss; genuine background stays negative.
+        np.testing.assert_array_equal(labels != -2, [True, False, False, True])
+
+    def test_ranker_annotation_accepts_duplicate_ids_still_checks_geometry(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            folder = root/'3'/'bbox'
+            folder.mkdir(parents=True)
+            geometry = np.array([[10, 0, 0, 2, 2, 2, 0], [30, 0, 0, 2, 2, 2, 0]])
+            np.save(folder/'bbox1.npy', geometry)
+            np.save(folder/'bbox_token1.npy', ['136', '136'])
+            np.save(folder/'object_category1.npy', [1, 2])
+            data = RankerDataset.__new__(RankerDataset)
+            data.args = SimpleNamespace(bbox_root=root, scene='3')
+            data.by_order = {1: dict(occ_frame_idx=1)}
+            self.assertEqual(data.annotation(1)[1].tolist(), ['136', '136'])
+            data.annotation.cache_clear()
+            geometry[0, 3] = -1
+            np.save(folder/'bbox1.npy', geometry)
+            with self.assertRaisesRegex(ValueError, 'Invalid box geometry'):
+                data.annotation(1)
+            data.annotation.cache_clear()
+
     def test_train_val_overlap_including_history_is_rejected(self):
         class Cache:
             pass
