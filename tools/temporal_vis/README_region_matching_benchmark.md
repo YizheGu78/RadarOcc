@@ -9,7 +9,7 @@ This experiment evaluates **region-to-region** matches before adding interpolati
 - GT `bbox{occ_frame_idx}.npy` and `bbox_token{occ_frame_idx}.npy`, used **only for scoring**. At inference the matching algorithm does not access GT.
 - Current accepted reflection regions and prior 1, 2, 3 accepted reflection regions.
 
-**Important:** This benchmark **recomputes** the reflection regions with the specified parameters and does not read `outputs/p1_reflection_regions/...` PNG/JSON/NPZ. By default it uses the recent visualization settings: `seed-percentile=98`, `seed-mad=4`, `box-size-m=6 3 3`, `max-box-size-m=12 5 5`. Override the flags if you want to reproduce another proposal configuration.
+**Important:** This benchmark **recomputes** the reflection regions with the specified parameters and does not read `outputs/p1_reflection_regions/...` PNG/JSON/NPZ. By default it uses the agreed proposal settings: `seed-percentile=97`, `seed-mad=3`, `box-size-m=6 3 3`, `max-box-size-m=12 4 4`. Override the flags if you want to reproduce another proposal configuration.
 
 ## Fast smoke run
 
