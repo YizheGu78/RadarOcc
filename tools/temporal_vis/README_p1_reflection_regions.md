@@ -12,14 +12,23 @@ From the project root in the existing environment:
 ```bash
 source use_radarocc5060.sh
 python tools/temporal_vis/vis_p1_reflection_regions.py \
-  --ann-file data/annotations/kradar_dict_val_official_temporal_doppler8.pkl \
   --scene 3 --start-order 80 --end-order 200 --stride 5 \
   --camera-dir data/K-Radar-RGB/K-Radar/K-Radar-RGB/3/images_rb_switched \
   --output-dir outputs/p1_reflection_regions/scene3 --gif
 ```
 
-For one frame, set `--start-order 80 --end-order 80`. For another dataset split,
-change `--ann-file`. These are `order_in_scene` values, NOT radar filenames.
+For one frame, set `--start-order 80 --end-order 80`. By default the tool finds
+the scene in existing full train/val/test temporal PKLs under data/annotations
+and prints the selected file and order range. It does not assume scene 3 is in
+validation. An explicit `--ann-file` is respected and never silently replaced.
+If a scene occurs in more than one split, select one explicitly; split-local
+orders must not be merged. Inspect available scenes without radar/RGB loading:
+
+```bash
+python tools/temporal_vis/vis_p1_reflection_regions.py --list-scenes
+```
+
+These are `order_in_scene` values, NOT radar filenames.
 The complete 80..200 step-5 selection produces 25 frames if all orders exist.
 
 The tool also checks the two existing common RGB directory layouts if

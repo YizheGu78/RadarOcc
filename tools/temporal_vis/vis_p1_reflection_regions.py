@@ -191,10 +191,70 @@ def camera_directory(root, scene, explicit):
     return existing[0] if existing else None
 
 
+def scene_key(value):
+    """Metadata may store scene 3 as integer 3, '3', or '03'."""
+    text = str(value)
+    return str(int(text)) if text.isdigit() else text
+
+
+def annotation_scenes(path):
+    groups = {}
+    for info in alignment.read_infos(path):
+        key = scene_key(info.get('scene_id', info.get('scene_token')))
+        groups.setdefault(key, []).append(info)
+    for key, rows in groups.items():
+        if any('order_in_scene' not in row for row in rows):
+            raise ValueError(f'{path}: scene {key} lacks order_in_scene; use a temporal frame-level PKL')
+        rows.sort(key=lambda row: int(row['order_in_scene']))
+    return groups
+
+
+def format_inventory(inventory):
+    lines = []
+    for path, groups in inventory:
+        entries = ', '.join(f'{key} (n={len(rows)}, orders={rows[0]["order_in_scene"]}..{rows[-1]["order_in_scene"]})'
+                            for key, rows in sorted(groups.items()))
+        lines.append(f'{path}: {entries or "no scenes"}')
+    return '\n'.join(lines)
+
+
+def load_scene(root, ann_file, requested_scene, list_only=False):
+    """Locate one full temporal split. Never merge independently numbered splits."""
+    key = scene_key(requested_scene)
+    if ann_file is not None:
+        path = ann_file if ann_file.is_absolute() else root / ann_file
+        paths = [path]
+    else:
+        paths = [root / 'data/annotations' / f'kradar_dict_{split}_official_temporal_doppler8.pkl'
+                 for split in ('train', 'val', 'test')]
+        paths = [path for path in paths if path.is_file()]
+        if not paths:
+            raise FileNotFoundError('No full train/val/test temporal PKLs under data/annotations; pass --ann-file')
+    inventory = [(path, annotation_scenes(path)) for path in paths]
+    if list_only:
+        print(format_inventory(inventory), flush=True)
+        return None, None
+    matches = [(path, groups[key]) for path, groups in inventory if key in groups]
+    if not matches:
+        raise ValueError(f'Scene {key} is absent from the selected annotation(s).\n'
+                         + format_inventory(inventory)
+                         + '\nOmit --ann-file to auto-locate the scene in full train/val/test PKLs, '
+                         'or use --list-scenes to inspect the available orders.')
+    if len(matches) > 1:
+        raise ValueError(f'Scene {key} occurs in multiple splits; pass --ann-file explicitly. '
+                         'Their order_in_scene values may be split-local and cannot be merged safely.\n'
+                         + format_inventory(inventory))
+    path, rows = matches[0]
+    print(f'Using annotation: {path} | scene={key} frames={len(rows)} '
+          f'orders={rows[0]["order_in_scene"]}..{rows[-1]["order_in_scene"]}', flush=True)
+    return path, rows
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--repo-root', type=Path, default=ROOT)
-    parser.add_argument('--ann-file', type=Path, default=Path('data/annotations/kradar_dict_val_official_temporal_doppler8.pkl'))
+    parser.add_argument('--ann-file', type=Path, help='Explicit temporal PKL; omit to locate scene in full train/val/test PKLs')
+    parser.add_argument('--list-scenes', action='store_true', help='List annotation scenes/order ranges and exit without loading radar/RGB')
     parser.add_argument('--bins', type=Path, default=Path('data/K-Radar-official-meta/resources/info_arr.mat'))
     parser.add_argument('--scene', default='3')
     parser.add_argument('--start-order', type=int, default=80)
@@ -253,8 +313,11 @@ def main():
         parser.error(str(exc))
     root = args.repo_root.resolve()
     rooted = lambda p: p if p.is_absolute() else root / p
-    ann_file, bins = rooted(args.ann_file), rooted(args.bins)
-    scene = alignment.scene_infos(alignment.read_infos(ann_file), args.scene)
+    ann_file, scene = load_scene(root, args.ann_file, args.scene, args.list_scenes)
+    if args.list_scenes:
+        return
+    args.scene = scene_key(args.scene)
+    bins = rooted(args.bins)
     orders = [int(i['order_in_scene']) for i in scene]
     if len(set(orders)) != len(orders):
         raise ValueError('Duplicate scene/order records in annotation')
@@ -263,10 +326,13 @@ def main():
     if args.max_frames:
         selected = selected[:args.max_frames]
     if not selected:
-        raise ValueError(f'No selected orders for scene {args.scene}; inspect the annotation and order range')
+        raise ValueError(f'No selected orders for scene {args.scene} in {ann_file}. '
+                         f'Requested orders {args.start_order}..{args.end_order}, stride={args.stride}; '
+                         f'available orders {min(orders)}..{max(orders)} (n={len(orders)}). '
+                         'Use --list-scenes; orders are annotation order_in_scene, not radar filename IDs.')
     if args.rgb_image and len(selected) != 1:
         parser.error('--rgb-image requires exactly one selected frame')
-    reference = alignment.scene_infos(alignment.read_infos(rooted(args.camera_reference_ann_file)), args.scene) if args.camera_reference_ann_file else scene
+    reference = annotation_scenes(rooted(args.camera_reference_ann_file)).get(args.scene, []) if args.camera_reference_ann_file else scene
     camera_dir = None if args.no_rgb else camera_directory(root, str(args.scene), args.camera_dir)
     projection = None
     if args.projection_npy:
@@ -279,7 +345,7 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     frames = []
     csv_rows = []
-    config_dict = {**vars(args), 'algorithm': config.__dict__}
+    config_dict = {**vars(args), 'resolved_ann_file': str(ann_file), 'algorithm': config.__dict__}
     print(f'Scene {args.scene}: {len(selected)} selected frames; no GT/model/CUDA', flush=True)
     for index, info in enumerate(selected):
         load_start = time.perf_counter()

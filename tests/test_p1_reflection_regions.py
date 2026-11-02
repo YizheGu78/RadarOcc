@@ -13,7 +13,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tools.temporal_vis.p1_reflection_regions import RegionConfig, extract_regions, grow_regions, npz_payload
-from tools.temporal_vis.vis_p1_reflection_regions import project_points, project_box_edges, read_p1
+from tools.temporal_vis.vis_p1_reflection_regions import project_points, project_box_edges, read_p1, load_scene
 
 
 def cloud(centers):
@@ -34,6 +34,34 @@ def config(**kwargs):
 
 
 class ReflectionRegionTests(unittest.TestCase):
+    def test_auto_scene_lookup_finds_train_instead_of_assuming_val(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            annotations = root / 'data/annotations'
+            annotations.mkdir(parents=True)
+            for split, scene in [('train', '03'), ('val', 15)]:
+                path = annotations / f'kradar_dict_{split}_official_temporal_doppler8.pkl'
+                with path.open('wb') as stream:
+                    pickle.dump(dict(infos=[dict(scene_id=scene, order_in_scene=80)]), stream)
+            path, rows = load_scene(root, None, '3')
+            self.assertIn('train', path.name)
+            self.assertEqual(rows[0]['order_in_scene'], 80)
+            wrong = annotations / 'kradar_dict_val_official_temporal_doppler8.pkl'
+            with self.assertRaisesRegex(ValueError, 'Scene 3 is absent') as caught:
+                load_scene(root, wrong, '3')
+            self.assertIn('15 (n=1, orders=80..80)', str(caught.exception))
+
+    def test_auto_scene_lookup_refuses_to_merge_split_local_orders(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            annotations = root / 'data/annotations'
+            annotations.mkdir(parents=True)
+            for split in ('train', 'test'):
+                with (annotations / f'kradar_dict_{split}_official_temporal_doppler8.pkl').open('wb') as stream:
+                    pickle.dump(dict(infos=[dict(scene_id=3, order_in_scene=0)]), stream)
+            with self.assertRaisesRegex(ValueError, 'multiple splits'):
+                load_scene(root, None, '3')
+
     def test_two_peaks_remain_separate_despite_weak_bridge(self):
         xyz, power = cloud([[6, 0, 0], [11, 0, 0]])
         bridge = np.c_[np.arange(6.5, 11, .5), np.zeros((9, 2))]
