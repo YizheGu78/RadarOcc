@@ -85,7 +85,8 @@ def json_default(value):
 
 
 def render(result, xyz, power, destination, title, rgb_path=None, projection=None,
-           rgb_crop_width=0, max_points=10000, max_boxes=40):
+           rgb_crop_width=0, max_points=10000, max_boxes=40,
+           detail_x_limits=(0., 60.), detail_y_limits=(-10., 10.), power_scale='log'):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -94,8 +95,8 @@ def render(result, xyz, power, destination, title, rgb_path=None, projection=Non
     from PIL import Image
 
     config = result['config']
-    fig, axes = plt.subplots(2, 2, figsize=(18, 12), layout='constrained')
-    camera, intensity, seeds, boxes = axes.ravel()
+    fig, axes = plt.subplots(2, 3, figsize=(22, 12), layout='constrained')
+    camera, intensity, seeds, before, boxes, detail = axes.ravel()
     selected_regions = sorted(result['regions'], key=lambda r: (not r['accepted'], r['id']))[:max_boxes]
     if rgb_path:
         with Image.open(rgb_path) as image:
@@ -125,14 +126,20 @@ def render(result, xyz, power, destination, title, rgb_path=None, projection=Non
     camera.axis('off')
     extent = [config['x_limits'][0], config['x_limits'][0] + result['raw_bev'].shape[0] * config['xy_resolution'],
               config['y_limits'][0], config['y_limits'][0] + result['raw_bev'].shape[1] * config['xy_resolution']]
-    image = np.ma.masked_invalid(np.where(np.isfinite(result['raw_bev']), result['raw_bev'], np.nan)).T
+    raster = np.where(np.isfinite(result['raw_bev']), result['raw_bev'], np.nan)
     finite = power[result['analysis_mask']]
+    if power_scale == 'log':
+        raster = np.sign(raster) * np.log10(1 + np.abs(raster))
+        finite = np.sign(finite) * np.log10(1 + np.abs(finite))
+    image = np.ma.masked_invalid(raster).T
     if len(finite):
         low, high = np.percentile(finite, [2, 99.5])
         artist = intensity.imshow(image, origin='lower', extent=extent, cmap='viridis',
             vmin=low, vmax=max(high, low + 1e-8), interpolation='nearest')
-        fig.colorbar(artist, ax=intensity, fraction=.035, label='Stored power channel 2 (per-frame color scale)')
-    intensity.set_title('Raw P1 BEV intensity | all analysis-ROI returns')
+        fig.colorbar(artist, ax=intensity, fraction=.035,
+                     label=('Signed log10(1+|power|)' if power_scale == 'log' else 'Stored power channel 2')
+                     + ' | per-frame scale')
+    intensity.set_title('P1 BEV power | all analysis-ROI returns\nDisplay compression does not change proposal extraction')
     seeds.imshow(result['support_bev'].T.astype(float), origin='lower', extent=extent,
                  cmap='Greys', vmin=0, vmax=2, interpolation='nearest')
     sx, sy = np.nonzero(result['seed_bev'])
@@ -150,32 +157,64 @@ def render(result, xyz, power, destination, title, rgb_path=None, projection=Non
     ids = np.flatnonzero(result['analysis_mask'])
     if len(ids) > max_points:
         ids = ids[np.linspace(0, len(ids) - 1, max_points, dtype=int)]
-    boxes.scatter(xyz[ids, 0], xyz[ids, 1], color='.8', s=1, alpha=.4)
-    for region in selected_regions:
-        color = region_color(region)
-        members = region['support_point_ids']
-        boxes.scatter(xyz[members, 0], xyz[members, 1], color=color, s=6, alpha=.8)
-        for low, high, style in ((region['observed_min'], region['observed_max'], '--'),
-                                  (region['box_min'], region['box_max'], '-')):
-            span = np.maximum(high[:2] - low[:2], .05)
-            boxes.add_patch(Rectangle(low[:2], *span, fill=False, edgecolor=color, linestyle=style, lw=1.2))
-        boxes.text(*region['center'][:2], f'R{region["id"]} z={region["center"][2]:.1f}',
-            color=color, fontsize=7, bbox=dict(facecolor='white', alpha=.65, pad=.3))
-    boxes.legend(handles=[Line2D([0], [0], color='black', ls='--', label='Observed support bounds'),
-                          Line2D([0], [0], color='black', label='Fixed-size fusion box'),
-                          Line2D([0], [0], color='.5', label='Low-confidence proposal')], fontsize=8, loc='upper right')
+    def draw_regions(ax, regions, prefix, x_limits, y_limits, fine=False, show_height=False):
+        background = ids[(xyz[ids, 0] >= x_limits[0]) & (xyz[ids, 0] <= x_limits[1])
+                         & (xyz[ids, 1] >= y_limits[0]) & (xyz[ids, 1] <= y_limits[1])]
+        ax.scatter(xyz[background, 0], xyz[background, 1], color='.8', s=1, alpha=.4)
+        visible = [r for r in regions if r['box_min'][0] <= x_limits[1] and r['box_max'][0] >= x_limits[0]
+                   and r['box_min'][1] <= y_limits[1] and r['box_max'][1] >= y_limits[0]]
+        selected = sorted(visible, key=lambda r: (not r['accepted'], r['id']))[:max_boxes]
+        label_positions = []
+        for region in selected:
+            color = region_color(region)
+            members = region['support_point_ids']
+            ax.scatter(xyz[members, 0], xyz[members, 1], color=color, s=6, alpha=.8)
+            for low, high, style in ((region['observed_min'], region['observed_max'], '--'),
+                                      (region['box_min'], region['box_max'], '-')):
+                span = np.maximum(high[:2] - low[:2], .05)
+                ax.add_patch(Rectangle(low[:2], *span, fill=False, edgecolor=color, linestyle=style, lw=1.2))
+            label = f'{prefix}{region["id"]}'
+            if not fine:
+                label += f' n={region["source_seed_count"]}'
+            if show_height:
+                label += f' z={region["center"][2]:.1f}'
+            # Keep labels inside zoom panels even when a box crosses a crop edge.
+            position = np.clip(region['center'][:2], [x_limits[0], y_limits[0]], [x_limits[1], y_limits[1]])
+            overlap = sum(np.linalg.norm(position - previous) < config['xy_resolution']
+                          for previous in label_positions)
+            label_positions.append(position)
+            ax.annotate(label, xy=position, xytext=(2, 3 + 10 * overlap), textcoords='offset points',
+                        color=color, fontsize=7, clip_on=True,
+                        bbox=dict(facecolor='white', alpha=.7, pad=.3))
+        ax.set_xlim(x_limits)
+        ax.set_ylim(y_limits)
+        return len(selected), len(visible)
+
+    fine_drawn, fine_visible = draw_regions(before, result['fine_regions'], 'S', config['x_limits'], config['y_limits'], fine=True)
+    drawn, visible = draw_regions(boxes, result['regions'], 'R', config['x_limits'], config['y_limits'])
+    zoom_drawn, zoom_visible = draw_regions(detail, result['regions'], 'R', detail_x_limits, detail_y_limits, show_height=True)
+    box_label = 'Support-enclosing box' if config['merge_regions'] else 'Fixed-size box (legacy)'
+    for ax in (before, boxes):
+        ax.legend(handles=[Line2D([0], [0], color='black', ls='--', label='Observed support bounds'),
+                           Line2D([0], [0], color='black', label=box_label if ax is boxes else 'Original fixed-size box'),
+                           Line2D([0], [0], color='.5', label='Low-confidence proposal')], fontsize=7, loc='upper right')
     stats = result['stats']
-    boxes.set_title(f'Proposals: {stats["n_accepted"]}/{stats["n_regions"]} accepted | '
-                    f'P1 points in accepted boxes: {stats["n_box_points"]}\n'
-                    f'Showing {len(selected_regions)} boxes; IDs are frame-local, not tracks')
-    for ax in (intensity, seeds, boxes):
+    before.set_title(f'Before: {stats["n_fine_regions"]} seed regions | original fixed boxes\n'
+                     f'Showing {fine_drawn}/{fine_visible}; S IDs identify reflection seeds')
+    boxes.set_title(f'After: {stats["n_fine_regions"]} seeds -> {stats["n_regions"]} groups | '
+                    f'{stats["n_accepted"]} accepted\n'
+                    f'Showing {drawn}/{visible}; n = source seeds; gray = low confidence')
+    detail.set_title(f'Forward-area detail | showing {zoom_drawn}/{zoom_visible} groups\n'
+                     f'Accepted boxes contain {stats["n_box_points"]} P1 returns in full ROI')
+    for ax in (intensity, seeds):
         ax.set_xlim(config['x_limits'])
         ax.set_ylim(config['y_limits'])
+    for ax in (intensity, seeds, before, boxes, detail):
         ax.set_aspect('equal')
         ax.set_xlabel('X forward (m)')
         ax.set_ylabel('Y left (m)')
         ax.grid(alpha=.15)
-    fig.suptitle(title + '\nGT-free reflection proposals; RGB is reference only; no model inference', fontsize=13)
+    fig.suptitle(title + '\nGT-free, single-frame reflection groups; RGB is reference only; IDs are not tracks', fontsize=13)
     fig.savefig(destination, dpi=130)
     plt.close(fig)
 
@@ -276,7 +315,12 @@ def main():
     parser.add_argument('--peak-separation-m', type=float, default=1.5)
     parser.add_argument('--max-seeds', type=int, default=128)
     parser.add_argument('--grow-half-size-m', type=float, nargs=3, default=[4., 2., 2.])
-    parser.add_argument('--box-size-m', type=float, nargs=3, default=[6., 3., 3.], help='Fixed XYZ dimensions; proposal, not vehicle-size GT')
+    parser.add_argument('--box-size-m', type=float, nargs=3, default=[6., 3., 3.], help='Minimum XYZ box size; exact fixed size with --no-merge')
+    parser.add_argument('--no-merge', action='store_true', help='Reproduce the original per-seed fixed-box extraction')
+    parser.add_argument('--merge-gap-m', type=float, nargs=3, default=[1.5, 1., 1.], help='Maximum XYZ separation of support cell centers for linking')
+    parser.add_argument('--merge-min-contact-cells', type=int, default=2, help='Minimum distinct closest-boundary cells on EACH side of a link')
+    parser.add_argument('--max-box-size-m', type=float, nargs=3, default=[12., 4., 4.], help='Maximum XYZ box size for accepted merged groups')
+    parser.add_argument('--box-padding-m', type=float, nargs=3, default=[.5, .25, .5], help='XYZ padding on each side of support bounds')
     parser.add_argument('--min-points', type=int, default=6)
     parser.add_argument('--min-cells', type=int, default=3)
     parser.add_argument('--max-aspect', type=float, default=8.)
@@ -290,6 +334,9 @@ def main():
     parser.add_argument('--rgb-crop-width', type=int, default=0, help='0 keeps the full RGB image; positive keeps left columns')
     parser.add_argument('--max-points', type=int, default=10000, help='Background scatter display only; never limits extraction')
     parser.add_argument('--max-draw-boxes', type=int, default=40, help='Drawing only; all proposals are exported')
+    parser.add_argument('--detail-x-limits', type=float, nargs=2, default=[0., 60.])
+    parser.add_argument('--detail-y-limits', type=float, nargs=2, default=[-10., 10.])
+    parser.add_argument('--power-scale', choices=('log', 'linear'), default='log', help='Display only; extraction always uses original power')
     parser.add_argument('--gif', action='store_true')
     parser.add_argument('--fps', type=float, default=5.)
     parser.add_argument('--output-dir', type=Path, default=Path('outputs/p1_reflection_regions'))
@@ -297,7 +344,8 @@ def main():
     args = parser.parse_args()
     if (args.end_order < args.start_order or args.stride < 1 or args.max_frames < 0
             or min(args.max_points, args.max_draw_boxes) < 1 or args.rgb_crop_width < 0
-            or not np.isfinite(args.fps) or args.fps <= 0):
+            or not np.isfinite(args.fps) or args.fps <= 0
+            or any(not np.isfinite(v).all() or v[0] >= v[1] for v in (args.detail_x_limits, args.detail_y_limits))):
         parser.error('Check order range, stride, frame/display counts, crop and fps')
     if args.no_rgb and (args.projection_npy or args.rgb_image or args.camera_dir):
         parser.error('--no-rgb cannot be combined with RGB image/directory/projection options')
@@ -308,6 +356,9 @@ def main():
             support_percentile=args.support_percentile, seed_mad=args.seed_mad, support_mad=args.support_mad,
             peak_separation_m=args.peak_separation_m, max_seed_count=args.max_seeds,
             grow_half_size=tuple(args.grow_half_size_m), box_size=tuple(args.box_size_m),
+            merge_regions=not args.no_merge, merge_gap=tuple(args.merge_gap_m),
+            merge_min_contact_cells=args.merge_min_contact_cells,
+            max_box_size=tuple(args.max_box_size_m), box_padding=tuple(args.box_padding_m),
             min_points=args.min_points, min_cells=args.min_cells, max_aspect=args.max_aspect).validate()
     except ValueError as exc:
         parser.error(str(exc))
@@ -368,18 +419,21 @@ def main():
         stem = f'scene{args.scene}_order{order:05d}'
         image_path = output / f'{stem}.png'
         render(result, xyz, power, image_path, f'Scene {args.scene} | order {order} | P1 175 x 250 returns',
-               rgb_path, projection, args.rgb_crop_width, args.max_points, args.max_draw_boxes)
+               rgb_path, projection, args.rgb_crop_width, args.max_points, args.max_draw_boxes,
+               args.detail_x_limits, args.detail_y_limits, args.power_scale)
         np.savez_compressed(output / f'{stem}.npz', **npz_payload(result, xyz, power, coords))
         regions = [{k: v for k, v in r.items() if k not in ('support_point_ids', 'box_point_ids')} for r in result['regions']]
+        fine_regions = [{k: v for k, v in r.items() if k not in ('support_point_ids', 'box_point_ids')} for r in result['fine_regions']]
         record = dict(scene=str(args.scene), order=order, radar_frame_id=info.get('radar_frame_id'),
             radar_path=str(radar_path), image=image_path.name, arrays=f'{stem}.npz', rgb=mapping,
             load_seconds=load_seconds, region_seconds=region_seconds,
-            stats=result['stats'], thresholds=result['thresholds'], regions=regions)
+            stats=result['stats'], thresholds=result['thresholds'], regions=regions, fine_regions=fine_regions)
         (output / f'{stem}.json').write_text(json.dumps(record, indent=2, default=json_default, allow_nan=False) + '\n', encoding='utf-8')
-        frames.append({k: v for k, v in record.items() if k not in ('regions', 'thresholds')})
+        frames.append({k: v for k, v in record.items() if k not in ('regions', 'fine_regions', 'thresholds')})
         csv_rows.append(dict(scene=str(args.scene), order=order, **result['stats'],
             load_seconds=load_seconds, region_seconds=region_seconds, image=image_path.name))
-        print(f'[{index+1}/{len(selected)}] order={order} regions={result["stats"]["n_regions"]} '
+        print(f'[{index+1}/{len(selected)}] order={order} seeds={result["stats"]["n_fine_regions"]} '
+              f'groups={result["stats"]["n_regions"]} recovered_support={result["stats"]["n_recovered_support"]} '
               f'accepted={result["stats"]["n_accepted"]} boxed_points={result["stats"]["n_box_points"]} '
               f'region_seconds={region_seconds:.3f} image={image_path}', flush=True)
     with (output / 'frame_summary.csv').open('w', newline='', encoding='utf-8') as stream:
@@ -390,7 +444,10 @@ def main():
         proposal_ids='frame-local, not tracks; no temporal association yet',
         point_ids='Original NPZ first 175*250 indices, not GPU power-sorted positions',
         box_fraction='Fraction of all P1 returns in accepted boxes; NOT object recall',
-        note='Fixed XYZ box size for every frame; parameters are initial inspection settings, not calibrated vehicle detection',
+        schema_version=2,
+        note='Geometry-based reflection groups, not verified objects. Merged boxes enclose support; '
+             'size limits and long-chain flags are heuristics. No temporal size stabilization yet. '
+             '--no-merge retains original per-seed fixed boxes.',
         config=json.loads(json.dumps(config_dict, default=str)), bins_sha256=hashlib.sha256(bins.read_bytes()).hexdigest(),
         frames=frames)
     (output / 'manifest.json').write_text(json.dumps(manifest, indent=2, default=json_default, allow_nan=False) + '\n', encoding='utf-8')

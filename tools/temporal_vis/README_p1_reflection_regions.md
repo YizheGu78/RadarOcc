@@ -14,7 +14,7 @@ source use_radarocc5060.sh
 python tools/temporal_vis/vis_p1_reflection_regions.py \
   --scene 3 --start-order 80 --end-order 200 --stride 5 \
   --camera-dir data/K-Radar-RGB/K-Radar/K-Radar-RGB/3/images_rb_switched \
-  --output-dir outputs/p1_reflection_regions/scene3 --gif
+  --output-dir outputs/p1_reflection_regions/scene3_merged --gif
 ```
 
 For one frame, set `--start-order 80 --end-order 80`. By default the tool finds
@@ -60,17 +60,40 @@ requires that crop; default is the full image.
    any truncation. Grow multiple regions only through lower-threshold supported
    neighboring cells. Seeds remain distinct across weak bridges. Growth is
    bounded by +/-4 m X, +/-2 m Y/Z relative to each seed.
-5. Compute observed min/max bounds and a robust center from coordinate 10/90
-   percentiles. Draw a fixed 6 x 3 x 3 m fusion box around that center. This
-   first diagnostic uses the SAME configurable size in every frame; it is not
-   a learned object box, truck-size estimator, or temporal track.
-6. Mark proposals with fewer than 6 support points / 3 supported cells, or an
-   XY aspect ratio above 8, as low confidence. Retain them in diagnostics; never
-   delete their source points. Extremely long structures may be split into
-   several bounded reflection proposals, not classified as vehicles.
-7. Save ALL original eligible points inside each fixed box, including weak
+5. Keep the original per-seed regions and fixed 6 x 3 x 3 m boxes for a BEFORE
+   panel. Before point-count filtering, merge fine regions with spatial evidence:
+   link supported cell centers separated by at most (1.5, 1, 1) m along XYZ.
+   Each link needs at least 2 distinct closest-boundary cells on EACH side.
+   This permits several peaks on one body while resisting a one-cell bridge.
+   Unseeded connected support fragments can also attach to a seeded group across
+   small gaps; seedless groups never create standalone proposals. No empty cells
+   or extra radar returns are synthesized. Distances are measured on the temporary
+   grid, so the grid resolution affects the linkage decision.
+6. Process nearest links first, deterministically. Recheck the bounds of the
+   ENTIRE union at each step, including padding. Accepted boxes are limited to
+   12 x 4 x 4 m, preventing unlimited chaining. Also inspect full linked chains
+   before these bounded unions: if a chain exceeds the horizontal size limit and
+   its XY aspect ratio exceeds 8, mark its proposals `long_structure_candidate`.
+   This is a conservative shape heuristic, not a barrier/vehicle classifier.
+7. Create a support-enclosing box: at least 6 x 3 x 3 m, expanding when necessary
+   to include all merged support plus padding (0.5, 0.25, 0.5) m per side. Keep
+   the robust 10/90 center where possible, adjusting it to enclose support. A fine
+   region already larger than the maximum remains visible as `oversized_support`;
+   it is NOT silently clipped into an accepted small box. These are single-frame
+   sizes, not stabilized sizes across a temporal track.
+8. AFTER merging, mark groups with fewer than 6 support points / 3 supported cells,
+   an XY aspect ratio above 8, oversized support, or a long-chain flag as low
+   confidence. Retain their source points and export their reason. The BEFORE
+   and AFTER panels each report counts; accepted counts are not object counts.
+9. Save ALL original eligible points inside each box, including weak
    returns. Overlaps have a deterministic closest-normalized-center assignment;
    complete per-box membership lists are also preserved.
+
+Use `--no-merge` to reproduce the original per-seed extraction with exact fixed
+`--box-size-m` dimensions. With merging enabled, `--box-size-m` is the MINIMUM
+size. `--max-box-size-m` limits accepted groups, and `--box-padding-m` sets XYZ
+padding per side. These limits do not establish true object extent or identity;
+nearby objects may still merge and sparse single objects may still split.
 
 Important knobs (initial inspection settings, not validated accuracy claims):
 
@@ -80,23 +103,34 @@ python tools/temporal_vis/vis_p1_reflection_regions.py --help
 
 Use `--box-size-m`, `--seed-percentile`, `--support-percentile`, `--seed-mad`,
 `--support-mad`, `--peak-separation-m`, `--grow-half-size-m`, `--min-points`,
-`--min-cells`, and `--xy-resolution` for a documented diagnostic run. Tune on
+`--min-cells`, `--merge-gap-m`, `--merge-min-contact-cells`, `--max-box-size-m`,
+`--box-padding-m`, and `--xy-resolution` for a documented diagnostic run. Tune on
 training diagnostic frames, not final test results. Use a NEW output directory
 for a different parameter set. Default analysis ROI is X [0,85), Y [-60,60),
 Z [-5,8) m; exclusions are counted. Display limits never alter the input files.
 An existing nonempty output directory is refused unless `--overwrite` is explicit.
+The logarithmic power color scale is display-only; use `--power-scale linear`
+for the original display. The forward-area detail defaults to X [0,60], Y [-10,10]
+m; change it with `--detail-x-limits` and `--detail-y-limits`. It does not filter
+extraction or exported membership.
 
 ## Outputs
 
-- `scene*_order*.png`: four panels: RGB, raw intensity, seed/support cells,
-  and colored reflection proposals. Dashed = observed bounds; solid = fixed
-  fusion boxes; gray = low confidence. IDs/colors are frame-local, not tracks.
+- `scene*_order*.png`: six panels: RGB, log-compressed power, seed/support cells,
+  original per-seed fixed boxes, merged groups, and a forward-area detail.
+  Dashed = observed support bounds; solid = proposal boxes; gray = low confidence.
+  `S` IDs identify original seeds; `R` IDs identify final groups; `n` is the number
+  of source seeds in a group, NOT its point count. Detail labels also show center
+  height `z`, since distinct height layers can overlap in BEV. IDs/colors are frame-local.
 - `scene*_order*.npz`: original XYZ, R/A/E bin indices, stored power,
-  original NPZ point IDs, support/seed masks, support-region labels, fixed-box
-  labels, all box centers/bounds, and ragged membership arrays in CSR format.
+  original NPZ point IDs, support/seed masks, fine and merged support-region labels,
+  box labels, all box centers/bounds/sizes, and ragged membership arrays in CSR
+  format. `source_seed_offsets/indices` map final groups to original seeds;
+  `fine_center`, `fine_box_min/max` retain the original proposal geometry.
   All arrays load with `allow_pickle=False`.
 - `scene*_order*.json`: source/RGB association, thresholds, every proposal,
-  exclusions, truncation, and measured geometry/extraction time.
+  exclusions, truncation, merge/recovery counts, and measured geometry/extraction
+  time. `fine_regions` retains all original per-seed proposal metadata.
 - `frame_summary.csv`, `manifest.json`, `index.html`, and optionally `regions.gif`.
 
 `box_fraction_all_p1` is a fraction of POINTS inside accepted boxes, NOT object
@@ -109,6 +143,12 @@ feature interpolation, attention/convolution fusion, or network modifications.
 Inspect proposal purity, splitting, merging, missed weak targets, and center
 stability against RGB before adding those next stages. Actual target quality and
 hardware runtime require the user's real data; synthetic tests prove plumbing.
+
+`n_fine_regions -> n_regions` measures grouping, not target detection accuracy.
+`n_recovered_support` counts existing support returns that were unassigned by the
+original growth but attached during merging; `n_unassigned_support` counts support
+returns still outside seeded groups. Neither is object recall. Metadata schema
+version 2 records these semantics. This tool does not modify learned-Top8 caches.
 
 ## Verification
 

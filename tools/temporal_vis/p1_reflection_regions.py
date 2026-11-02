@@ -9,6 +9,7 @@ import itertools
 
 import numpy as np
 from scipy import ndimage
+from scipy.spatial import cKDTree
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,11 @@ class RegionConfig:
     max_seed_count: int = 128
     grow_half_size: tuple = (4.0, 2.0, 2.0)
     box_size: tuple = (6.0, 3.0, 3.0)
+    merge_regions: bool = True
+    merge_gap: tuple = (1.5, 1.0, 1.0)
+    merge_min_contact_cells: int = 2
+    max_box_size: tuple = (12.0, 4.0, 4.0)
+    box_padding: tuple = (0.5, 0.25, 0.5)
     min_points: int = 6
     min_cells: int = 3
     max_aspect: float = 8.0
@@ -34,19 +40,25 @@ class RegionConfig:
     def validate(self):
         positive = (self.xy_resolution, self.z_resolution, self.range_band_m,
                     self.peak_separation_m, self.max_aspect,
-                    *self.grow_half_size, *self.box_size)
+                    *self.grow_half_size, *self.box_size, *self.merge_gap, *self.max_box_size)
         if not np.isfinite(positive).all() or min(positive) <= 0:
             raise ValueError('Grid, band, peak, size and aspect settings must be finite and positive')
         for limits in (self.x_limits, self.y_limits, self.z_limits):
             if len(limits) != 2 or not np.isfinite(limits).all() or limits[0] >= limits[1]:
                 raise ValueError('Each analysis limit must be a finite increasing pair')
-        if len(self.box_size) != 3 or len(self.grow_half_size) != 3:
-            raise ValueError('box_size and grow_half_size must contain XYZ values')
+        if any(len(v) != 3 for v in (self.box_size, self.grow_half_size, self.merge_gap,
+                                     self.max_box_size, self.box_padding)):
+            raise ValueError('Size, gap and padding settings must contain XYZ values')
+        if not np.isfinite(self.box_padding).all() or min(self.box_padding) < 0:
+            raise ValueError('Box padding must be finite and nonnegative')
+        if self.merge_regions and (np.any(np.asarray(self.max_box_size) < self.box_size)
+                or np.any(np.asarray(self.max_box_size) <= 2 * np.asarray(self.box_padding))):
+            raise ValueError('Maximum box size must cover minimum size and leave room for padding')
         if not 0 < self.support_percentile < self.seed_percentile < 100:
             raise ValueError('Require 0 < support_percentile < seed_percentile < 100')
         if not np.isfinite([self.seed_mad, self.support_mad]).all() or not 0 <= self.support_mad <= self.seed_mad:
             raise ValueError('Require finite 0 <= support_mad <= seed_mad')
-        if min(self.max_seed_count, self.min_points, self.min_cells) < 1:
+        if min(self.max_seed_count, self.min_points, self.min_cells, self.merge_min_contact_cells) < 1:
             raise ValueError('Seed, point and cell counts must be positive')
         if np.prod(self.grid_shape) > 8_000_000:
             raise ValueError('Analysis grid exceeds 8 million cells; increase resolution or reduce limits')
@@ -176,6 +188,160 @@ def grow_regions(support_grid, seed_cells, config):
     return owner
 
 
+def merge_support_regions(xyz, support_ids, support_cells, support_grid, owner, seeds, config):
+    """Join fine basins and nearby unseeded support fragments, with bounded unions.
+
+    Search is over occupied support CELLS once per frame, never over every P1
+    query. Empty cells are not synthesized. A link needs contact on both sides
+    near the closest boundary, so a thin weak bridge does not join two bodies.
+    Bounds are rechecked for the entire union, preventing unlimited chaining.
+    This is a geometry heuristic, not proof that a group is one physical object.
+    """
+    seed_count = len(seeds)
+    stats = dict(n_orphan_components=0, merge_candidate_links=0,
+                 merge_links_rejected_contact=0, merge_links_rejected_size=0)
+    if not seed_count:
+        return np.full(len(xyz), -1, np.int32), [], [], stats
+    orphan_labels, orphan_count = ndimage.label(support_grid & (owner == 0),
+                                               structure=np.ones((3, 3, 3), bool))
+    stats['n_orphan_components'] = orphan_count
+    fragments = owner.copy()
+    missing = orphan_labels > 0
+    fragments[missing] = seed_count + orphan_labels[missing]
+    active = np.argwhere(support_grid)
+    labels = fragments[tuple(active.T)] - 1
+    point_labels = fragments[tuple(support_cells.T)] - 1
+    count = seed_count + orphan_count
+    low = np.full((count, 3), np.inf)
+    high = np.full((count, 3), -np.inf)
+    np.minimum.at(low, point_labels, xyz[support_ids])
+    np.maximum.at(high, point_labels, xyz[support_ids])
+
+    scaled = active * config.spacing / np.asarray(config.merge_gap)
+    pairs = cKDTree(scaled).query_pairs(1.0 + 1e-10, p=np.inf, output_type='ndarray')
+    if len(pairs):
+        pairs = pairs[labels[pairs[:, 0]] != labels[pairs[:, 1]]]
+    links = []
+    if len(pairs):
+        a, b = labels[pairs[:, 0]], labels[pairs[:, 1]]
+        codes = np.minimum(a, b).astype(np.int64) * count + np.maximum(a, b)
+        unique, inverse = np.unique(codes, return_inverse=True)
+        costs = np.linalg.norm(scaled[pairs[:, 0]] - scaled[pairs[:, 1]], axis=1)
+        minimum = np.full(len(unique), np.inf)
+        np.minimum.at(minimum, inverse, costs)
+        # Count distinct boundary cells only at the nearest contact distance;
+        # counting every cell in the radius would inflate a one-cell bridge.
+        closest = costs <= minimum[inverse] + 1e-8
+        contact_pairs, contact_inverse = pairs[closest], inverse[closest]
+        left = np.where(labels[contact_pairs[:, 0]] < labels[contact_pairs[:, 1]],
+                        contact_pairs[:, 0], contact_pairs[:, 1])
+        right = np.where(labels[contact_pairs[:, 0]] < labels[contact_pairs[:, 1]],
+                         contact_pairs[:, 1], contact_pairs[:, 0])
+        contacts = []
+        for side in (left, right):
+            distinct = np.unique(contact_inverse.astype(np.int64) * len(active) + side)
+            contacts.append(np.bincount(distinct // len(active), minlength=len(unique)))
+        links = sorted((float(minimum[i]), int(code // count), int(code % count),
+                        int(min(contacts[0][i], contacts[1][i]))) for i, code in enumerate(unique))
+    stats['merge_candidate_links'] = len(links)
+
+    def root(parent, node):
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return int(node)
+
+    # Inspect full connected chains before bounded splitting. Otherwise a long
+    # thin barrier could look like many independent accepted vehicle-sized boxes.
+    connected = np.arange(count)
+    for _, a, b, _ in links:
+        ra, rb = root(connected, a), root(connected, b)
+        connected[max(ra, rb)] = min(ra, rb)
+    connected_roots = np.array([root(connected, i) for i in range(count)])
+    chain_low, chain_high = np.full_like(low, np.inf), np.full_like(high, -np.inf)
+    np.minimum.at(chain_low, connected_roots, low)
+    np.maximum.at(chain_high, connected_roots, high)
+    chain_span = chain_high[connected_roots] - chain_low[connected_roots]
+    horizontal = np.maximum(chain_span[:, :2], config.xy_resolution)
+    long_chain = ((horizontal.max(axis=1) / horizontal.min(axis=1) > config.max_aspect)
+                  & (chain_span[:, :2] > np.asarray(config.max_box_size)[:2]).any(axis=1))
+
+    parent = np.arange(count)
+    merged_low, merged_high = low.copy(), high.copy()
+    max_span = np.asarray(config.max_box_size) - 2 * np.asarray(config.box_padding)
+    for _, a, b, contact in links:
+        ra, rb = root(parent, a), root(parent, b)
+        if ra == rb:
+            continue
+        if contact < config.merge_min_contact_cells:
+            stats['merge_links_rejected_contact'] += 1
+            continue
+        union_low = np.minimum(merged_low[ra], merged_low[rb])
+        union_high = np.maximum(merged_high[ra], merged_high[rb])
+        if np.any(union_high - union_low > max_span + 1e-8):
+            stats['merge_links_rejected_size'] += 1
+            continue
+        keep, discard = min(ra, rb), max(ra, rb)
+        parent[discard] = keep
+        merged_low[keep], merged_high[keep] = union_low, union_high
+    roots = np.array([root(parent, i) for i in range(count)])
+    groups = {}
+    for seed_id in range(seed_count):
+        groups.setdefault(int(roots[seed_id]), []).append(seed_id)
+    sources = sorted(groups.values(), key=lambda values: values[0])
+    root_to_region = np.full(count, -1, np.int32)
+    for region_id, source in enumerate(sources):
+        root_to_region[roots[source[0]]] = region_id
+    point_region = np.full(len(xyz), -1, np.int32)
+    point_region[support_ids] = root_to_region[roots[point_labels]]
+    flags = [bool(long_chain[source[0]]) for source in sources]
+    return point_region, sources, flags, stats
+
+
+def make_regions(xyz, power, eligible, point_region, seeds, sources, config,
+                 adaptive=False, long_flags=None):
+    regions = []
+    for region_id, source in enumerate(sources):
+        members = np.flatnonzero(point_region == region_id)
+        points = xyz[members]
+        low, high = points.min(axis=0), points.max(axis=0)
+        robust_low, robust_high = np.percentile(points, [10, 90], axis=0)
+        center = (robust_low + robust_high) / 2
+        span = high - low
+        occupied = np.floor((points - config.lower) / config.spacing).astype(int)
+        cell_count = len(np.unique(occupied, axis=0))
+        reasons = []
+        if len(members) < config.min_points or cell_count < config.min_cells:
+            reasons.append('small_support')
+        xy_span = np.maximum(span[:2], config.xy_resolution)
+        if xy_span.max() / xy_span.min() > config.max_aspect:
+            reasons.append('elongated_support')
+        size = np.asarray(config.box_size)
+        if adaptive:
+            padding = np.asarray(config.box_padding)
+            size = np.maximum(size, span + 2 * padding)
+            # Keep the robust center where possible, but enclose ALL support.
+            center = np.clip(center, high + padding - size / 2, low - padding + size / 2)
+            if np.any(size > np.asarray(config.max_box_size) + 1e-8):
+                reasons.append('oversized_support')
+            if long_flags[region_id]:
+                reasons.append('long_structure_candidate')
+        box_min, box_max = center - size / 2, center + size / 2
+        tolerance = 1e-8 if adaptive else 0.0
+        box_ids = np.flatnonzero(eligible & (xyz >= box_min - tolerance).all(axis=1)
+                                & (xyz <= box_max + tolerance).all(axis=1))
+        outside = ~((points >= box_min - 1e-8).all(axis=1) & (points <= box_max + 1e-8).all(axis=1))
+        regions.append(dict(id=region_id, accepted=not reasons, status='accepted' if not reasons else '+'.join(reasons),
+            center=center, observed_min=low, observed_max=high, box_min=box_min, box_max=box_max,
+            box_size=size, source_seed_ids=source, source_seed_count=len(source),
+            seed_xyz=config.lower + (np.asarray(seeds[source[0]]) + .5) * config.spacing,
+            support_count=len(members), cell_count=cell_count, box_count=len(box_ids),
+            support_outside_box_count=int(outside.sum()),
+            support_point_ids=members, box_point_ids=box_ids,
+            peak_power=float(power[members].max()), mean_power=float(power[members].mean())))
+    return regions
+
+
 def extract_regions(xyz, power, config=None):
     config = (config or RegionConfig()).validate()
     xyz = np.asarray(xyz, np.float64)
@@ -200,55 +366,48 @@ def extract_regions(xyz, power, config=None):
         np.add.at(counts, location, 1)
         np.logical_or.at(support_grid, location, support[ids])
         np.logical_or.at(seed_grid, location, seed_points[ids])
-    markers, seeds, seed_stats = seed_markers(strength, seed_grid, config)
+    _, seeds, seed_stats = seed_markers(strength, seed_grid, config)
     owner = grow_regions(support_grid, seeds, config)
     point_region = np.full(len(xyz), -1, np.int32)
     grid_owner = owner[tuple(cells.T)] if len(ids) else np.zeros(0, int)
     assigned = support[ids] & (grid_owner > 0)
     point_region[ids[assigned]] = grid_owner[assigned] - 1
-    regions = []
-    cell_counts = np.bincount(owner.ravel(), minlength=len(seeds) + 1)
-    for region_id, seed in enumerate(seeds):
-        members = np.flatnonzero(point_region == region_id)
-        points = xyz[members]
-        low, high = points.min(axis=0), points.max(axis=0)
-        robust_low, robust_high = np.percentile(points, [10, 90], axis=0)
-        center = (robust_low + robust_high) / 2
-        span = high - low
-        cell_count = int(cell_counts[region_id + 1])
-        reasons = []
-        if len(members) < config.min_points or cell_count < config.min_cells:
-            reasons.append('small_support')
-        xy_span = np.maximum(span[:2], config.xy_resolution)
-        if xy_span.max() / xy_span.min() > config.max_aspect:
-            reasons.append('elongated_support')
-        box_min = center - np.asarray(config.box_size) / 2
-        box_max = center + np.asarray(config.box_size) / 2
-        # Include weaker ORIGINAL points inside the fusion box, not just seed/support points.
-        box_ids = np.flatnonzero(eligible & (xyz >= box_min).all(axis=1) & (xyz <= box_max).all(axis=1))
-        regions.append(dict(id=region_id, accepted=not reasons, status='accepted' if not reasons else '+'.join(reasons),
-            center=center, observed_min=low, observed_max=high, box_min=box_min, box_max=box_max,
-            seed_xyz=config.lower + (np.asarray(seed) + 0.5) * config.spacing,
-            support_count=len(members), cell_count=cell_count, box_count=len(box_ids),
-            support_point_ids=members, box_point_ids=box_ids,
-            peak_power=float(power[members].max()), mean_power=float(power[members].mean())))
+    fine_labels = point_region.copy()
+    sources = [[i] for i in range(len(seeds))]
+    fine_regions = make_regions(xyz, power, eligible, fine_labels, seeds, sources, config)
+    merge_stats = dict(n_orphan_components=0, merge_candidate_links=0,
+                       merge_links_rejected_contact=0, merge_links_rejected_size=0)
+    if config.merge_regions:
+        support_ids = ids[support[ids]]
+        point_region, sources, long_flags, merge_stats = merge_support_regions(
+            xyz, support_ids, cells[support[ids]], support_grid, owner, seeds, config)
+        regions = make_regions(xyz, power, eligible, point_region, seeds, sources, config,
+                               adaptive=True, long_flags=long_flags)
+    else:
+        regions = fine_regions
     box_region = np.full(len(xyz), -1, np.int32)
     best_distance = np.full(len(xyz), np.inf)
     for region in regions:
         if not region['accepted']:
             continue
         inside = region['box_point_ids']
-        distance = np.sum(((xyz[inside] - region['center']) / np.asarray(config.box_size)) ** 2, axis=1)
+        distance = np.sum(((xyz[inside] - region['center']) / region['box_size']) ** 2, axis=1)
         better = distance < best_distance[inside]
         box_region[inside[better]] = region['id']
         best_distance[inside[better]] = distance[better]
     stats = dict(n_input=len(xyz), n_analysis=int(eligible.sum()), n_excluded=int((~eligible).sum()),
         n_support=int(support.sum()), n_seed_points=int(seed_points.sum()),
         n_assigned_support=int((point_region >= 0).sum()), n_regions=len(regions),
+        n_fine_regions=len(fine_regions), n_fine_accepted=sum(r['accepted'] for r in fine_regions),
+        n_seed_regions_merged=len(fine_regions) - len(regions),
+        n_recovered_support=int(((point_region >= 0) & (fine_labels < 0)).sum()),
+        n_unassigned_support=int((support & (point_region < 0)).sum()),
+        n_long_structure_candidates=sum('long_structure_candidate' in r['status'] for r in regions),
         n_accepted=sum(r['accepted'] for r in regions), n_box_points=int((box_region >= 0).sum()),
         box_fraction_all_p1=float(np.mean(box_region >= 0)) if len(xyz) else None,
-        **seed_stats)
-    return dict(config=asdict(config), regions=regions, stats=stats, thresholds=thresholds,
+        **seed_stats, **merge_stats)
+    return dict(config=asdict(config), regions=regions, fine_regions=fine_regions,
+        fine_support_region_ids=fine_labels, stats=stats, thresholds=thresholds,
         analysis_mask=eligible, support_mask=support, seed_point_mask=seed_points,
         support_region_ids=point_region, box_region_ids=box_region,
         raw_bev=raw_power.max(axis=2), count_bev=counts.sum(axis=2),
@@ -263,14 +422,21 @@ def npz_payload(result, xyz, power, coords):
         p1_npz_indices=np.arange(len(xyz), dtype=np.int64),
         analysis_mask=result['analysis_mask'], support_mask=result['support_mask'],
         seed_point_mask=result['seed_point_mask'], support_region_ids=result['support_region_ids'],
+        fine_support_region_ids=result['fine_support_region_ids'],
         box_region_ids=result['box_region_ids'],
         region_ids=np.array([r['id'] for r in regions], np.int32),
         accepted=np.array([r['accepted'] for r in regions], bool),
-        status=np.array([r['status'] for r in regions], dtype='U64'))
-    for key in ('center', 'observed_min', 'observed_max', 'box_min', 'box_max', 'seed_xyz'):
+        status=np.array([r['status'] for r in regions], dtype='U128'))
+    for key in ('center', 'observed_min', 'observed_max', 'box_min', 'box_max', 'box_size', 'seed_xyz'):
         payload[key] = np.asarray([r[key] for r in regions], float).reshape(-1, 3)
     for kind in ('support', 'box'):
         lists = [r[f'{kind}_point_ids'] for r in regions]
         payload[f'{kind}_point_offsets'] = np.r_[0, np.cumsum([len(v) for v in lists])].astype(np.int64)
         payload[f'{kind}_point_indices'] = np.concatenate(lists) if lists else np.zeros(0, np.int64)
+    sources = [r['source_seed_ids'] for r in regions]
+    payload['source_seed_offsets'] = np.r_[0, np.cumsum([len(v) for v in sources])].astype(np.int64)
+    payload['source_seed_indices'] = np.array([i for values in sources for i in values], np.int32)
+    payload['fine_region_ids'] = np.array([r['id'] for r in result['fine_regions']], np.int32)
+    for key in ('center', 'box_min', 'box_max'):
+        payload[f'fine_{key}'] = np.asarray([r[key] for r in result['fine_regions']], float).reshape(-1, 3)
     return payload
