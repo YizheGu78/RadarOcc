@@ -294,10 +294,10 @@ def main():
     p.add_argument('--end-order', type=int, default=10**9)
     p.add_argument('--stride', type=int, default=1)
     p.add_argument('--max-frames-per-scene', type=int, default=0, help='0 = no limit')
-    p.add_argument('--seed-percentile', type=float, default=98.)
-    p.add_argument('--seed-mad', type=float, default=4.)
+    p.add_argument('--seed-percentile', type=float, default=97.)
+    p.add_argument('--seed-mad', type=float, default=3.)
     p.add_argument('--box-size-m', type=float, nargs=3, default=(6., 3., 3.))
-    p.add_argument('--max-box-size-m', type=float, nargs=3, default=(12., 5., 5.))
+    p.add_argument('--max-box-size-m', type=float, nargs=3, default=(12., 4., 4.))
     p.add_argument('--y-gates', type=float, nargs=3, default=(.5, 1., 1.5),
                    metavar=('T1', 'T2', 'T3'))
     p.add_argument('--center-gates', type=float, nargs=3, default=(4., 6., 8.),
