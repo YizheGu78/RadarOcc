@@ -97,7 +97,7 @@ def render(result, xyz, power, destination, title, rgb_path=None, projection=Non
     config = result['config']
     fig, axes = plt.subplots(2, 3, figsize=(22, 12), layout='constrained')
     camera, intensity, seeds, before, boxes, detail = axes.ravel()
-    selected_regions = sorted(result['regions'], key=lambda r: (not r['accepted'], r['id']))[:max_boxes]
+    selected_regions = sorted((r for r in result['regions'] if r['accepted']), key=lambda r: r['id'])[:max_boxes]
     if rgb_path:
         with Image.open(rgb_path) as image:
             image = image.convert('RGB')
@@ -161,9 +161,9 @@ def render(result, xyz, power, destination, title, rgb_path=None, projection=Non
         background = ids[(xyz[ids, 0] >= x_limits[0]) & (xyz[ids, 0] <= x_limits[1])
                          & (xyz[ids, 1] >= y_limits[0]) & (xyz[ids, 1] <= y_limits[1])]
         ax.scatter(xyz[background, 0], xyz[background, 1], color='.8', s=1, alpha=.4)
-        visible = [r for r in regions if r['box_min'][0] <= x_limits[1] and r['box_max'][0] >= x_limits[0]
+        visible = [r for r in regions if r['accepted'] and r['box_min'][0] <= x_limits[1] and r['box_max'][0] >= x_limits[0]
                    and r['box_min'][1] <= y_limits[1] and r['box_max'][1] >= y_limits[0]]
-        selected = sorted(visible, key=lambda r: (not r['accepted'], r['id']))[:max_boxes]
+        selected = sorted(visible, key=lambda r: r['id'])[:max_boxes]
         label_positions = []
         for region in selected:
             color = region_color(region)
@@ -197,13 +197,13 @@ def render(result, xyz, power, destination, title, rgb_path=None, projection=Non
     for ax in (before, boxes):
         ax.legend(handles=[Line2D([0], [0], color='black', ls='--', label='Observed support bounds'),
                            Line2D([0], [0], color='black', label=box_label if ax is boxes else 'Original fixed-size box'),
-                           Line2D([0], [0], color='.5', label='Low-confidence proposal')], fontsize=7, loc='upper right')
+                           ], fontsize=7, loc='upper right')
     stats = result['stats']
     before.set_title(f'Before: {stats["n_fine_regions"]} seed regions | original fixed boxes\n'
                      f'Showing {fine_drawn}/{fine_visible}; S IDs identify reflection seeds')
     boxes.set_title(f'After: {stats["n_fine_regions"]} seeds -> {stats["n_regions"]} groups | '
                     f'{stats["n_accepted"]} accepted\n'
-                    f'Showing {drawn}/{visible}; n = source seeds; gray = low confidence')
+                    f'Showing {drawn}/{visible} accepted groups; n = source seeds')
     detail.set_title(f'Forward-area detail | showing {zoom_drawn}/{zoom_visible} groups\n'
                      f'Accepted boxes contain {stats["n_box_points"]} P1 returns in full ROI')
     for ax in (intensity, seeds):
