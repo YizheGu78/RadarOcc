@@ -121,9 +121,10 @@ and proposal quality before tuning GT purity. Wider matching gates cannot change
 GT labeling. Match rows also include current center XYZ, history accepted/labeled
 counts, and candidate counts after Y and 3D-center gates.
 
-Match prior visualization parameters explicitly: the visualization CLI defaults
-to `--seed-percentile 95`, whereas this benchmark retains its existing default
-of 97. Check the recorded configuration before comparing results.
+The visualization CLI and this benchmark now both default to
+`--seed-percentile 97`. Older visualizations used 95; reproduce those explicitly
+or regenerate them at 97 with GT overlays. Check recorded configurations before
+comparing results.
 
 To view all-slot results:
 

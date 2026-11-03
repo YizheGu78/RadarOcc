@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Inspect GT-free P1 reflection regions with associated RGB reference panels.
 
-No model, checkpoint, CUDA, GT boxes, target IDs, or learned selector is used.
+No model, checkpoint, CUDA, or learned selector is used. Optional GT is loaded
+after proposal extraction for diagnostic overlays only.
 This is SINGLE-FRAME proposal inspection, not temporal tracking or fusion.
 """
 import argparse
@@ -20,6 +21,53 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from tools.temporal_vis import vis_alignment as alignment
 from tools.temporal_vis.p1_reflection_regions import RegionConfig, extract_regions, npz_payload
+from tools.temporal_vis.audit_dynamic_objects import memberships, transform
+from tools.temporal_vis.benchmark_region_matching import label_regions
+
+GT_COLOR = '#008040'
+
+
+def load_gt(info, scene, bbox_root, radar_to_lidar):
+    """Processed LiDAR boxes: bottom-center XYZ, full dimensions, yaw radians.
+
+    Transform all eight corners to radar coordinates, preserving yaw/roll/pitch.
+    This coordinate conversion does not rotate the rendered image or its axes.
+    """
+    if 'occ_frame_idx' not in info:
+        raise ValueError('--show-gt requires occ_frame_idx; GT frame IDs must not be guessed')
+    index = int(info['occ_frame_idx'])
+    directory = bbox_root / str(scene) / 'bbox'
+    box_path, id_path = directory / f'bbox{index}.npy', directory / f'bbox_token{index}.npy'
+    boxes = np.load(box_path, allow_pickle=False).reshape(-1, 7)
+    ids = np.load(id_path, allow_pickle=False).reshape(-1).astype(str)
+    if len(boxes) != len(ids):
+        raise ValueError(f'GT bbox/token count mismatch: {box_path}')
+    if not np.isfinite(boxes).all() or np.any(boxes[:, 3:6] <= 0):
+        raise ValueError(f'Invalid GT box geometry: {box_path}')
+    radar_to_lidar = alignment.geometry_module.validate_transform(radar_to_lidar, 'radar_to_lidar')
+    inverse = np.linalg.inv(radar_to_lidar)
+    bits = np.array(list(itertools.product((0, 1), repeat=3)))
+    corners = []
+    for x, y, z, dx, dy, dz, yaw in boxes:
+        local = bits * [dx, dy, dz] - [dx / 2, dy / 2, 0]
+        c, s = np.cos(yaw), np.sin(yaw)
+        rotation = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+        corners.append(transform(local @ rotation.T + [x, y, z], inverse))
+    _, inverse_ids, counts = np.unique(ids, return_inverse=True, return_counts=True)
+    return dict(boxes=boxes, ids=ids, corners=np.asarray(corners, float).reshape(-1, 8, 3),
+                duplicate_ids=counts[inverse_ids] > 1,
+                source=dict(boxes=str(box_path), ids=str(id_path), occ_frame_idx=index),
+                radar_to_lidar=radar_to_lidar)
+
+
+def gt_diagnostics(result, xyz, gt, purity=.6, min_gt_points=3):
+    point_labels = memberships(transform(xyz, gt['radar_to_lidar']), gt['boxes'])
+    labels, rows = label_regions(result['regions'], point_labels, gt['ids'], purity,
+                                min_gt_points, return_diagnostics=True)
+    gt['point_labels'] = point_labels
+    gt['region_labels'] = labels
+    gt['region_diagnostics'] = {row['region']: row for row in rows}
+    return gt
 
 
 def read_p1(path):
@@ -53,6 +101,11 @@ def project_box_edges(low, high, projection):
     """Clip edges at the camera near plane; never connect through negative depth."""
     bits = np.array(list(itertools.product((0, 1), repeat=3)))
     corners = np.where(bits, np.asarray(high), np.asarray(low))
+    return project_cuboid_edges(corners, projection)
+
+
+def project_cuboid_edges(corners, projection):
+    bits = np.array(list(itertools.product((0, 1), repeat=3)))
     q = np.c_[corners, np.ones(8)] @ projection.T
     segments = []
     for i in range(8):
@@ -86,12 +139,13 @@ def json_default(value):
 
 def render(result, xyz, power, destination, title, rgb_path=None, projection=None,
            rgb_crop_width=0, max_points=10000, max_boxes=40,
-           detail_x_limits=(0., 60.), detail_y_limits=(-10., 10.), power_scale='log'):
+           detail_x_limits=(0., 60.), detail_y_limits=(-10., 10.), power_scale='log', gt=None):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
-    from matplotlib.patches import Rectangle
+    from matplotlib.patches import Rectangle, Polygon
+    from scipy.spatial import ConvexHull
     from PIL import Image
 
     config = result['config']
@@ -116,6 +170,14 @@ def render(result, xyz, power, destination, title, rgb_path=None, projection=Non
                 if depth[0] > 0 and 0 <= uv[0, 0] < width and 0 <= uv[0, 1] < height:
                     camera.text(*uv[0], f'R{region["id"]}', color=color, fontsize=9,
                                 bbox=dict(facecolor='black', alpha=.4, pad=1))
+            if gt is not None:
+                for i, corners in enumerate(gt['corners']):
+                    for segment in project_cuboid_edges(corners, projection):
+                        camera.plot(segment[:, 0], segment[:, 1], color=GT_COLOR, lw=1.8)
+                    uv, depth = project_points(corners.mean(axis=0)[None], projection)
+                    if depth[0] > 0 and 0 <= uv[0, 0] < width and 0 <= uv[0, 1] < height:
+                        camera.text(*uv[0], f'GT:{gt["ids"][i]}', color=GT_COLOR, fontsize=9,
+                                    bbox=dict(facecolor='white', alpha=.8, pad=1))
         camera.set_xlim(-.5, width - .5)
         camera.set_ylim(height - .5, -.5)
         camera.set_title('RGB reference' + (' + projected proposal boxes' if projection is not None else ' (no projection calibration supplied)')
@@ -178,6 +240,12 @@ def render(result, xyz, power, destination, title, rgb_path=None, projection=Non
                 label += f' n={region["source_seed_count"]}'
             if show_height:
                 label += f' z={region["center"][2]:.1f}'
+                if gt is not None:
+                    evidence = gt['region_diagnostics'].get(region['id'])
+                    if evidence:
+                        label += (f'\nGT:{evidence["dominant_id"] or "?"} '
+                                  f'{evidence["dominant_points"]}/{evidence["support_points"]}'
+                                  f' ({evidence["dominant_fraction"]:.0%})')
             # Keep labels inside zoom panels even when a box crosses a crop edge.
             position = np.clip(region['center'][:2], [x_limits[0], y_limits[0]], [x_limits[1], y_limits[1]])
             overlap = sum(np.linalg.norm(position - previous) < config['xy_resolution']
@@ -206,6 +274,39 @@ def render(result, xyz, power, destination, title, rgb_path=None, projection=Non
                     f'Showing {drawn}/{visible} accepted groups; n = source seeds')
     detail.set_title(f'Forward-area detail | showing {zoom_drawn}/{zoom_visible} groups\n'
                      f'Accepted boxes contain {stats["n_box_points"]} P1 returns in full ROI')
+    if gt is not None:
+        # Never subsample support or GT-overlap points: scarce vehicle returns
+        # must remain visible even when background drawing is capped.
+        support_ids = np.flatnonzero(result['analysis_mask'] & result['support_mask'])
+        gt_ids = np.flatnonzero(result['analysis_mask'] & (gt['point_labels'] >= 0))
+        ambiguous_ids = np.flatnonzero(result['analysis_mask'] & (gt['point_labels'] == -2))
+        for ax in (intensity, seeds, before, boxes, detail):
+            ax.scatter(xyz[support_ids, 0], xyz[support_ids, 1], s=5, color='#ff8800', alpha=.55, zorder=3)
+            ax.scatter(xyz[gt_ids, 0], xyz[gt_ids, 1], s=16, facecolors='none', edgecolors='#00aabb', lw=.8, zorder=4)
+            ax.scatter(xyz[ambiguous_ids, 0], xyz[ambiguous_ids, 1], s=12, marker='x', color='magenta', zorder=4)
+            x_limits, y_limits = ax.get_xlim(), ax.get_ylim()
+            for i, corners in enumerate(gt['corners']):
+                low, high = corners.min(axis=0), corners.max(axis=0)
+                if low[0] > x_limits[1] or high[0] < x_limits[0] or low[1] > y_limits[1] or high[1] < y_limits[0]:
+                    continue
+                hull = ConvexHull(corners[:, :2])
+                ax.add_patch(Polygon(corners[hull.vertices, :2], closed=True, fill=False,
+                                     edgecolor=GT_COLOR, lw=1.8, zorder=5))
+                text = f'GT:{gt["ids"][i]}'
+                if gt['duplicate_ids'][i]:
+                    text += f' DUP row={i}'
+                if ax is detail:
+                    text += f' z=[{low[2]:.1f},{high[2]:.1f}]'
+                position = np.clip(low[:2], [x_limits[0], y_limits[0]], [x_limits[1], y_limits[1]])
+                ax.annotate(text, xy=position, xytext=(0, -9), textcoords='offset points',
+                            color=GT_COLOR, fontsize=7, clip_on=True,
+                            bbox=dict(facecolor='white', alpha=.85, pad=.5), zorder=6)
+            ax.set_xlim(x_limits)
+            ax.set_ylim(y_limits)
+        detail.legend(handles=[Line2D([0], [0], color=GT_COLOR, lw=1.8, label='GT footprint (true yaw)'),
+            Line2D([0], [0], color='#ff8800', marker='.', ls='', label='All support points'),
+            Line2D([0], [0], color='#00aabb', marker='o', markerfacecolor='none', ls='', label='Points inside GT (3D)'),
+            Line2D([0], [0], color='magenta', marker='x', ls='', label='Ambiguous GT overlap')], fontsize=7, loc='upper right')
     for ax in (intensity, seeds):
         ax.set_xlim(config['x_limits'])
         ax.set_ylim(config['y_limits'])
@@ -214,7 +315,11 @@ def render(result, xyz, power, destination, title, rgb_path=None, projection=Non
         ax.set_xlabel('X forward (m)')
         ax.set_ylabel('Y left (m)')
         ax.grid(alpha=.15)
-    fig.suptitle(title + '\nGT-free, single-frame reflection groups; RGB is reference only; IDs are not tracks', fontsize=13)
+    for ax in fig.axes:
+        ax.set_navigate(False)
+    gt_note = ' | GT overlays only' if gt is not None else ''
+    fig.suptitle(title + f'\nFixed radar XY view | seed percentile={config["seed_percentile"]:g}'
+                 + gt_note + ' | proposals use no GT; IDs are not tracks', fontsize=13)
     fig.savefig(destination, dpi=130)
     plt.close(fig)
 
@@ -308,7 +413,7 @@ def main():
     parser.add_argument('--y-limits', type=float, nargs=2, default=[-60., 60.])
     parser.add_argument('--z-limits', type=float, nargs=2, default=[-5., 8.])
     parser.add_argument('--range-band-m', type=float, default=8.)
-    parser.add_argument('--seed-percentile', type=float, default=95.)
+    parser.add_argument('--seed-percentile', type=float, default=97.)
     parser.add_argument('--support-percentile', type=float, default=80.)
     parser.add_argument('--seed-mad', type=float, default=3.)
     parser.add_argument('--support-mad', type=float, default=.5)
@@ -324,6 +429,11 @@ def main():
     parser.add_argument('--min-points', type=int, default=6)
     parser.add_argument('--min-cells', type=int, default=3)
     parser.add_argument('--max-aspect', type=float, default=8.)
+    parser.add_argument('--show-gt', action='store_true', help='Overlay GT boxes/point membership AFTER GT-free extraction')
+    parser.add_argument('--bbox-root', type=Path, default=Path('data/K-RadarOcc/train'))
+    parser.add_argument('--extrinsic', type=Path, help='Radar-to-LiDAR [4,4] .npy for GT overlay; default project calibration')
+    parser.add_argument('--gt-purity', type=float, default=.6, help='Diagnostic label purity, never affects extraction')
+    parser.add_argument('--min-gt-points', type=int, default=3, help='Diagnostic point threshold, never affects extraction')
     parser.add_argument('--camera-dir', type=Path)
     parser.add_argument('--camera-reference-ann-file', type=Path, help='Full scene PKL for ordinal RGB matching when using a subset')
     parser.add_argument('--camera-offset', type=int, default=0, help='Known camera sequence ordinal offset, never a radar filename offset')
@@ -349,6 +459,10 @@ def main():
         parser.error('Check order range, stride, frame/display counts, crop and fps')
     if args.no_rgb and (args.projection_npy or args.rgb_image or args.camera_dir):
         parser.error('--no-rgb cannot be combined with RGB image/directory/projection options')
+    if not 0 < args.gt_purity <= 1 or args.min_gt_points < 1:
+        parser.error('Invalid GT diagnostic purity or minimum point count')
+    if args.extrinsic and not args.show_gt:
+        parser.error('--extrinsic is used with --show-gt')
     try:
         config = RegionConfig(xy_resolution=args.xy_resolution, z_resolution=args.z_resolution,
             x_limits=tuple(args.x_limits), y_limits=tuple(args.y_limits), z_limits=tuple(args.z_limits),
@@ -390,6 +504,11 @@ def main():
         projection = np.load(rooted(args.projection_npy), allow_pickle=False)
         project_points(np.zeros((0, 3)), projection)
     geometry = alignment.RadarBinGeometry.from_file(bins, azimuth_sign=args.azimuth_sign, elevation_sign=args.elevation_sign)
+    extrinsic = None
+    if args.show_gt:
+        extrinsic = (np.load(rooted(args.extrinsic), allow_pickle=False) if args.extrinsic
+                     else alignment.geometry_module.radar_to_lidar_default())
+        alignment.geometry_module.validate_transform(extrinsic, 'radar_to_lidar')
     output = rooted(args.output_dir)
     if output.is_dir() and any(output.iterdir()) and not args.overwrite:
         raise FileExistsError(f'Output directory is not empty: {output}; use a new --output-dir or --overwrite')
@@ -397,7 +516,8 @@ def main():
     frames = []
     csv_rows = []
     config_dict = {**vars(args), 'resolved_ann_file': str(ann_file), 'algorithm': config.__dict__}
-    print(f'Scene {args.scene}: {len(selected)} selected frames; no GT/model/CUDA', flush=True)
+    print(f'Scene {args.scene}: {len(selected)} selected frames; seed={args.seed_percentile:g}; '
+          f'GT overlay={args.show_gt}; GT-free extraction; fixed 2D view; no model/CUDA', flush=True)
     for index, info in enumerate(selected):
         load_start = time.perf_counter()
         radar_path = rooted(Path(info.get('sparse_radar_path') or info['radar_path']))
@@ -407,6 +527,10 @@ def main():
         start = time.perf_counter()
         result = extract_regions(xyz, power, config)
         region_seconds = time.perf_counter() - start
+        gt = None
+        if args.show_gt:
+            gt = gt_diagnostics(result, xyz, load_gt(info, args.scene, rooted(args.bbox_root), extrinsic),
+                                args.gt_purity, args.min_gt_points)
         rgb_path, mapping = None, None
         if not args.no_rgb:
             normalized = dict(info)
@@ -420,14 +544,26 @@ def main():
         image_path = output / f'{stem}.png'
         render(result, xyz, power, image_path, f'Scene {args.scene} | order {order} | P1 175 x 250 returns',
                rgb_path, projection, args.rgb_crop_width, args.max_points, args.max_draw_boxes,
-               args.detail_x_limits, args.detail_y_limits, args.power_scale)
-        np.savez_compressed(output / f'{stem}.npz', **npz_payload(result, xyz, power, coords))
+               args.detail_x_limits, args.detail_y_limits, args.power_scale, gt=gt)
+        arrays = npz_payload(result, xyz, power, coords)
+        if gt is not None:
+            arrays.update(gt_boxes_lidar=gt['boxes'], gt_ids=gt['ids'], gt_corners_radar=gt['corners'],
+                          point_gt_box_rows=gt['point_labels'], radar_to_lidar=gt['radar_to_lidar'])
+        np.savez_compressed(output / f'{stem}.npz', **arrays)
         regions = [{k: v for k, v in r.items() if k not in ('support_point_ids', 'box_point_ids')} for r in result['regions']]
         fine_regions = [{k: v for k, v in r.items() if k not in ('support_point_ids', 'box_point_ids')} for r in result['fine_regions']]
         record = dict(scene=str(args.scene), order=order, radar_frame_id=info.get('radar_frame_id'),
             radar_path=str(radar_path), image=image_path.name, arrays=f'{stem}.npz', rgb=mapping,
             load_seconds=load_seconds, region_seconds=region_seconds,
             stats=result['stats'], thresholds=result['thresholds'], regions=regions, fine_regions=fine_regions)
+        if gt is not None:
+            record['gt'] = dict(source=gt['source'], boxes_lidar=gt['boxes'], ids=gt['ids'],
+                corners_radar=gt['corners'], duplicate_ids=gt['duplicate_ids'],
+                radar_to_lidar=gt['radar_to_lidar'],
+                point_convention='LiDAR bottom-center XYZ, full dimensions, yaw radians',
+                region_diagnostics=list(gt['region_diagnostics'].values()),
+                inside_gt_points=int((gt['point_labels'] >= 0).sum()),
+                ambiguous_gt_points=int((gt['point_labels'] == -2).sum()))
         (output / f'{stem}.json').write_text(json.dumps(record, indent=2, default=json_default, allow_nan=False) + '\n', encoding='utf-8')
         frames.append({k: v for k, v in record.items() if k not in ('regions', 'fine_regions', 'thresholds')})
         csv_rows.append(dict(scene=str(args.scene), order=order, **result['stats'],
@@ -444,7 +580,9 @@ def main():
         proposal_ids='frame-local, not tracks; no temporal association yet',
         point_ids='Original NPZ first 175*250 indices, not GPU power-sorted positions',
         box_fraction='Fraction of all P1 returns in accepted boxes; NOT object recall',
-        schema_version=2,
+        schema_version=3, gt_overlays=args.show_gt,
+        view=dict(type='fixed_2d', image_rotation_degrees=0, axes='X forward, Y left',
+                  gt_yaw_preserved=True, rgb_auto_orientation=False),
         note='Geometry-based reflection groups, not verified objects. Merged boxes enclose support; '
              'size limits and long-chain flags are heuristics. No temporal size stabilization yet. '
              '--no-merge retains original per-seed fixed boxes.',
@@ -455,8 +593,10 @@ def main():
         f'<a href="{html.escape(r["image"], quote=True)}"><img loading="lazy" src="{html.escape(r["image"], quote=True)}"></a></figure>' for r in frames)
     (output / 'index.html').write_text('<!doctype html><meta charset="utf-8"><title>P1 reflection proposals</title>'
         '<style>body{font:16px sans-serif;background:#eee;margin:20px}main{display:grid;'
-        'grid-template-columns:repeat(auto-fit,minmax(600px,1fr));gap:16px}figure{margin:0}img{width:100%}</style>'
-        '<h1>P1 reflection proposals</h1><p>GT-free, single-frame proposals. RGB is reference only. '
+        'grid-template-columns:repeat(auto-fit,minmax(600px,1fr));gap:16px}figure{margin:0}'
+        'img{width:100%;transform:none;image-orientation:none;touch-action:pan-x pan-y}</style>'
+        '<h1>P1 reflection proposals</h1><p>Fixed 2D view; image rotation disabled. '
+        'GT is optional diagnostic overlay only; proposals use no GT. RGB requires calibration for projected boxes. '
         'Proposal IDs are not tracks. Open an image for details.</p><main>' + cards + '</main>', encoding='utf-8')
     if args.gif:
         from PIL import Image
@@ -472,3 +612,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

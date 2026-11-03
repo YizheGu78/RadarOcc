@@ -3,7 +3,8 @@
 This is a GT-free, single-frame diagnostic. It uses the exact original NPZ
 membership of Small P1 (first 175 ranges x 250 returns), stored power channel 2,
 and the existing real-bin spherical-to-XYZ conversion. No checkpoint, PyTorch,
-MMCV, CUDA, label boxes, object IDs, or occupancy forward is required.
+MMCV, CUDA, or occupancy forward is required. Optional GT boxes/IDs are read only
+after region extraction for diagnostic overlays; they never define proposals.
 
 ## Run
 
@@ -12,9 +13,12 @@ From the project root in the existing environment:
 ```bash
 source use_radarocc5060.sh
 python tools/temporal_vis/vis_p1_reflection_regions.py \
+  --ann-file data/annotations/kradar_dict_test_official_temporal_doppler8.pkl \
   --scene 3 --start-order 80 --end-order 200 --stride 5 \
+  --seed-percentile 97 --show-gt \
+  --bbox-root data/K-RadarOcc/train \
   --camera-dir data/K-Radar-RGB/K-Radar/K-Radar-RGB/3/images_rb_switched \
-  --output-dir outputs/p1_reflection_regions/scene3_merged --gif
+  --output-dir outputs/p1_reflection_regions/scene3_p97_gt --gif
 ```
 
 For one frame, set `--start-order 80 --end-order 80`. By default the tool finds
@@ -46,11 +50,45 @@ for the actual displayed camera image. No projection calibration is guessed.
 `--rgb-crop-width 1280` keeps the left 1280 columns if the chosen camera format
 requires that crop; default is the full image.
 
+## GT overlays and fixed image view
+
+The visualization CLI now defaults to seed percentile **97**, matching the
+matching benchmark. Older images produced with 95 use different proposals;
+pass `--seed-percentile 95` explicitly only to reproduce those older settings.
+The reusable `RegionConfig` default is unchanged; this CLI supplies 97 explicitly.
+
+`--show-gt` reads `<bbox-root>/<scene>/bbox/bbox{occ_frame_idx}.npy` and its
+`bbox_token{occ_frame_idx}.npy`. The annotation's `occ_frame_idx` is mandatory;
+radar filenames and image ordinals are never used to guess GT frame IDs.
+Processed boxes use LiDAR bottom-center XYZ, full XYZ dimensions, and yaw in
+radians. All eight corners are transformed by the inverse radar-to-LiDAR
+extrinsic into the same radar coordinates as the P1 points. The default project
+extrinsic is shared with the benchmark; use `--extrinsic radar_to_lidar.npy`
+for an explicit calibrated matrix. Wrong/missing GT files fail with their path.
+
+Green polygons show true GT cuboid footprints; `GT:<id>` labels show object IDs.
+Duplicate IDs remain visible with `DUP row=...` and cannot supply a reliable
+identity. Orange points show ALL support returns; cyan rings show original P1
+returns inside unambiguous GT boxes in **3D**; magenta crosses show ambiguous
+overlaps. Support and GT-overlap points are never subsampled for display.
+The detail panel adds GT height intervals and per-region evidence, for example
+`GT:42 8/14 (57%)`. Its denominator is SUPPORT points, not every weak return
+inside the enlarged fusion box. Purity defaults to 0.6 and min GT points to 3,
+matching the benchmark. `--gt-purity` and `--min-gt-points` affect diagnostics only.
+
+All outputs are static PNG/GIF with a fixed 2D radar XY view: X forward on the
+horizontal axis, Y left on the vertical axis. Image/view rotation and RGB EXIF
+auto-orientation are disabled; no interactive 3D rotation is provided. GT boxes
+retain their physical yaw and sensor coordinate transforms. This does NOT rotate
+the picture or reset GT yaw to zero. When no camera projection is supplied, RGB
+remains an unprojected reference. With a valid `--projection-npy`, true GT cuboid
+edges are also projected onto RGB.
+
 ## Algorithm and initial settings
 
 1. Read all 43,750 original P1 returns. Exclude non-finite values and points
    outside the explicitly configured analysis ROI. No ego-return mask is added.
-2. In 8 m slant-range bands, compute high (95th percentile) and support (80th
+2. In 8 m slant-range bands, compute high (97th percentile) and support (80th
    percentile) thresholds. Add median/MAD contrast gates (3 and 0.5 robust sigma)
    so a quantile does not force seeds in a flat/noise-only band. This is NOT a
    calibrated CFAR detector; the input has already been spatially truncated.
@@ -118,7 +156,8 @@ extraction or exported membership.
 
 - `scene*_order*.png`: six panels: RGB, log-compressed power, seed/support cells,
   original per-seed fixed boxes, merged groups, and a forward-area detail.
-  Dashed = observed support bounds; solid = proposal boxes; gray = low confidence.
+  Dashed = observed support bounds; solid = proposal boxes. Only accepted proposal
+  boxes are drawn; rejected proposals remain in the array/JSON diagnostics.
   `S` IDs identify original seeds; `R` IDs identify final groups; `n` is the number
   of source seeds in a group, NOT its point count. Detail labels also show center
   height `z`, since distinct height layers can overlap in BEV. IDs/colors are frame-local.
@@ -128,6 +167,9 @@ extraction or exported membership.
   format. `source_seed_offsets/indices` map final groups to original seeds;
   `fine_center`, `fine_box_min/max` retain the original proposal geometry.
   All arrays load with `allow_pickle=False`.
+  With GT overlays, additional arrays preserve `gt_boxes_lidar`, `gt_ids`,
+  `gt_corners_radar`, `radar_to_lidar`, and `point_gt_box_rows` (-1 outside GT,
+  -2 ambiguous, otherwise the original GT box row).
 - `scene*_order*.json`: source/RGB association, thresholds, every proposal,
   exclusions, truncation, merge/recovery counts, and measured geometry/extraction
   time. `fine_regions` retains all original per-seed proposal metadata.
@@ -148,10 +190,12 @@ hardware runtime require the user's real data; synthetic tests prove plumbing.
 `n_recovered_support` counts existing support returns that were unassigned by the
 original growth but attached during merging; `n_unassigned_support` counts support
 returns still outside seeded groups. Neither is object recall. Metadata schema
-version 2 records these semantics. This tool does not modify learned-Top8 caches.
+version 3 adds GT overlay provenance and fixed-view settings. This tool does not
+modify learned-Top8 caches.
 
 ## Verification
 
 ```bash
 python -m unittest discover -s tests -p test_p1_reflection_regions.py -v
 ```
+

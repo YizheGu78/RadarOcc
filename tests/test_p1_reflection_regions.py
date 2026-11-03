@@ -13,7 +13,9 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tools.temporal_vis.p1_reflection_regions import RegionConfig, extract_regions, grow_regions, npz_payload
-from tools.temporal_vis.vis_p1_reflection_regions import project_points, project_box_edges, read_p1, load_scene
+from tools.temporal_vis.vis_p1_reflection_regions import (
+    project_points, project_box_edges, project_cuboid_edges, read_p1, load_scene,
+    load_gt, gt_diagnostics)
 
 
 def cloud(centers):
@@ -34,6 +36,69 @@ def config(**kwargs):
 
 
 class ReflectionRegionTests(unittest.TestCase):
+    def make_gt_fixture(self, directory, ids=(42,), boxes=None):
+        root = Path(directory)
+        folder = root / '3/bbox'
+        folder.mkdir(parents=True, exist_ok=True)
+        if boxes is None:
+            boxes = [[12.54, -.3, -1.7, 4, 2, 2, np.pi / 2]]
+        np.save(folder / 'bbox7.npy', np.asarray(boxes).reshape(-1, 7))
+        np.save(folder / 'bbox_token7.npy', ids)
+        extrinsic = np.eye(4)
+        extrinsic[:3, 3] = [2.54, -.3, -.7]
+        return load_gt(dict(occ_frame_idx=7), '3', root, extrinsic)
+
+    def test_gt_preserves_yaw_bottom_height_and_sensor_extrinsic(self):
+        with tempfile.TemporaryDirectory() as directory:
+            gt = self.make_gt_fixture(directory)
+            np.testing.assert_allclose(gt['corners'][0].min(axis=0), [9, -2, -1], atol=1e-8)
+            np.testing.assert_allclose(gt['corners'][0].max(axis=0), [11, 2, 1], atol=1e-8)
+            self.assertEqual(gt['source']['occ_frame_idx'], 7)
+            np.testing.assert_array_equal(gt['ids'], ['42'])
+            # Nontrivial GT yaw is retained, not reset to lock the image view.
+            self.assertAlmostEqual(gt['boxes'][0, 6], np.pi / 2)
+
+    def test_gt_evidence_uses_3d_support_not_every_point_in_fusion_box(self):
+        with tempfile.TemporaryDirectory() as directory:
+            gt = self.make_gt_fixture(directory)
+            xyz = np.array([[10, 0, 0], [10, 1, 0], [10, -1, 0], [10, 0, 3],
+                            [10, 0, .1], [10, 0, 4]])
+            result = dict(regions=[dict(id=7, accepted=True, support_point_ids=np.arange(4))])
+            gt = gt_diagnostics(result, xyz, gt)
+            np.testing.assert_array_equal(gt['point_labels'], [0, 0, 0, -1, 0, -1])
+            evidence = gt['region_diagnostics'][7]
+            self.assertEqual(evidence['dominant_points'], 3)
+            self.assertEqual(evidence['support_points'], 4)
+            self.assertEqual(evidence['dominant_fraction'], .75)
+            self.assertEqual(gt['region_labels'], {7: '42'})
+
+    def test_gt_duplicate_ids_are_displayed_but_not_used_as_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            boxes = [[12.54, -.3, -1.7, 4, 2, 2, 0], [40, 0, -1, 4, 2, 2, 0]]
+            gt = self.make_gt_fixture(directory, ids=(42, 42), boxes=boxes)
+            self.assertTrue(gt['duplicate_ids'].all())
+            gt = gt_diagnostics(dict(regions=[dict(id=0, accepted=True, support_point_ids=np.arange(3))]),
+                                np.array([[10, 0, 0]] * 3), gt)
+            self.assertEqual(gt['region_labels'], {})
+            self.assertEqual(gt['region_diagnostics'][0]['reason'], 'duplicate_id_only')
+
+    def test_gt_missing_frame_mapping_and_mismatched_tokens_are_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, 'occ_frame_idx'):
+                load_gt({}, '3', Path(directory), np.eye(4))
+            with self.assertRaisesRegex(ValueError, 'count mismatch'):
+                self.make_gt_fixture(directory, ids=(42, 43))
+
+    def test_empty_gt_and_oriented_cuboid_projection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            empty = self.make_gt_fixture(directory, ids=(), boxes=[])
+            self.assertEqual(empty['corners'].shape, (0, 8, 3))
+            gt = self.make_gt_fixture(directory)
+            projection = np.array([[0, 80, 50, 0], [0, 0, 40, 0], [1, 0, 0, 0]], float)
+            edges = project_cuboid_edges(gt['corners'][0], projection)
+            self.assertEqual(len(edges), 12)
+            self.assertTrue(all(np.isfinite(edge).all() for edge in edges))
+
     def test_nearby_peaks_merge_before_small_support_filtering(self):
         xyz, power = cloud([[7, 0, 0], [9.5, 0, 0]])
         result = extract_regions(xyz, power, config(min_points=80))
@@ -277,7 +342,7 @@ class ReflectionRegionTests(unittest.TestCase):
             np.savez(bins, range_m=np.arange(175) * .462890625,
                      azimuth_rad=np.linspace(-.6, .6, 64), elevation_rad=np.linspace(-.15, .15, 8))
             infos = [dict(scene_id='3', order_in_scene=80 + i, radar_frame_id=500 + i,
-                          radar_path=str(radar), lidar_token=f'3_{i}',
+                          radar_path=str(radar), lidar_token=f'3_{i}', occ_frame_idx=i,
                           gt_path='/must/not/be/read.npy') for i in range(2)]
             annotation = directory / 'frames.pkl'
             with annotation.open('wb') as stream:
@@ -297,7 +362,9 @@ class ReflectionRegionTests(unittest.TestCase):
             self.assertEqual(len(manifest['frames']), 2)
             self.assertTrue(manifest['frames'][1]['rgb']['path'].endswith('camera_10.png'))
             self.assertFalse(manifest['gt_used_for_proposals'])
-            self.assertEqual(manifest['schema_version'], 2)
+            self.assertEqual(manifest['schema_version'], 3)
+            self.assertEqual(manifest['config']['algorithm']['seed_percentile'], 97.)
+            self.assertFalse(manifest['gt_overlays'])
             self.assertTrue(manifest['config']['algorithm']['merge_regions'])
             frame = json.loads((output / 'scene3_order00080.json').read_text())
             self.assertIn('fine_regions', frame)
@@ -315,7 +382,37 @@ class ReflectionRegionTests(unittest.TestCase):
             refused = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
             self.assertNotEqual(refused.returncode, 0)
             self.assertIn('Output directory is not empty', refused.stderr)
+            bbox_root = directory / 'gt'
+            folder = bbox_root / '3/bbox'
+            folder.mkdir(parents=True)
+            for i in range(2):
+                np.save(folder / f'bbox{i}.npy', [[25, 0, -5, 20, 10, 10, .2]])
+                np.save(folder / f'bbox_token{i}.npy', [42])
+            gt_output = directory / 'gt_output'
+            gt_command = command.copy()
+            gt_command[gt_command.index('--output-dir') + 1] = str(gt_output)
+            gt_command += ['--show-gt', '--bbox-root', str(bbox_root)]
+            run = subprocess.run(gt_command, cwd=ROOT, capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            gt_manifest = json.loads((gt_output / 'manifest.json').read_text())
+            self.assertTrue(gt_manifest['gt_overlays'])
+            self.assertFalse(gt_manifest['gt_used_for_proposals'])
+            self.assertEqual(gt_manifest['view']['image_rotation_degrees'], 0)
+            self.assertTrue(gt_manifest['view']['gt_yaw_preserved'])
+            self.assertIn('image-orientation:none', (gt_output / 'index.html').read_text())
+            base_frame = json.loads((output / 'scene3_order00080.json').read_text())
+            gt_frame = json.loads((gt_output / 'scene3_order00080.json').read_text())
+            self.assertEqual(gt_frame['regions'], base_frame['regions'])
+            self.assertEqual(gt_frame['stats'], base_frame['stats'])
+            self.assertGreater(gt_frame['gt']['inside_gt_points'], 0)
+            with np.load(output / 'scene3_order00080.npz', allow_pickle=False) as before, \
+                    np.load(gt_output / 'scene3_order00080.npz', allow_pickle=False) as after:
+                for key in before.files:
+                    np.testing.assert_array_equal(before[key], after[key])
+                self.assertEqual(after['gt_corners_radar'].shape, (1, 8, 3))
+                self.assertTrue(all(after[key].dtype != object for key in after.files))
 
 
 if __name__ == '__main__':
     unittest.main()
+
