@@ -36,6 +36,51 @@ def config(**kwargs):
 
 
 class ReflectionRegionTests(unittest.TestCase):
+    def test_xy_filters_small_boxes_before_merging_and_cannot_rescue_them(self):
+        xyz, power = cloud([[7, 0, 0], [9.5, 0, 0]])
+        result = extract_regions(xyz, power, config(merge_space='xy', min_points=80))
+        self.assertEqual(result['stats']['n_fine_regions'], 2)
+        self.assertEqual(result['stats']['n_fine_accepted'], 0)
+        self.assertEqual(result['stats']['n_merge_input_regions'], 0)
+        self.assertEqual(result['stats']['n_filtered_before_merge'], 2)
+        self.assertEqual(result['stats']['n_seed_regions_merged'], 0)
+        self.assertEqual(result['regions'], [])
+        self.assertTrue((result['support_region_ids'] == -1).all())
+
+    def test_xy_rejected_box_cannot_bridge_two_accepted_boxes(self):
+        xyz, power = cloud([[4, 0, 0], [16, 0, 0]])
+        xyz, power = np.r_[xyz, [[10, 0, 0]]], np.r_[power, [20.]]
+        result = extract_regions(xyz, power, config(merge_space='xy', min_points=20,
+                                                   max_box_size=(20, 4, 4)))
+        rejected = [r for r in result['fine_regions'] if not r['accepted']]
+        self.assertEqual(len(rejected), 1)
+        self.assertEqual(rejected[0]['id'], 0)
+        # This rejected middle box touches BOTH good boxes in XY. If admitted
+        # as a bridge, the generous whole-union bound would allow all to merge.
+        for good in (r for r in result['fine_regions'] if r['accepted']):
+            gap = np.maximum(np.maximum(good['box_min'][:2] - rejected[0]['box_max'][:2],
+                                        rejected[0]['box_min'][:2] - good['box_max'][:2]), 0)
+            self.assertTrue((gap <= .5 + 1e-8).all())
+        self.assertEqual(result['stats']['n_regions'], 2)
+        self.assertEqual(result['stats']['n_merge_input_regions'], 2)
+        self.assertEqual(result['stats']['n_filtered_before_merge'], 1)
+        self.assertEqual(result['stats']['n_seed_regions_merged'], 0)
+        self.assertEqual(result['stats']['merge_candidate_links'], 0)
+        self.assertEqual([r['source_seed_ids'] for r in result['regions']], [[1], [2]])
+        self.assertTrue((result['support_region_ids'][rejected[0]['support_point_ids']] == -1).all())
+        arrays = npz_payload(result, xyz, power, np.zeros((len(xyz), 3), int))
+        np.testing.assert_array_equal(arrays['source_seed_indices'], [1, 2])
+
+    def test_xy_merges_passing_boxes_and_keeps_noncontiguous_seed_provenance(self):
+        xyz, power = cloud([[6, 0, 0], [11, 0, 0]])
+        xyz, power = np.r_[xyz, [[18, 0, 0]]], np.r_[power, [20.]]
+        result = extract_regions(xyz, power, config(merge_space='xy', min_points=20))
+        self.assertEqual(result['stats']['n_regions'], 1)
+        self.assertTrue(result['regions'][0]['accepted'])
+        self.assertEqual(result['regions'][0]['source_seed_ids'], [1, 2])
+        self.assertEqual(result['stats']['n_filtered_before_merge'], 1)
+        self.assertEqual(result['stats']['n_seed_regions_merged'], 1)
+
     def test_xy_merges_same_footprint_despite_large_height_separation(self):
         xyz, power = cloud([[8, 0, -1], [8, 0, 3]])
         cfg = config(merge_space='xy')
@@ -482,6 +527,11 @@ class ReflectionRegionTests(unittest.TestCase):
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
             xy_manifest = json.loads((xy_output / 'manifest.json').read_text())
             self.assertEqual(xy_manifest['config']['algorithm']['merge_space'], 'xy')
+            self.assertEqual(xy_manifest['config']['xy_merge_order'], 'filter_then_merge')
+            xy_frame = json.loads((xy_output / 'scene3_order00080.json').read_text())
+            good_ids = {r['id'] for r in xy_frame['fine_regions'] if r['accepted']}
+            for region in xy_frame['regions']:
+                self.assertTrue(set(region['source_seed_ids']).issubset(good_ids))
             with np.load(xy_output / 'scene3_order00080.npz', allow_pickle=False) as arrays:
                 self.assertEqual(arrays['xyz'].shape, (43750, 3))
                 self.assertIn('gt_corners_radar', arrays)

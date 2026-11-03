@@ -19,7 +19,7 @@ python tools/temporal_vis/vis_p1_reflection_regions.py \
   --merge-space xy --xy-box-gap-m 0.5 0.5 \
   --bbox-root data/K-RadarOcc/train \
   --camera-dir data/K-Radar-RGB/K-Radar/K-Radar-RGB/3/images_rb_switched \
-  --output-dir outputs/p1_reflection_regions/scene3_p97_gt_xy --gif
+  --output-dir outputs/p1_reflection_regions/scene3_p97_gt_xy_filtered --gif
 ```
 
 For one frame, set `--start-order 80 --end-order 80`. By default the tool finds
@@ -93,9 +93,12 @@ Use `--merge-space xy` to ignore height when grouping nearby reflection boxes.
 The previous mode remains available as `--merge-space xyz` and is still the
 CLI/config default for reproducibility.
 
-1. Keep the existing fine XYZ basins and their original fixed-size boxes. Consider
-   ALL fine basins before acceptance filtering, so a height-rejected fragment is
-   not discarded before XY grouping.
+1. Build the fine XYZ basins and their original fixed-size boxes, then apply the
+   existing small-box quality filters FIRST: at least 6 support points, at least
+   3 support cells, and support XY aspect ratio no greater than 8 by default.
+   ONLY accepted fine boxes enter XY grouping. Rejected boxes cannot form bridge
+   links and their support points cannot contribute to merged-region support.
+   This is radar quality filtering, not GT-label/purity filtering.
 2. Compare the XY footprints of the original boxes. Overlap is allowed; otherwise
    X and Y EDGE gaps must each be at most `--xy-box-gap-m` (default 0.5/0.5 m).
    This is a box-edge gap, not center distance or point radius. Set `0 0` for
@@ -115,6 +118,15 @@ No GT is used to choose mergers. Same-XY returns at different heights can group
 together, without establishing object identity. GT membership/purity remain 3D;
 a more complete-looking XY group does not automatically have a higher same-object
 GT fraction. Input XYZ, power, NPZ point IDs, and fine-region provenance are kept.
+The merged region still receives the existing whole-region quality checks after
+grouping. Source seed IDs remain original even when filtering leaves gaps in
+their numbering. Rejected boxes remain in `fine_regions` diagnostics; raw input
+points are not deleted and can still occur as ordinary returns inside a final
+box. `n_filtered_before_merge` counts discarded fine boxes,
+`n_merge_input_regions` counts passed boxes, and `n_seed_regions_merged` counts
+reductions among PASSED boxes only. Filtered boxes are not counted as mergers.
+Plot titles/console output report the passed merge input count; the manifest
+records `xy_merge_order=filter_then_merge`.
 
 ### Original XYZ support-cell merging
 

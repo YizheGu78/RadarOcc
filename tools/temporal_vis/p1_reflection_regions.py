@@ -307,16 +307,20 @@ def merge_support_regions(xyz, support_ids, support_cells, support_grid, owner, 
 def merge_xy_boxes(xyz, fine_regions, fine_labels, config):
     """Merge overlapping/nearby XY box footprints, ignoring height entirely.
 
-    Start from ALL fine basins, before acceptance filtering. Link by the edge
-    gap of original fixed-box XY footprints, not support-cell contact or Z.
+    Start only from fine basins that passed the existing small-box filters.
+    Rejected basins cannot form bridge links or contribute merged support.
+    Link by original fixed-box XY footprints, not support-cell contact or Z.
     Recheck the whole union's support XY span plus padding after each merge.
     Original point IDs and Z values are untouched; no support is synthesized.
     """
+    original_count = len(fine_regions)
+    fine_regions = [r for r in fine_regions if r['accepted']]
+    original_ids = np.array([r['id'] for r in fine_regions], np.int32)
     count = len(fine_regions)
     stats = dict(n_orphan_components=0, merge_candidate_links=0,
                  merge_links_rejected_contact=0, merge_links_rejected_size=0)
     if not count:
-        return fine_labels.copy(), [], [], stats
+        return np.full(len(xyz), -1, np.int32), [], [], stats
     lows = np.array([r['observed_min'][:2] for r in fine_regions])
     highs = np.array([r['observed_max'][:2] for r in fine_regions])
     links = []
@@ -366,14 +370,15 @@ def merge_xy_boxes(xyz, fine_regions, fine_labels, config):
         parent[discard] = keep
         merged_low[keep], merged_high[keep] = low, high
     roots = np.array([root(parent, i) for i in range(count)])
-    sources = [np.flatnonzero(roots == r).tolist() for r in np.unique(roots)]
-    mapping = np.full(count, -1, np.int32)
+    local_sources = [np.flatnonzero(roots == r) for r in np.unique(roots)]
+    sources = [original_ids[indices].tolist() for indices in local_sources]
+    mapping = np.full(original_count, -1, np.int32)
     for region_id, source in enumerate(sources):
         mapping[source] = region_id
     point_region = np.full(len(xyz), -1, np.int32)
     assigned = fine_labels >= 0
     point_region[assigned] = mapping[fine_labels[assigned]]
-    return point_region, sources, [bool(long_chain[s[0]]) for s in sources], stats
+    return point_region, sources, [bool(long_chain[s[0]]) for s in local_sources], stats
 
 
 def make_regions(xyz, power, eligible, point_region, seeds, sources, config,
@@ -457,8 +462,10 @@ def extract_regions(xyz, power, config=None):
     fine_regions = make_regions(xyz, power, eligible, fine_labels, seeds, sources, config)
     merge_stats = dict(n_orphan_components=0, merge_candidate_links=0,
                        merge_links_rejected_contact=0, merge_links_rejected_size=0)
+    merge_input_count = len(fine_regions)
     if config.merge_regions:
         if config.merge_space == 'xy':
+            merge_input_count = sum(r['accepted'] for r in fine_regions)
             point_region, sources, long_flags, merge_stats = merge_xy_boxes(
                 xyz, fine_regions, fine_labels, config)
         else:
@@ -483,7 +490,9 @@ def extract_regions(xyz, power, config=None):
         n_support=int(support.sum()), n_seed_points=int(seed_points.sum()),
         n_assigned_support=int((point_region >= 0).sum()), n_regions=len(regions),
         n_fine_regions=len(fine_regions), n_fine_accepted=sum(r['accepted'] for r in fine_regions),
-        n_seed_regions_merged=len(fine_regions) - len(regions),
+        n_merge_input_regions=merge_input_count,
+        n_filtered_before_merge=len(fine_regions) - merge_input_count,
+        n_seed_regions_merged=merge_input_count - len(regions),
         n_recovered_support=int(((point_region >= 0) & (fine_labels < 0)).sum()),
         n_unassigned_support=int((support & (point_region < 0)).sum()),
         n_long_structure_candidates=sum('long_structure_candidate' in r['status'] for r in regions),

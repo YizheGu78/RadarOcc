@@ -270,7 +270,8 @@ def render(result, xyz, power, destination, title, rgb_path=None, projection=Non
     stats = result['stats']
     before.set_title(f'Before: {stats["n_fine_regions"]} seed regions | original fixed boxes\n'
                      f'Showing {fine_drawn}/{fine_visible}; S IDs identify reflection seeds')
-    boxes.set_title(f'After ({config["merge_space"].upper()}): {stats["n_fine_regions"]} seeds -> {stats["n_regions"]} groups | '
+    input_label = 'filtered seeds' if config['merge_regions'] and config['merge_space'] == 'xy' else 'seeds'
+    boxes.set_title(f'After ({config["merge_space"].upper()}): {stats["n_merge_input_regions"]} {input_label} -> {stats["n_regions"]} groups | '
                     f'{stats["n_accepted"]} accepted\n'
                     f'Showing {drawn}/{visible} accepted groups; n = source seeds')
     detail.set_title(f'Forward-area detail | showing {zoom_drawn}/{zoom_visible} groups\n'
@@ -519,7 +520,8 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     frames = []
     csv_rows = []
-    config_dict = {**vars(args), 'resolved_ann_file': str(ann_file), 'algorithm': config.__dict__}
+    config_dict = {**vars(args), 'resolved_ann_file': str(ann_file), 'algorithm': config.__dict__,
+                   'xy_merge_order': 'filter_then_merge' if config.merge_regions and config.merge_space == 'xy' else None}
     print(f'Scene {args.scene}: {len(selected)} selected frames; seed={args.seed_percentile:g}; '
           f'GT overlay={args.show_gt}; GT-free extraction; fixed 2D view; no model/CUDA', flush=True)
     for index, info in enumerate(selected):
@@ -573,6 +575,7 @@ def main():
         csv_rows.append(dict(scene=str(args.scene), order=order, **result['stats'],
             load_seconds=load_seconds, region_seconds=region_seconds, image=image_path.name))
         print(f'[{index+1}/{len(selected)}] order={order} seeds={result["stats"]["n_fine_regions"]} '
+              f'merge_inputs={result["stats"]["n_merge_input_regions"]} filtered_before_merge={result["stats"]["n_filtered_before_merge"]} '
               f'groups={result["stats"]["n_regions"]} recovered_support={result["stats"]["n_recovered_support"]} '
               f'accepted={result["stats"]["n_accepted"]} boxed_points={result["stats"]["n_box_points"]} '
               f'region_seconds={region_seconds:.3f} image={image_path}', flush=True)
