@@ -57,13 +57,24 @@ If GT bbox files live elsewhere, pass `--bbox-root /path/to/K-RadarOcc/{split}`.
 
 ## Offline GT scoring
 
-For each accepted reflection region, assign a GT target token **only if** at least 3 original support points belong to the same unambiguous GT box **and** those points make up at least 60% of all support points. Unlabeled, overlapping, and duplicate-ID support counts stay in the purity denominator. Unscorable current proposals are excluded from matching metrics, but they still exist as candidate history regions.
+For each accepted reflection region, assign a GT target token **only if** at least 3 original support points belong to the same unambiguous GT box **and** those points make up at least 60% of all support points. Unlabeled, overlapping, and duplicate-ID support counts stay in the purity denominator.
+
+All accepted current regions are now matched and written to `matches.csv`, even
+when no current region receives a GT ID. GT scoring is applied separately:
+`current_scorable=False` rows are excluded from GT precision/recall. Their
+`correct`, `has_true_history`, and GT gate-rejection verdicts are blank (unknown),
+not False. A matched history region with no GT ID also has an unknown correctness
+verdict. This prevents unknown IDs from being compared as if `None == None` were
+a correct same-object match. Proposal and matching parameters are unchanged.
 
 - **Precision**: correct same-ID predicted links / predicted links where the history region has a scorable GT ID. Predictions to unlabeled/ambiguous historical regions are counted separately as `unscorable_prediction`.
 - **Recall**: correct same-ID predicted links / current GT-labeled regions with at least one same-ID GT-labeled history region. This denominator **includes** queries rejected by geometry gates or left unmatched.
 - **GT Y rejection rate**: fraction of recall-eligible current regions where **all** same-ID history regions fail the hard Y gate.
 - **GT center rejection rate**: fraction where Y gate permits a same-ID history region but the 3D center gate eliminates them all.
 - `prediction_rate` and `false_match_rate` are also reported.
+- `all_queries`, `all_predictions`, and `all_prediction_rate` include ALL accepted
+  current-region/history queries, while `current_unlabeled` counts the queries
+  excluded from GT scoring. These are geometry matching counts, not accuracy.
 
 Metrics are computed for each individual temporal slot and for all slots combined. Undefined ratios are `null` in JSON, blank in CSV. If the number of GT-labeled regions is very low, treat the results as **inconclusive** and adjust proposal thresholds or GT purity with an explicitly documented experiment.
 
@@ -72,9 +83,47 @@ Metrics are computed for each individual temporal slot and for all slots combine
 ```text
 outputs/region_matching_benchmark/val20/
   metrics.csv     # 6 weights × (t-1, t-2, t-3, all)
-  matches.csv     # individual query-region matches with offline GT verdicts
+  matches.csv     # ALL accepted query-region matches, including unknown GT IDs
+  frame_diagnostics.csv      # loaded current/history frames, proposal and GT counts
+  region_gt_diagnostics.csv  # GT labeling evidence and reason for each accepted region
   report.json     # config, metrics, runtime, scoring definitions
 ```
+
+## Empty or unscorable results
+
+Schema version 2 always writes the full matches header, even if there are no
+queries. If accepted regions exist but GT labeling fails, `matches.csv` still
+contains geometric matches. Only zero accepted current regions, no selected
+frames, or unavailable history positions can leave it with a header only.
+
+Inspect `frame_diagnostics.csv` first: it records exact radar/bbox paths,
+`occ_frame_idx`, GT box and duplicate-ID counts, P1 points inside unambiguous GT
+boxes, all proposals, accepted proposals, and labeled proposals for every loaded
+current/history frame. `proposal_status_counts` also shows why proposals were
+rejected (for example `oversized_support`). History frames are included even when not selected for
+evaluation. Counts are per frame, not repeated for six weight settings.
+
+`region_gt_diagnostics.csv` separates these labeling outcomes:
+
+| reason | Meaning |
+| --- | --- |
+| `labeled` | A unique GT ID passed point-count and purity requirements |
+| `no_support` | No support points |
+| `no_gt_overlap` | No support points lie in an unambiguous GT box |
+| `duplicate_id_only` | All overlapping support points belong to duplicate-ID boxes |
+| `insufficient_gt_points` | Dominant unique-ID box has fewer than min_gt_points points |
+| `low_purity` | Enough dominant points, but their fraction is below gt_purity |
+
+The table includes overlap counts, dominant ID/count/fraction and duplicate-ID
+point counts. A zero-GT result remains inconclusive; diagnostic output does not
+relax GT thresholds or establish correct matches. Check geometry, frame pairing,
+and proposal quality before tuning GT purity. Wider matching gates cannot change
+GT labeling. Match rows also include current center XYZ, history accepted/labeled
+counts, and candidate counts after Y and 3D-center gates.
+
+Match prior visualization parameters explicitly: the visualization CLI defaults
+to `--seed-percentile 95`, whereas this benchmark retains its existing default
+of 97. Check the recorded configuration before comparing results.
 
 To view all-slot results:
 
@@ -96,3 +145,4 @@ python -m unittest tests.test_region_matching_benchmark -v
 ```
 
 **Scope:** This is **matching verification only**, not full RadarOcc IoU, attention feature interpolation, or inference-latency benchmarking. Choose weights on validation and confirm on independent held-out scenes before the final P2 training benchmark. If you optimize proposal thresholds, do not use test GT for tuning.
+

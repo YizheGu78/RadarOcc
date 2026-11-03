@@ -22,13 +22,19 @@ from tools.temporal_vis.audit_dynamic_objects import memberships, transform
 from tools.temporal_vis.p1_reflection_regions import RegionConfig, extract_regions
 
 WEIGHTS = ((1., 0.), (.9, .1), (.75, .25), (.5, .5), (.25, .75), (0., 1.))
+MATCH_FIELDS = ['weight_center', 'weight_size', 'scene', 'order', 'history_order', 'slot',
+    'current_region', 'current_id', 'current_scorable', 'matched_region', 'predicted_id',
+    'predicted', 'correct', 'has_true_history', 'y_missed_true', 'center_missed_true',
+    'current_x', 'current_y', 'current_z', 'history_accepted', 'history_labeled',
+    'candidates_after_y', 'candidates_after_center']
 
 
 def safe_ratio(numerator, denominator):
     return numerator / denominator if denominator else None
 
 
-def label_regions(regions, point_labels, object_ids, purity=0.6, min_gt_points=3):
+def label_regions(regions, point_labels, object_ids, purity=0.6, min_gt_points=3,
+                  return_diagnostics=False):
     """Assign an unambiguous GT ID to a proposal using its SUPPORT points.
 
     Denominator includes unlabeled/ambiguous support points, avoiding inflated
@@ -38,23 +44,40 @@ def label_regions(regions, point_labels, object_ids, purity=0.6, min_gt_points=3
     _, inverse, counts = np.unique(object_ids, return_inverse=True, return_counts=True)
     is_unique_id = counts[inverse] == 1
     result = {}
+    diagnostics = []
     for region in regions:
         if not region['accepted']:
             continue
         indices = np.asarray(region['support_point_ids'], dtype=np.int64)
-        if not len(indices):
-            continue
         labels = np.asarray(point_labels)[indices]
         labels = labels[(labels >= 0) & (labels < len(object_ids))]
+        overlap = len(labels)
+        duplicate_points = int((~is_unique_id[labels]).sum())
         labels = labels[is_unique_id[labels]]
-        if not len(labels):
-            continue
-        values, frequencies = np.unique(labels, return_counts=True)
-        winner = int(values[np.argmax(frequencies)])
-        n = int(frequencies.max())
-        if n >= min_gt_points and n / len(indices) >= purity:
+        winner, n = None, 0
+        if len(labels):
+            values, frequencies = np.unique(labels, return_counts=True)
+            winner = int(values[np.argmax(frequencies)])
+            n = int(frequencies.max())
+        fraction = n / len(indices) if len(indices) else 0.0
+        if not len(indices):
+            reason = 'no_support'
+        elif not overlap:
+            reason = 'no_gt_overlap'
+        elif not len(labels):
+            reason = 'duplicate_id_only'
+        elif n < min_gt_points:
+            reason = 'insufficient_gt_points'
+        elif fraction < purity:
+            reason = 'low_purity'
+        else:
+            reason = 'labeled'
             result[int(region['id'])] = str(object_ids[winner])
-    return result
+        diagnostics.append(dict(region=int(region['id']), support_points=len(indices),
+            gt_overlap_points=overlap, duplicate_id_points=duplicate_points,
+            dominant_id=str(object_ids[winner]) if winner is not None else None,
+            dominant_points=n, dominant_fraction=fraction, reason=reason))
+    return (result, diagnostics) if return_diagnostics else result
 
 
 def aligned_box(center, dimensions, matrix):
@@ -97,8 +120,14 @@ def summarize(rows):
     """Recall denominator: current GT-labeled regions with same-ID history region."""
     c = Counter(dict(current_labeled=0, has_true_history=0, y_missed_true=0,
                      center_missed_true=0, predicted=0, unscorable_prediction=0,
-                     scorable_prediction=0, correct=0, wrong=0))
+                     scorable_prediction=0, correct=0, wrong=0,
+                     all_queries=0, all_predictions=0, current_unlabeled=0))
     for row in rows:
+        c['all_queries'] += 1
+        c['all_predictions'] += int(row['predicted'])
+        if not row.get('current_scorable', True):
+            c['current_unlabeled'] += 1
+            continue
         c['current_labeled'] += 1
         c['has_true_history'] += int(row['has_true_history'])
         c['y_missed_true'] += int(row['y_missed_true'])
@@ -115,6 +144,7 @@ def summarize(rows):
                 recall=safe_ratio(c['correct'], c['has_true_history']),
                 false_match_rate=safe_ratio(c['wrong'], c['scorable_prediction']),
                 prediction_rate=safe_ratio(c['predicted'], c['current_labeled']),
+                all_prediction_rate=safe_ratio(c['all_predictions'], c['all_queries']),
                 gt_y_rejection_rate=safe_ratio(c['y_missed_true'], c['has_true_history']),
                 gt_center_rejection_rate=safe_ratio(c['center_missed_true'], c['has_true_history']))
 
@@ -122,6 +152,8 @@ def summarize(rows):
 class FrameData:
     def __init__(self, args):
         self.args = args
+        self.diagnostics = {}
+        self.region_diagnostics = {}
         self.geometry = va.RadarBinGeometry.from_file(args.bins)
         self.extrinsic = (np.load(args.extrinsic, allow_pickle=False) if args.extrinsic
                           else va.geometry_module.radar_to_lidar_default())
@@ -167,9 +199,23 @@ class FrameData:
         if len(gt_boxes) != len(gt_ids):
             raise ValueError(f'GT bbox/token count mismatch: {scene}/{order}')
         point_labels = memberships(transform(xyz, self.extrinsic), gt_boxes)
-        labels = label_regions(proposals, point_labels, gt_ids, self.args.gt_purity,
-                               self.args.min_gt_points)
+        labels, region_diagnostics = label_regions(proposals, point_labels, gt_ids,
+            self.args.gt_purity, self.args.min_gt_points, return_diagnostics=True)
         accepted = [r for r in proposals if r['accepted']]
+        reasons = Counter(row['reason'] for row in region_diagnostics)
+        _, id_counts = np.unique(gt_ids, return_counts=True)
+        record = dict(scene=scene, order=order, occ_frame_idx=bbox_index,
+            radar_path=str(path), bbox_path=str(bbox_dir / f'bbox{bbox_index}.npy'),
+            gt_boxes=len(gt_boxes), duplicate_id_boxes=int(id_counts[id_counts > 1].sum()),
+            p1_points=len(xyz), p1_unambiguous_gt_points=int((point_labels >= 0).sum()),
+            proposals=len(proposals), accepted=len(accepted), labeled=len(labels),
+            proposal_status_counts=json.dumps(dict(Counter(r['status'] for r in proposals)), sort_keys=True))
+        for reason in ('no_support', 'no_gt_overlap', 'duplicate_id_only',
+                       'insufficient_gt_points', 'low_purity'):
+            record[reason] = reasons[reason]
+        self.diagnostics[(scene, order)] = record
+        self.region_diagnostics[(scene, order)] = [dict(scene=scene, order=order, **row)
+                                                   for row in region_diagnostics]
         return dict(accepted=accepted, labels=labels, pose=pose, count=len(accepted),
                     assigned=len(labels), order=order)
 
@@ -223,25 +269,33 @@ def evaluate(args):
                 hist_labels = previous['labels']
                 for r in current['accepted']:
                     actual = current['labels'].get(int(r['id']))
-                    if actual is None:
-                        continue
-                    truth = [h for h in transformed if hist_labels.get(h['id']) == actual]
+                    scorable = actual is not None
+                    truth = [h for h in transformed if scorable and hist_labels.get(h['id']) == actual]
                     y_ok = [h for h in truth if abs(h['aligned_center'][1] - r['center'][1]) <=
                             args.y_gates[slot-1] + 1e-10]
                     center_ok = [h for h in y_ok if np.linalg.norm(h['aligned_center'] - r['center']) <=
                                  args.center_gates[slot-1] + 1e-10]
+                    candidates_y = [h for h in transformed if abs(h['aligned_center'][1] - r['center'][1]) <=
+                                    args.y_gates[slot-1] + 1e-10]
+                    candidates_center = [h for h in candidates_y if np.linalg.norm(h['aligned_center'] - r['center']) <=
+                                         args.center_gates[slot-1] + 1e-10]
                     for wd, ws in WEIGHTS:
                         matched = select_match(r, transformed, slot, wd, ws,
                                                args.y_gates, args.center_gates, args.size_scale)
                         prediction = hist_labels.get(matched['id']) if matched else None
                         row = dict(scene=scene, order=order, history_order=history_order, slot=slot,
-                                   current_region=int(r['id']), current_id=actual,
+                                   current_region=int(r['id']), current_id=actual, current_scorable=scorable,
                                    matched_region=matched['id'] if matched else None,
                                    predicted_id=prediction, predicted=matched is not None,
-                                   correct=prediction == actual and matched is not None,
-                                   has_true_history=bool(truth),
-                                   y_missed_true=bool(truth) and not bool(y_ok),
-                                   center_missed_true=bool(y_ok) and not bool(center_ok))
+                                   correct=(prediction == actual and matched is not None)
+                                       if scorable and (prediction is not None or matched is None) else None,
+                                   has_true_history=bool(truth) if scorable else None,
+                                   y_missed_true=(bool(truth) and not bool(y_ok)) if scorable else None,
+                                   center_missed_true=(bool(y_ok) and not bool(center_ok)) if scorable else None,
+                                   current_x=float(r['center'][0]), current_y=float(r['center'][1]),
+                                   current_z=float(r['center'][2]), history_accepted=len(transformed),
+                                   history_labeled=len(hist_labels), candidates_after_y=len(candidates_y),
+                                   candidates_after_center=len(candidates_center))
                         all_rows[(wd, ws, slot)].append(row)
                         detailed.append(dict(weight_center=wd, weight_size=ws, **row))
             if frame_count % 10 == 0:
@@ -259,16 +313,27 @@ def evaluate(args):
         writer.writeheader()
         writer.writerows(result)
     with (args.output_dir/'matches.csv').open('w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=(list(detailed[0]) if detailed else
-                                ['weight_center', 'weight_size', 'scene', 'order', 'slot']))
+        writer = csv.DictWriter(f, fieldnames=MATCH_FIELDS)
         writer.writeheader()
         writer.writerows(detailed)
+    frame_diagnostics = [data.diagnostics[key] for key in sorted(data.diagnostics)]
+    region_diagnostics = [row for key in sorted(data.region_diagnostics)
+                          for row in data.region_diagnostics[key]]
+    for name, rows, empty_fields in (
+            ('frame_diagnostics.csv', frame_diagnostics, ['scene', 'order', 'accepted', 'labeled']),
+            ('region_gt_diagnostics.csv', region_diagnostics, ['scene', 'order', 'region', 'reason'])):
+        with (args.output_dir/name).open('w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=list(rows[0]) if rows else empty_fields)
+            writer.writeheader()
+            writer.writerows(rows)
     config = {key: (str(value) if isinstance(value, Path) else value)
               for key, value in vars(args).items()}
-    (args.output_dir/'report.json').write_text(json.dumps(dict(config=config, metrics=result,
+    (args.output_dir/'report.json').write_text(json.dumps(dict(schema_version=2, config=config, metrics=result,
         frames_evaluated=frame_count, seconds=time.perf_counter()-start,
+        frame_diagnostics=frame_diagnostics,
         notes=['GT bbox IDs used for offline scoring ONLY; NEVER in matching.',
-               'Only accepted radar regions with unambiguous GT majority are scored.',
+               'All accepted current regions are matched and exported, including unknown GT IDs.',
+               'Only current_scorable rows contribute to GT precision/recall; unknown verdicts are blank.',
                'Precision excludes predictions with unknown history GT label; count them separately.',
                'Recall denominator is current labeled regions with a same-ID labeled history region.',
                'Unmatched current regions outside accepted proposals are not part of this benchmark.']),
@@ -279,7 +344,13 @@ def evaluate(args):
             print(f"weights={row['weight_center']:.2f}/{row['weight_size']:.2f}: "
                   f"precision={row['precision']} recall={row['recall']} "
                   f"GT_Y_rejection={row['gt_y_rejection_rate']} "
+                  f"queries={row['all_queries']} labeled={row['current_labeled']} "
                   f"unscorable={row.get('unscorable_prediction', 0)}")
+    if not detailed:
+        print('WARNING: no region/history queries; inspect frame_diagnostics.csv for accepted counts and frame selection.')
+    elif not any(row['current_scorable'] for row in detailed):
+        print('WARNING: zero GT-labeled current regions. Matches are exported, but GT metrics are undefined. '
+              'Inspect frame_diagnostics.csv and region_gt_diagnostics.csv; widening matching gates cannot fix labeling.')
     print('Outputs:', args.output_dir.resolve())
 
 
@@ -314,3 +385,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
