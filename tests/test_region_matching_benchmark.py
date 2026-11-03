@@ -43,7 +43,7 @@ class RegionMatchingTests(unittest.TestCase):
         self.assertEqual(stats['precision'], 1.)
         self.assertEqual(stats['recall'], 1.)
 
-    def run_cli_fixture(self, directory, constant_power=False, gt_overlap=False):
+    def run_cli_fixture(self, directory, constant_power=False, gt_overlap=False, merge_space='xyz'):
         root = Path(__file__).resolve().parents[1]
         count = 175 * 250
         power = np.zeros((8, count))
@@ -80,6 +80,7 @@ class RegionMatchingTests(unittest.TestCase):
                    '--ann-file', str(annotation), '--bins', str(bins),
                    '--bbox-root', str(directory / 'bbox_root'), '--scenes', '3',
                    '--start-order', '90', '--end-order', '90', '--seed-percentile', '95',
+                   '--merge-space', merge_space,
                    '--output-dir', str(output)]
         run = subprocess.run(command, cwd=root, capture_output=True, text=True)
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
@@ -131,6 +132,13 @@ class RegionMatchingTests(unittest.TestCase):
             self.assertTrue(scored)
             self.assertTrue(all(r['correct'] == 'True' and r['has_true_history'] == 'True' for r in scored))
             report = json.loads((output / 'report.json').read_text())
+            self.assertTrue(all(r['precision'] == 1. and r['recall'] == 1. for r in report['metrics']))
+
+    def test_cli_xy_proposal_mode_preserves_gt_scoring(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output, _ = self.run_cli_fixture(Path(directory), gt_overlap=True, merge_space='xy')
+            report = json.loads((output / 'report.json').read_text())
+            self.assertEqual(report['config']['merge_space'], 'xy')
             self.assertTrue(all(r['precision'] == 1. and r['recall'] == 1. for r in report['metrics']))
 
     def setUp(self):

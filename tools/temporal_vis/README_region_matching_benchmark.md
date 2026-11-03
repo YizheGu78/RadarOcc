@@ -43,6 +43,14 @@ If GT bbox files live elsewhere, pass `--bbox-root /path/to/K-RadarOcc/{split}`.
 
 ## Matching algorithm
 
+To evaluate proposals from the XY visualization, pass the SAME
+`--merge-space xy --xy-box-gap-m 0.5 0.5` parameters to this benchmark. The default
+remains `xyz` for reproducibility. XY mode merges original fine box footprints
+without a Z gate or 3D contact requirement, bounding only the union's X/Y size.
+Raw point heights and 3D GT scoring are preserved. This option changes proposal
+grouping only: the temporal matcher below still uses its existing 3D center and
+size costs. It does not silently turn GT scoring into a 2D evaluation.
+
 1. Extract accepted radar regions independently in every frame. Number of regions is **not fixed**.
 2. Transform historical radar boxes into the **current radar coordinate system** using ego poses and radar-to-LiDAR extrinsic. Historical box **AABB** dimensions are conservatively rotated into current axes.
 3. For each current region independently in each historical frame, apply strict absolute Y-center gates **0.5, 1.0, 1.5 m** for t−1/t−2/t−3.

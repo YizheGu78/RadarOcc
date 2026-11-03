@@ -16,9 +16,10 @@ python tools/temporal_vis/vis_p1_reflection_regions.py \
   --ann-file data/annotations/kradar_dict_test_official_temporal_doppler8.pkl \
   --scene 3 --start-order 80 --end-order 200 --stride 5 \
   --seed-percentile 97 --show-gt \
+  --merge-space xy --xy-box-gap-m 0.5 0.5 \
   --bbox-root data/K-RadarOcc/train \
   --camera-dir data/K-Radar-RGB/K-Radar/K-Radar-RGB/3/images_rb_switched \
-  --output-dir outputs/p1_reflection_regions/scene3_p97_gt --gif
+  --output-dir outputs/p1_reflection_regions/scene3_p97_gt_xy --gif
 ```
 
 For one frame, set `--start-order 80 --end-order 80`. By default the tool finds
@@ -86,6 +87,39 @@ edges are also projected onto RGB.
 
 ## Algorithm and initial settings
 
+### XY box-footprint merging
+
+Use `--merge-space xy` to ignore height when grouping nearby reflection boxes.
+The previous mode remains available as `--merge-space xyz` and is still the
+CLI/config default for reproducibility.
+
+1. Keep the existing fine XYZ basins and their original fixed-size boxes. Consider
+   ALL fine basins before acceptance filtering, so a height-rejected fragment is
+   not discarded before XY grouping.
+2. Compare the XY footprints of the original boxes. Overlap is allowed; otherwise
+   X and Y EDGE gaps must each be at most `--xy-box-gap-m` (default 0.5/0.5 m).
+   This is a box-edge gap, not center distance or point radius. Set `0 0` for
+   overlap/touch only. No Z difference or 3D support-cell-contact test is used.
+3. Merge nearest footprint links first; break overlap ties by XY center distance
+   and then seed IDs. Recheck the WHOLE union's observed support XY span plus
+   padding, bounded by the X/Y values of `--max-box-size-m`. This limits chain
+   growth; the existing long-thin-chain confidence flag remains active.
+4. Rebuild a support-enclosing 3D box from combined original support points. XY
+   dimensions remain bounded. Original Z coordinates are retained and enclosed,
+   but the Z maximum size is NOT an acceptance gate in this mode: box height may
+   exceed 4 m. Point/cell counts and XY shape filters still apply after merging.
+   This box-only mode does not recover unassigned support fragments. All eligible
+   original returns inside the final box are included in its membership as before.
+
+No GT is used to choose mergers. Same-XY returns at different heights can group
+together, without establishing object identity. GT membership/purity remain 3D;
+a more complete-looking XY group does not automatically have a higher same-object
+GT fraction. Input XYZ, power, NPZ point IDs, and fine-region provenance are kept.
+
+### Original XYZ support-cell merging
+
+The following describes `--merge-space xyz` (the previous default behavior):
+
 1. Read all 43,750 original P1 returns. Exclude non-finite values and points
    outside the explicitly configured analysis ROI. No ego-return mask is added.
 2. In 8 m slant-range bands, compute high (97th percentile) and support (80th
@@ -142,7 +176,7 @@ python tools/temporal_vis/vis_p1_reflection_regions.py --help
 Use `--box-size-m`, `--seed-percentile`, `--support-percentile`, `--seed-mad`,
 `--support-mad`, `--peak-separation-m`, `--grow-half-size-m`, `--min-points`,
 `--min-cells`, `--merge-gap-m`, `--merge-min-contact-cells`, `--max-box-size-m`,
-`--box-padding-m`, and `--xy-resolution` for a documented diagnostic run. Tune on
+`--box-padding-m`, `--merge-space`, `--xy-box-gap-m`, and `--xy-resolution` for a documented diagnostic run. Tune on
 training diagnostic frames, not final test results. Use a NEW output directory
 for a different parameter set. Default analysis ROI is X [0,85), Y [-60,60),
 Z [-5,8) m; exclusions are counted. Display limits never alter the input files.

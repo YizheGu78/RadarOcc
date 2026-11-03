@@ -29,6 +29,8 @@ class RegionConfig:
     grow_half_size: tuple = (4.0, 2.0, 2.0)
     box_size: tuple = (6.0, 3.0, 3.0)
     merge_regions: bool = True
+    merge_space: str = 'xyz'
+    xy_box_gap: tuple = (0.5, 0.5)
     merge_gap: tuple = (1.5, 1.0, 1.0)
     merge_min_contact_cells: int = 2
     max_box_size: tuple = (12.0, 4.0, 4.0)
@@ -38,6 +40,10 @@ class RegionConfig:
     max_aspect: float = 8.0
 
     def validate(self):
+        if self.merge_space not in ('xyz', 'xy'):
+            raise ValueError('merge_space must be xyz or xy')
+        if len(self.xy_box_gap) != 2 or not np.isfinite(self.xy_box_gap).all() or min(self.xy_box_gap) < 0:
+            raise ValueError('xy_box_gap must contain two finite nonnegative XY values')
         positive = (self.xy_resolution, self.z_resolution, self.range_band_m,
                     self.peak_separation_m, self.max_aspect,
                     *self.grow_half_size, *self.box_size, *self.merge_gap, *self.max_box_size)
@@ -298,6 +304,78 @@ def merge_support_regions(xyz, support_ids, support_cells, support_grid, owner, 
     return point_region, sources, flags, stats
 
 
+def merge_xy_boxes(xyz, fine_regions, fine_labels, config):
+    """Merge overlapping/nearby XY box footprints, ignoring height entirely.
+
+    Start from ALL fine basins, before acceptance filtering. Link by the edge
+    gap of original fixed-box XY footprints, not support-cell contact or Z.
+    Recheck the whole union's support XY span plus padding after each merge.
+    Original point IDs and Z values are untouched; no support is synthesized.
+    """
+    count = len(fine_regions)
+    stats = dict(n_orphan_components=0, merge_candidate_links=0,
+                 merge_links_rejected_contact=0, merge_links_rejected_size=0)
+    if not count:
+        return fine_labels.copy(), [], [], stats
+    lows = np.array([r['observed_min'][:2] for r in fine_regions])
+    highs = np.array([r['observed_max'][:2] for r in fine_regions])
+    links = []
+    for a in range(count):
+        ra = fine_regions[a]
+        for b in range(a + 1, count):
+            rb = fine_regions[b]
+            gap = np.maximum(np.maximum(ra['box_min'][:2] - rb['box_max'][:2],
+                                        rb['box_min'][:2] - ra['box_max'][:2]), 0)
+            if np.all(gap <= np.asarray(config.xy_box_gap) + 1e-8):
+                center_distance = np.linalg.norm(ra['center'][:2] - rb['center'][:2])
+                links.append((float(np.linalg.norm(gap)), float(center_distance), a, b))
+    links.sort()
+    stats['merge_candidate_links'] = len(links)
+
+    def root(parent, node):
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return int(node)
+
+    connected = np.arange(count)
+    for _, _, a, b in links:
+        a, b = root(connected, a), root(connected, b)
+        connected[max(a, b)] = min(a, b)
+    connected_roots = np.array([root(connected, i) for i in range(count)])
+    chain_low, chain_high = np.full_like(lows, np.inf), np.full_like(highs, -np.inf)
+    np.minimum.at(chain_low, connected_roots, lows)
+    np.maximum.at(chain_high, connected_roots, highs)
+    chain_span = chain_high[connected_roots] - chain_low[connected_roots]
+    extent = np.maximum(chain_span, config.xy_resolution)
+    long_chain = ((extent.max(axis=1) / extent.min(axis=1) > config.max_aspect)
+                  & (chain_span > np.asarray(config.max_box_size)[:2]).any(axis=1))
+
+    parent = np.arange(count)
+    merged_low, merged_high = lows.copy(), highs.copy()
+    max_span = np.asarray(config.max_box_size)[:2] - 2 * np.asarray(config.box_padding)[:2]
+    for _, _, a, b in links:
+        a, b = root(parent, a), root(parent, b)
+        if a == b:
+            continue
+        low, high = np.minimum(merged_low[a], merged_low[b]), np.maximum(merged_high[a], merged_high[b])
+        if np.any(high - low > max_span + 1e-8):
+            stats['merge_links_rejected_size'] += 1
+            continue
+        keep, discard = min(a, b), max(a, b)
+        parent[discard] = keep
+        merged_low[keep], merged_high[keep] = low, high
+    roots = np.array([root(parent, i) for i in range(count)])
+    sources = [np.flatnonzero(roots == r).tolist() for r in np.unique(roots)]
+    mapping = np.full(count, -1, np.int32)
+    for region_id, source in enumerate(sources):
+        mapping[source] = region_id
+    point_region = np.full(len(xyz), -1, np.int32)
+    assigned = fine_labels >= 0
+    point_region[assigned] = mapping[fine_labels[assigned]]
+    return point_region, sources, [bool(long_chain[s[0]]) for s in sources], stats
+
+
 def make_regions(xyz, power, eligible, point_region, seeds, sources, config,
                  adaptive=False, long_flags=None):
     regions = []
@@ -322,7 +400,9 @@ def make_regions(xyz, power, eligible, point_region, seeds, sources, config,
             size = np.maximum(size, span + 2 * padding)
             # Keep the robust center where possible, but enclose ALL support.
             center = np.clip(center, high + padding - size / 2, low - padding + size / 2)
-            if np.any(size > np.asarray(config.max_box_size) + 1e-8):
+            # XY grouping must not be rejected again solely because Z is large.
+            dims = 2 if config.merge_space == 'xy' else 3
+            if np.any(size[:dims] > np.asarray(config.max_box_size)[:dims] + 1e-8):
                 reasons.append('oversized_support')
             if long_flags[region_id]:
                 reasons.append('long_structure_candidate')
@@ -378,9 +458,13 @@ def extract_regions(xyz, power, config=None):
     merge_stats = dict(n_orphan_components=0, merge_candidate_links=0,
                        merge_links_rejected_contact=0, merge_links_rejected_size=0)
     if config.merge_regions:
-        support_ids = ids[support[ids]]
-        point_region, sources, long_flags, merge_stats = merge_support_regions(
-            xyz, support_ids, cells[support[ids]], support_grid, owner, seeds, config)
+        if config.merge_space == 'xy':
+            point_region, sources, long_flags, merge_stats = merge_xy_boxes(
+                xyz, fine_regions, fine_labels, config)
+        else:
+            support_ids = ids[support[ids]]
+            point_region, sources, long_flags, merge_stats = merge_support_regions(
+                xyz, support_ids, cells[support[ids]], support_grid, owner, seeds, config)
         regions = make_regions(xyz, power, eligible, point_region, seeds, sources, config,
                                adaptive=True, long_flags=long_flags)
     else:
@@ -440,3 +524,4 @@ def npz_payload(result, xyz, power, coords):
     for key in ('center', 'box_min', 'box_max'):
         payload[f'fine_{key}'] = np.asarray([r[key] for r in result['fine_regions']], float).reshape(-1, 3)
     return payload
+

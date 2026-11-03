@@ -36,6 +36,66 @@ def config(**kwargs):
 
 
 class ReflectionRegionTests(unittest.TestCase):
+    def test_xy_merges_same_footprint_despite_large_height_separation(self):
+        xyz, power = cloud([[8, 0, -1], [8, 0, 3]])
+        cfg = config(merge_space='xy')
+        result = extract_regions(xyz, power, cfg)
+        self.assertEqual(result['stats']['n_fine_regions'], 2)
+        self.assertEqual(result['stats']['n_regions'], 1)
+        region = result['regions'][0]
+        self.assertTrue(region['accepted'])
+        self.assertEqual(region['source_seed_ids'], [0, 1])
+        self.assertGreater(region['box_size'][2], cfg.max_box_size[2])
+        self.assertEqual(region['support_outside_box_count'], 0)
+
+    def test_xy_merges_box_footprints_without_support_cell_contact(self):
+        xyz, power = cloud([[6, 0, 0], [11, 0, 0]])
+        xyz_before, power_before = xyz.copy(), power.copy()
+        original = extract_regions(xyz, power, config())
+        merged = extract_regions(xyz, power, config(merge_space='xy'))
+        self.assertEqual(original['stats']['n_regions'], 2)
+        self.assertEqual(merged['stats']['n_regions'], 1)
+        np.testing.assert_array_equal(xyz, xyz_before)
+        np.testing.assert_array_equal(power, power_before)
+        np.testing.assert_array_equal(merged['fine_support_region_ids'], original['fine_support_region_ids'])
+        self.assertEqual(merged['stats']['n_recovered_support'], 0)
+        again = extract_regions(xyz, power, config(merge_space='xy'))
+        np.testing.assert_array_equal(merged['support_region_ids'], again['support_region_ids'])
+
+    def test_xy_uses_edge_gap_and_keeps_distant_boxes_separate(self):
+        xyz, power = cloud([[6, 0, 0], [12.4, 0, 0]])
+        overlap_only = extract_regions(xyz, power, config(merge_space='xy', xy_box_gap=(0, 0)))
+        small_gap = extract_regions(xyz, power, config(merge_space='xy'))
+        self.assertEqual(overlap_only['stats']['n_regions'], 2)
+        self.assertEqual(small_gap['stats']['n_regions'], 1)
+        xyz, power = cloud([[4, 0, 0], [13, 0, 0]])
+        distant = extract_regions(xyz, power, config(merge_space='xy'))
+        self.assertEqual(distant['stats']['n_regions'], 2)
+
+    def test_xy_whole_union_width_and_chain_length_are_bounded(self):
+        xyz, power = cloud([[8, 0, 0], [8, 3.2, 0]])
+        result = extract_regions(xyz, power, config(merge_space='xy'))
+        self.assertEqual(result['stats']['n_regions'], 2)
+        self.assertGreater(result['stats']['merge_links_rejected_size'], 0)
+        xyz, power = cloud([[x, 0, 0] for x in np.arange(3, 18.1, 2.5)])
+        cfg = config(merge_space='xy')
+        result = extract_regions(xyz, power, cfg)
+        self.assertGreater(result['stats']['n_regions'], 1)
+        for r in result['regions']:
+            self.assertTrue((r['box_size'][:2] <= np.asarray(cfg.max_box_size)[:2] + 1e-8).all())
+            self.assertIn('long_structure_candidate', r['status'])
+
+    def test_xy_grouping_does_not_flatten_z_or_change_3d_gt_scoring(self):
+        xyz, power = cloud([[10, 0, 0], [10, 0, 3]])
+        result = extract_regions(xyz, power, config(merge_space='xy'))
+        self.assertEqual(result['stats']['n_regions'], 1)
+        with tempfile.TemporaryDirectory() as directory:
+            gt = gt_diagnostics(result, xyz, self.make_gt_fixture(directory))
+            self.assertEqual(gt['region_labels'], {})
+            self.assertLess(gt['region_diagnostics'][0]['dominant_fraction'], .6)
+            self.assertTrue((gt['point_labels'][-54:] == -1).all())
+        self.assertGreater(np.ptp(xyz[:, 2]), 3)
+
     def make_gt_fixture(self, directory, ids=(42,), boxes=None):
         root = Path(directory)
         folder = root / '3/bbox'
@@ -299,7 +359,8 @@ class ReflectionRegionTests(unittest.TestCase):
         for kwargs in (dict(xy_resolution=0), dict(seed_percentile=70), dict(box_size=(1, -1, 1)),
                        dict(seed_mad=np.nan), dict(max_seed_count=0), dict(merge_gap=(0, 1, 1)),
                        dict(max_box_size=(5, 3, 3)), dict(box_padding=(-1, 0, 0)),
-                       dict(merge_min_contact_cells=0)):
+                       dict(merge_min_contact_cells=0), dict(merge_space='bad'),
+                       dict(xy_box_gap=(-1, 0)), dict(xy_box_gap=(0,))):
             with self.assertRaises(ValueError):
                 RegionConfig(**kwargs).validate()
 
@@ -411,6 +472,19 @@ class ReflectionRegionTests(unittest.TestCase):
                     np.testing.assert_array_equal(before[key], after[key])
                 self.assertEqual(after['gt_corners_radar'].shape, (1, 8, 3))
                 self.assertTrue(all(after[key].dtype != object for key in after.files))
+            xy_output = directory / 'xy_output'
+            xy_command = [sys.executable, str(ROOT / 'tools/temporal_vis/vis_p1_reflection_regions.py'),
+                '--ann-file', str(annotation), '--bins', str(bins), '--no-rgb',
+                '--start-order', '80', '--end-order', '80', '--merge-space', 'xy',
+                '--xy-box-gap-m', '.5', '.5', '--show-gt', '--bbox-root', str(bbox_root),
+                '--output-dir', str(xy_output)]
+            run = subprocess.run(xy_command, cwd=ROOT, capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            xy_manifest = json.loads((xy_output / 'manifest.json').read_text())
+            self.assertEqual(xy_manifest['config']['algorithm']['merge_space'], 'xy')
+            with np.load(xy_output / 'scene3_order00080.npz', allow_pickle=False) as arrays:
+                self.assertEqual(arrays['xyz'].shape, (43750, 3))
+                self.assertIn('gt_corners_radar', arrays)
 
 
 if __name__ == '__main__':
