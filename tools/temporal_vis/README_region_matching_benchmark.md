@@ -54,6 +54,14 @@ size costs. It does not silently turn GT scoring into a 2D evaluation.
 Rejected fine boxes cannot bridge accepted ones or contribute merged support.
 GT label purity does not determine the pre-merge filter; it remains scoring-only.
 
+To reproduce the uncapped XY visualization experiment, also pass
+`--no-xy-size-limit` and use a separate output directory. This disables the
+whole-union/final XY size caps and their size-dependent long-chain flag.
+Pre-merge quality filtering and independent post-merge point/cell/aspect-ratio
+checks remain active. The flag requires `--merge-space xy`; GT scoring and the
+temporal matching gates below are unchanged. The report records the flag in
+`config.no_xy_size_limit`.
+
 1. Extract accepted radar regions independently in every frame. Number of regions is **not fixed**.
 2. Transform historical radar boxes into the **current radar coordinate system** using ego poses and radar-to-LiDAR extrinsic. Historical box **AABB** dimensions are conservatively rotated into current axes.
 3. For each current region independently in each historical frame, apply strict absolute Y-center gates **0.5, 1.0, 1.5 m** for t−1/t−2/t−3.

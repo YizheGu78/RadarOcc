@@ -36,6 +36,42 @@ def config(**kwargs):
 
 
 class ReflectionRegionTests(unittest.TestCase):
+    def test_uncapped_xy_accepts_regions_larger_than_12_by_4(self):
+        cases = [([[x, y, 0] for x in (4, 7, 10, 13, 16) for y in (-1, 1)], 0, 12),
+                 ([[8, -3, 0], [8, 0, 0], [8, 3, 0]], 1, 4)]
+        for centers, axis, cap in cases:
+            with self.subTest(axis=axis):
+                xyz, power = cloud(centers)
+                limited = extract_regions(xyz, power, config(merge_space='xy'))
+                unlimited = extract_regions(xyz, power, config(merge_space='xy', xy_size_limit=False))
+                self.assertGreater(limited['stats']['n_regions'], 1)
+                self.assertEqual(unlimited['stats']['n_regions'], 1)
+                region = unlimited['regions'][0]
+                self.assertTrue(region['accepted'])
+                self.assertGreater(region['box_size'][axis], cap)
+                self.assertEqual(unlimited['stats']['merge_links_rejected_size'], 0)
+                self.assertEqual(region['support_outside_box_count'], 0)
+                np.testing.assert_array_equal(unlimited['fine_support_region_ids'], limited['fine_support_region_ids'])
+                json.dumps(unlimited['config'], allow_nan=False)
+
+    def test_uncapped_xy_disables_size_dependent_chain_flag_but_retains_shape_filter(self):
+        xyz, power = cloud([[x, 0, 0] for x in (3, 5.5, 8, 10.5, 13, 15.5, 18)])
+        result = extract_regions(xyz, power, config(merge_space='xy', xy_size_limit=False))
+        self.assertEqual(result['stats']['n_regions'], 1)
+        status = result['regions'][0]['status']
+        self.assertNotIn('oversized_support', status)
+        self.assertNotIn('long_structure_candidate', status)
+        self.assertIn('elongated_support', status)
+
+    def test_uncapped_xy_still_excludes_rejected_bridge_boxes(self):
+        xyz, power = cloud([[4, 0, 0], [16, 0, 0]])
+        xyz, power = np.r_[xyz, [[10, 0, 0]]], np.r_[power, [20.]]
+        result = extract_regions(xyz, power, config(merge_space='xy', xy_size_limit=False, min_points=20))
+        self.assertEqual(result['stats']['n_filtered_before_merge'], 1)
+        self.assertEqual(result['stats']['n_regions'], 2)
+        self.assertEqual(result['stats']['merge_candidate_links'], 0)
+        self.assertEqual([r['source_seed_ids'] for r in result['regions']], [[1], [2]])
+
     def test_xy_filters_small_boxes_before_merging_and_cannot_rescue_them(self):
         xyz, power = cloud([[7, 0, 0], [9.5, 0, 0]])
         result = extract_regions(xyz, power, config(merge_space='xy', min_points=80))
@@ -405,7 +441,9 @@ class ReflectionRegionTests(unittest.TestCase):
                        dict(seed_mad=np.nan), dict(max_seed_count=0), dict(merge_gap=(0, 1, 1)),
                        dict(max_box_size=(5, 3, 3)), dict(box_padding=(-1, 0, 0)),
                        dict(merge_min_contact_cells=0), dict(merge_space='bad'),
-                       dict(xy_box_gap=(-1, 0)), dict(xy_box_gap=(0,))):
+                       dict(xy_box_gap=(-1, 0)), dict(xy_box_gap=(0,)),
+                       dict(xy_size_limit=False),
+                       dict(merge_space='xy', merge_regions=False, xy_size_limit=False)):
             with self.assertRaises(ValueError):
                 RegionConfig(**kwargs).validate()
 
@@ -521,12 +559,14 @@ class ReflectionRegionTests(unittest.TestCase):
             xy_command = [sys.executable, str(ROOT / 'tools/temporal_vis/vis_p1_reflection_regions.py'),
                 '--ann-file', str(annotation), '--bins', str(bins), '--no-rgb',
                 '--start-order', '80', '--end-order', '80', '--merge-space', 'xy',
+                '--no-xy-size-limit',
                 '--xy-box-gap-m', '.5', '.5', '--show-gt', '--bbox-root', str(bbox_root),
                 '--output-dir', str(xy_output)]
             run = subprocess.run(xy_command, cwd=ROOT, capture_output=True, text=True)
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
             xy_manifest = json.loads((xy_output / 'manifest.json').read_text())
             self.assertEqual(xy_manifest['config']['algorithm']['merge_space'], 'xy')
+            self.assertFalse(xy_manifest['config']['algorithm']['xy_size_limit'])
             self.assertEqual(xy_manifest['config']['xy_merge_order'], 'filter_then_merge')
             xy_frame = json.loads((xy_output / 'scene3_order00080.json').read_text())
             good_ids = {r['id'] for r in xy_frame['fine_regions'] if r['accepted']}

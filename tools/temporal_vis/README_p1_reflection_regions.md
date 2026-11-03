@@ -128,6 +128,25 @@ reductions among PASSED boxes only. Filtered boxes are not counted as mergers.
 Plot titles/console output report the passed merge input count; the manifest
 records `xy_merge_order=filter_then_merge`.
 
+#### Experiment without the XY size cap
+
+Add `--no-xy-size-limit` to the XY command above and use a separate output
+directory, for example `outputs/p1_reflection_regions/scene3_p97_gt_xy_filtered_uncapped`.
+This flag requires active `--merge-space xy` merging. It disables the whole-union
+X/Y size gate, the final `oversized_support` size rejection, and the long-chain
+flag that depends on `--max-box-size-m`. Thus merged boxes can exceed 12 m in X
+or 4 m in Y. The default bounded experiment is unchanged.
+
+Filtering still occurs BEFORE merging. Original box links still require the
+specified XY edge gaps; removing the size cap does not connect distant boxes
+directly, but a chain of eligible nearby boxes can form a large group. Minimum
+point/cell counts and the independent support XY aspect-ratio filter still apply,
+including after merging: a long thin group may still be rejected as
+`elongated_support`. Rejected groups remain in JSON/NPZ diagnostics but are not
+drawn in the accepted-box panels. The analysis ROI, original Z values, and 3D GT
+scoring are unchanged. The manifest records `xy_size_limit=false`, and the plot
+title says `no size cap`.
+
 ### Original XYZ support-cell merging
 
 The following describes `--merge-space xyz` (the previous default behavior):

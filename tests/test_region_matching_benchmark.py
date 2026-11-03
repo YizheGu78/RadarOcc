@@ -43,7 +43,8 @@ class RegionMatchingTests(unittest.TestCase):
         self.assertEqual(stats['precision'], 1.)
         self.assertEqual(stats['recall'], 1.)
 
-    def run_cli_fixture(self, directory, constant_power=False, gt_overlap=False, merge_space='xyz'):
+    def run_cli_fixture(self, directory, constant_power=False, gt_overlap=False, merge_space='xyz',
+                        no_xy_size_limit=False):
         root = Path(__file__).resolve().parents[1]
         count = 175 * 250
         power = np.zeros((8, count))
@@ -82,6 +83,8 @@ class RegionMatchingTests(unittest.TestCase):
                    '--start-order', '90', '--end-order', '90', '--seed-percentile', '95',
                    '--merge-space', merge_space,
                    '--output-dir', str(output)]
+        if no_xy_size_limit:
+            command.append('--no-xy-size-limit')
         run = subprocess.run(command, cwd=root, capture_output=True, text=True)
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         return output, run.stdout
@@ -139,6 +142,14 @@ class RegionMatchingTests(unittest.TestCase):
             output, _ = self.run_cli_fixture(Path(directory), gt_overlap=True, merge_space='xy')
             report = json.loads((output / 'report.json').read_text())
             self.assertEqual(report['config']['merge_space'], 'xy')
+            self.assertTrue(all(r['precision'] == 1. and r['recall'] == 1. for r in report['metrics']))
+
+    def test_cli_uncapped_xy_records_experiment_and_keeps_gt_scoring(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output, _ = self.run_cli_fixture(Path(directory), gt_overlap=True, merge_space='xy',
+                                             no_xy_size_limit=True)
+            report = json.loads((output / 'report.json').read_text())
+            self.assertTrue(report['config']['no_xy_size_limit'])
             self.assertTrue(all(r['precision'] == 1. and r['recall'] == 1. for r in report['metrics']))
 
     def setUp(self):

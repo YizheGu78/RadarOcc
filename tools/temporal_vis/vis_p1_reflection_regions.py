@@ -271,7 +271,10 @@ def render(result, xyz, power, destination, title, rgb_path=None, projection=Non
     before.set_title(f'Before: {stats["n_fine_regions"]} seed regions | original fixed boxes\n'
                      f'Showing {fine_drawn}/{fine_visible}; S IDs identify reflection seeds')
     input_label = 'filtered seeds' if config['merge_regions'] and config['merge_space'] == 'xy' else 'seeds'
-    boxes.set_title(f'After ({config["merge_space"].upper()}): {stats["n_merge_input_regions"]} {input_label} -> {stats["n_regions"]} groups | '
+    mode_label = config['merge_space'].upper()
+    if config['merge_space'] == 'xy' and not config['xy_size_limit']:
+        mode_label += ', no size cap'
+    boxes.set_title(f'After ({mode_label}): {stats["n_merge_input_regions"]} {input_label} -> {stats["n_regions"]} groups | '
                     f'{stats["n_accepted"]} accepted\n'
                     f'Showing {drawn}/{visible} accepted groups; n = source seeds')
     detail.set_title(f'Forward-area detail | showing {zoom_drawn}/{zoom_visible} groups\n'
@@ -426,6 +429,7 @@ def main():
     parser.add_argument('--no-merge', action='store_true', help='Reproduce the original per-seed fixed-box extraction')
     parser.add_argument('--merge-space', choices=('xyz', 'xy'), default='xyz', help='XYZ support-cell links or XY box-footprint links ignoring height')
     parser.add_argument('--xy-box-gap-m', type=float, nargs=2, default=[.5, .5], help='Maximum X/Y edge gap between original box footprints in xy mode')
+    parser.add_argument('--no-xy-size-limit', action='store_true', help='XY experiment: disable union/final size caps and size-dependent long-chain flag; retain point/shape filters')
     parser.add_argument('--merge-gap-m', type=float, nargs=3, default=[1.5, 1., 1.], help='Maximum XYZ separation of support cell centers for linking')
     parser.add_argument('--merge-min-contact-cells', type=int, default=2, help='Minimum distinct closest-boundary cells on EACH side of a link')
     parser.add_argument('--max-box-size-m', type=float, nargs=3, default=[12., 4., 4.], help='Maximum XYZ box size for accepted merged groups')
@@ -476,6 +480,7 @@ def main():
             grow_half_size=tuple(args.grow_half_size_m), box_size=tuple(args.box_size_m),
             merge_regions=not args.no_merge, merge_gap=tuple(args.merge_gap_m),
             merge_space=args.merge_space, xy_box_gap=tuple(args.xy_box_gap_m),
+            xy_size_limit=not args.no_xy_size_limit,
             merge_min_contact_cells=args.merge_min_contact_cells,
             max_box_size=tuple(args.max_box_size_m), box_padding=tuple(args.box_padding_m),
             min_points=args.min_points, min_cells=args.min_cells, max_aspect=args.max_aspect).validate()

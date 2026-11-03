@@ -161,6 +161,7 @@ class FrameData:
         self.config = RegionConfig(seed_percentile=args.seed_percentile, seed_mad=args.seed_mad,
                                    box_size=tuple(args.box_size_m),
                                    merge_space=args.merge_space, xy_box_gap=tuple(args.xy_box_gap_m),
+                                   xy_size_limit=not args.no_xy_size_limit,
                                    max_box_size=tuple(args.max_box_size_m)).validate()
         infos = va.read_infos(args.ann_file)
         self.scenes = {}
@@ -370,6 +371,7 @@ def main():
     p.add_argument('--seed-mad', type=float, default=3.)
     p.add_argument('--merge-space', choices=('xyz', 'xy'), default='xyz', help='Proposal grouping mode; GT scoring remains 3D')
     p.add_argument('--xy-box-gap-m', type=float, nargs=2, default=(.5, .5))
+    p.add_argument('--no-xy-size-limit', action='store_true', help='XY proposal experiment without size caps; independent shape and GT scoring rules remain')
     p.add_argument('--box-size-m', type=float, nargs=3, default=(6., 3., 3.))
     p.add_argument('--max-box-size-m', type=float, nargs=3, default=(12., 4., 4.))
     p.add_argument('--y-gates', type=float, nargs=3, default=(.5, 1., 1.5),
@@ -381,6 +383,8 @@ def main():
     p.add_argument('--min-gt-points', type=int, default=3)
     p.add_argument('--output-dir', type=Path, default=Path('outputs/region_matching_benchmark'))
     args = p.parse_args()
+    if args.no_xy_size_limit and args.merge_space != 'xy':
+        p.error('--no-xy-size-limit requires --merge-space xy')
     if args.stride <= 0 or args.max_frames_per_scene < 0 or args.end_order < args.start_order:
         p.error('Invalid stride, max frames, or order range')
     evaluate(args)

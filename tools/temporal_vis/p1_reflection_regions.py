@@ -31,6 +31,7 @@ class RegionConfig:
     merge_regions: bool = True
     merge_space: str = 'xyz'
     xy_box_gap: tuple = (0.5, 0.5)
+    xy_size_limit: bool = True
     merge_gap: tuple = (1.5, 1.0, 1.0)
     merge_min_contact_cells: int = 2
     max_box_size: tuple = (12.0, 4.0, 4.0)
@@ -42,6 +43,8 @@ class RegionConfig:
     def validate(self):
         if self.merge_space not in ('xyz', 'xy'):
             raise ValueError('merge_space must be xyz or xy')
+        if not self.xy_size_limit and (self.merge_space != 'xy' or not self.merge_regions):
+            raise ValueError('Disabling the XY size limit requires active xy merging')
         if len(self.xy_box_gap) != 2 or not np.isfinite(self.xy_box_gap).all() or min(self.xy_box_gap) < 0:
             raise ValueError('xy_box_gap must contain two finite nonnegative XY values')
         positive = (self.xy_resolution, self.z_resolution, self.range_band_m,
@@ -353,7 +356,8 @@ def merge_xy_boxes(xyz, fine_regions, fine_labels, config):
     chain_span = chain_high[connected_roots] - chain_low[connected_roots]
     extent = np.maximum(chain_span, config.xy_resolution)
     long_chain = ((extent.max(axis=1) / extent.min(axis=1) > config.max_aspect)
-                  & (chain_span > np.asarray(config.max_box_size)[:2]).any(axis=1))
+                  & (chain_span > np.asarray(config.max_box_size)[:2]).any(axis=1)
+                  & config.xy_size_limit)
 
     parent = np.arange(count)
     merged_low, merged_high = lows.copy(), highs.copy()
@@ -363,7 +367,7 @@ def merge_xy_boxes(xyz, fine_regions, fine_labels, config):
         if a == b:
             continue
         low, high = np.minimum(merged_low[a], merged_low[b]), np.maximum(merged_high[a], merged_high[b])
-        if np.any(high - low > max_span + 1e-8):
+        if config.xy_size_limit and np.any(high - low > max_span + 1e-8):
             stats['merge_links_rejected_size'] += 1
             continue
         keep, discard = min(a, b), max(a, b)
@@ -407,7 +411,8 @@ def make_regions(xyz, power, eligible, point_region, seeds, sources, config,
             center = np.clip(center, high + padding - size / 2, low - padding + size / 2)
             # XY grouping must not be rejected again solely because Z is large.
             dims = 2 if config.merge_space == 'xy' else 3
-            if np.any(size[:dims] > np.asarray(config.max_box_size)[:dims] + 1e-8):
+            enforce_size = config.merge_space != 'xy' or config.xy_size_limit
+            if enforce_size and np.any(size[:dims] > np.asarray(config.max_box_size)[:dims] + 1e-8):
                 reasons.append('oversized_support')
             if long_flags[region_id]:
                 reasons.append('long_structure_candidate')
