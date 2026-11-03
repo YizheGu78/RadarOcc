@@ -77,6 +77,18 @@ The detail panel adds GT height intervals and per-region evidence, for example
 inside the enlarged fusion box. Purity defaults to 0.6 and min GT points to 3,
 matching the benchmark. `--gt-purity` and `--min-gt-points` affect diagnostics only.
 
+For height-free GT diagnostics add
+`--gt-space xy --gt-purity 0 --min-gt-points 1` and use a new output directory.
+Cyan rings then indicate points inside the calibrated GT XY footprint regardless
+of token Z; the legend changes from `3D` to `XY`. At least one SUPPORT point must
+lie inside an unambiguous unique-ID footprint; the largest support count chooses
+the dominant GT identity. Tied dominant counts remain unscorable. Purity zero
+disables the 60% minimum without hiding the measured dominant fraction in labels
+or JSON. This is a permissive projected association experiment, not 3D point
+purity. Original XYZ, proposal extraction, GT yaw, and fixed image axes are
+unchanged. JSON/manifest and NPZ `gt_space` identify the selected membership mode.
+The default remains `--gt-space xyz --gt-purity 0.6 --min-gt-points 3`.
+
 All outputs are static PNG/GIF with a fixed 2D radar XY view: X forward on the
 horizontal axis, Y left on the vertical axis. Image/view rotation and RGB EXIF
 auto-orientation are disabled; no interactive 3D rotation is provided. GT boxes
@@ -115,7 +127,7 @@ CLI/config default for reproducibility.
    original returns inside the final box are included in its membership as before.
 
 No GT is used to choose mergers. Same-XY returns at different heights can group
-together, without establishing object identity. GT membership/purity remain 3D;
+together, without establishing object identity. GT membership/purity remain 3D by default;
 a more complete-looking XY group does not automatically have a higher same-object
 GT fraction. Input XYZ, power, NPZ point IDs, and fine-region provenance are kept.
 The merged region still receives the existing whole-region quality checks after

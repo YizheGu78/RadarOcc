@@ -41,6 +41,45 @@ For scene 3 use the **split containing scene 3**, not the val annotation that co
 
 If GT bbox files live elsewhere, pass `--bbox-root /path/to/K-RadarOcc/{split}`. Default is `data/K-RadarOcc/train`, consistent with the existing Top-8 GT evaluation tools.
 
+## XY association experiment without height gates
+
+Three flags control independent stages. `--merge-space xy` groups proposal boxes
+in XY. `--gt-space xy` evaluates original SUPPORT points against the GT cuboid's
+XY footprint in radar coordinates (the convex hull of all eight calibrated,
+yaw-preserving corners), ignoring token height. `--match-space xy` uses only XY
+center distance and X/Y dimensions for temporal gates and costs. Y gates remain
+active; ego alignment still uses the complete calibrated 3D pose transform.
+Defaults for both GT membership and temporal matching remain `xyz`.
+
+For the permissive Scene 3 association experiment:
+
+```bash
+python tools/temporal_vis/benchmark_region_matching.py \
+  --ann-file data/annotations/kradar_dict_test_official_temporal_doppler8.pkl \
+  --scenes 3 --start-order 80 --end-order 200 --stride 5 \
+  --seed-percentile 97 --seed-mad 3 \
+  --merge-space xy --xy-box-gap-m 0.5 0.5 \
+  --box-size-m 6 3 3 --max-box-size-m 20 6 6 \
+  --gt-space xy --match-space xy --gt-purity 0 --min-gt-points 1 \
+  --bbox-root data/K-RadarOcc/train \
+  --y-gates 0.5 1.0 1.5 --center-gates 4 6 8 \
+  --output-dir outputs/region_matching_benchmark/scene3_p97_xy20_loose_gt
+```
+
+Purity zero removes the 60% requirement. A region still needs at least one
+unambiguous original SUPPORT point inside a unique-ID GT footprint; merely
+touching a GT with an enlarged fusion box is insufficient. Among multiple GT
+identities with support, choose the largest support-point count. In XY mode,
+equal dominant counts (`ambiguous_dominant`), duplicate GT IDs, and individual
+points inside overlapping GT footprints do not establish identity. Diagnostics
+retain dominant count/fraction, so a 1/100 association is visible as such.
+
+This is **projected region association**, not a claim of 3D point purity or
+occupancy accuracy. Changing only `--gt-space`/GT thresholds cannot change actual
+geometric matches. To isolate height effects in GT scoring, use `--gt-space xy`
+alone with the old thresholds and keep `--match-space xyz`. Reports record all
+spaces and thresholds; do not mix the old and new evaluation denominators.
+
 ## Matching algorithm
 
 To evaluate proposals from the XY visualization, pass the SAME
@@ -48,8 +87,8 @@ To evaluate proposals from the XY visualization, pass the SAME
 remains `xyz` for reproducibility. XY mode FIRST filters fine boxes by their
 existing radar support point/cell/shape quality, then merges only accepted footprints
 without a Z gate or 3D contact requirement, bounding only the union's X/Y size.
-Raw point heights and 3D GT scoring are preserved. This option changes proposal
-grouping only: the temporal matcher below still uses its existing 3D center and
+Raw point heights and default 3D GT scoring are preserved. This option changes proposal
+grouping only: by default the temporal matcher below still uses its existing 3D center and
 size costs. It does not silently turn GT scoring into a 2D evaluation.
 Rejected fine boxes cannot bridge accepted ones or contribute merged support.
 GT label purity does not determine the pre-merge filter; it remains scoring-only.
@@ -65,7 +104,7 @@ temporal matching gates below are unchanged. The report records the flag in
 1. Extract accepted radar regions independently in every frame. Number of regions is **not fixed**.
 2. Transform historical radar boxes into the **current radar coordinate system** using ego poses and radar-to-LiDAR extrinsic. Historical box **AABB** dimensions are conservatively rotated into current axes.
 3. For each current region independently in each historical frame, apply strict absolute Y-center gates **0.5, 1.0, 1.5 m** for t−1/t−2/t−3.
-4. Apply 3D Euclidean center-distance gates **4, 6, 8 m**.
+4. Apply Euclidean center-distance gates **4, 6, 8 m** in `--match-space` (default XYZ).
 5. For remaining candidates rank by:
    ```text
    cost = w_center * (center_distance / center_gate)
@@ -76,7 +115,7 @@ temporal matching gates below are unchanged. The report records the flag in
 
 ## Offline GT scoring
 
-For each accepted reflection region, assign a GT target token **only if** at least 3 original support points belong to the same unambiguous GT box **and** those points make up at least 60% of all support points. Unlabeled, overlapping, and duplicate-ID support counts stay in the purity denominator.
+By default, for each accepted reflection region, assign a GT target token **only if** at least 3 original support points belong to the same unambiguous GT cuboid **and** those points make up at least 60% of all support points. `--gt-space`, `--gt-purity`, and `--min-gt-points` explicitly select the alternative experiment above. Unlabeled, overlapping, and duplicate-ID support counts stay in the purity denominator.
 
 All accepted current regions are now matched and written to `matches.csv`, even
 when no current region receives a GT ID. GT scoring is applied separately:
@@ -89,7 +128,7 @@ a correct same-object match. Proposal and matching parameters are unchanged.
 - **Precision**: correct same-ID predicted links / predicted links where the history region has a scorable GT ID. Predictions to unlabeled/ambiguous historical regions are counted separately as `unscorable_prediction`.
 - **Recall**: correct same-ID predicted links / current GT-labeled regions with at least one same-ID GT-labeled history region. This denominator **includes** queries rejected by geometry gates or left unmatched.
 - **GT Y rejection rate**: fraction of recall-eligible current regions where **all** same-ID history regions fail the hard Y gate.
-- **GT center rejection rate**: fraction where Y gate permits a same-ID history region but the 3D center gate eliminates them all.
+- **GT center rejection rate**: fraction where Y gate permits a same-ID history region but the selected XY/XYZ center gate eliminates them all.
 - `prediction_rate` and `false_match_rate` are also reported.
 - `all_queries`, `all_predictions`, and `all_prediction_rate` include ALL accepted
   current-region/history queries, while `current_unlabeled` counts the queries
@@ -110,7 +149,7 @@ outputs/region_matching_benchmark/val20/
 
 ## Empty or unscorable results
 
-Schema version 2 always writes the full matches header, even if there are no
+Schema version 2 and later always write the full matches header, even if there are no
 queries. If accepted regions exist but GT labeling fails, `matches.csv` still
 contains geometric matches. Only zero accepted current regions, no selected
 frames, or unavailable history positions can leave it with a header only.
@@ -132,6 +171,7 @@ evaluation. Counts are per frame, not repeated for six weight settings.
 | `duplicate_id_only` | All overlapping support points belong to duplicate-ID boxes |
 | `insufficient_gt_points` | Dominant unique-ID box has fewer than min_gt_points points |
 | `low_purity` | Enough dominant points, but their fraction is below gt_purity |
+| `ambiguous_dominant` | In XY scoring, multiple unique IDs have equal maximum support counts |
 
 The table includes overlap counts, dominant ID/count/fraction and duplicate-ID
 point counts. A zero-GT result remains inconclusive; diagnostic output does not

@@ -6,6 +6,7 @@ AFTER matching to score output; they never influence proposals or matching.
 """
 import argparse
 import csv
+import itertools
 import json
 import sys
 import time
@@ -33,8 +34,42 @@ def safe_ratio(numerator, denominator):
     return numerator / denominator if denominator else None
 
 
+def gt_memberships(xyz, boxes_lidar, radar_to_lidar, space='xyz'):
+    """Assign radar returns to GT cuboids (XYZ) or their radar XY footprints.
+
+    XY uses the convex hull of all eight transformed cuboid corners, preserving
+    calibration and GT yaw. Token Z is never used in the XY inclusion test.
+    -1 means no GT overlap; -2 means overlapping GT footprints/cuboids.
+    """
+    if space not in ('xy', 'xyz'):
+        raise ValueError('GT space must be xy or xyz')
+    xyz = np.asarray(xyz, dtype=float).reshape(-1, 3)
+    boxes = np.asarray(boxes_lidar, dtype=float).reshape(-1, 7)
+    if not np.isfinite(boxes).all() or np.any(boxes[:, 3:6] <= 0):
+        raise ValueError('Invalid GT box geometry')
+    if space == 'xyz':
+        return memberships(transform(xyz, radar_to_lidar), boxes)
+    from scipy.spatial import ConvexHull
+    inverse = np.linalg.inv(radar_to_lidar)
+    bits = np.array(list(itertools.product((0, 1), repeat=3)))
+    labels = np.full(len(xyz), -1, np.int32)
+    hits = np.zeros(len(xyz), np.int32)
+    for index, (x, y, z, dx, dy, dz, yaw) in enumerate(boxes):
+        local = bits * [dx, dy, dz] - [dx / 2, dy / 2, 0]
+        c, s = np.cos(yaw), np.sin(yaw)
+        rotation = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+        corners = transform(local @ rotation.T + [x, y, z], inverse)
+        hull = ConvexHull(corners[:, :2])
+        inside = np.all(xyz[:, :2] @ hull.equations[:, :2].T
+                        + hull.equations[:, 2] <= 1e-8, axis=1)
+        labels[inside] = index
+        hits[inside] += 1
+    labels[hits > 1] = -2
+    return labels
+
+
 def label_regions(regions, point_labels, object_ids, purity=0.6, min_gt_points=3,
-                  return_diagnostics=False):
+                  return_diagnostics=False, reject_ties=False):
     """Assign an unambiguous GT ID to a proposal using its SUPPORT points.
 
     Denominator includes unlabeled/ambiguous support points, avoiding inflated
@@ -54,11 +89,12 @@ def label_regions(regions, point_labels, object_ids, purity=0.6, min_gt_points=3
         overlap = len(labels)
         duplicate_points = int((~is_unique_id[labels]).sum())
         labels = labels[is_unique_id[labels]]
-        winner, n = None, 0
+        winner, n, tied = None, 0, False
         if len(labels):
             values, frequencies = np.unique(labels, return_counts=True)
             winner = int(values[np.argmax(frequencies)])
             n = int(frequencies.max())
+            tied = int((frequencies == n).sum()) > 1
         fraction = n / len(indices) if len(indices) else 0.0
         if not len(indices):
             reason = 'no_support'
@@ -66,6 +102,8 @@ def label_regions(regions, point_labels, object_ids, purity=0.6, min_gt_points=3
             reason = 'no_gt_overlap'
         elif not len(labels):
             reason = 'duplicate_id_only'
+        elif reject_ties and tied:
+            reason = 'ambiguous_dominant'
         elif n < min_gt_points:
             reason = 'insufficient_gt_points'
         elif fraction < purity:
@@ -76,7 +114,7 @@ def label_regions(regions, point_labels, object_ids, purity=0.6, min_gt_points=3
         diagnostics.append(dict(region=int(region['id']), support_points=len(indices),
             gt_overlap_points=overlap, duplicate_id_points=duplicate_points,
             dominant_id=str(object_ids[winner]) if winner is not None else None,
-            dominant_points=n, dominant_fraction=fraction, reason=reason))
+            dominant_points=n, dominant_fraction=fraction, dominant_tied=tied, reason=reason))
     return (result, diagnostics) if return_diagnostics else result
 
 
@@ -91,10 +129,12 @@ def aligned_box(center, dimensions, matrix):
 
 
 def select_match(current, histories, slot, w_center, w_size, y_gates, center_gates,
-                 size_scale=0.5):
-    """Geometry-only nearest cost after hard Y/3D gates; no GT or tracking ID."""
+                 size_scale=0.5, match_space='xyz'):
+    """Geometry-only cost after Y and XY/XYZ gates; no GT or tracking ID."""
     if slot not in (1, 2, 3):
         raise ValueError('History slot must be 1, 2 or 3')
+    if match_space not in ('xy', 'xyz'):
+        raise ValueError('Match space must be xy or xyz')
     if not histories:
         return None
     centers = np.asarray([h['aligned_center'] for h in histories], dtype=np.float64)
@@ -102,12 +142,13 @@ def select_match(current, histories, slot, w_center, w_size, y_gates, center_gat
     current_center = np.asarray(current['center'], dtype=np.float64)
     current_size = np.asarray(current['box_size'], dtype=np.float64)
     y_diff = np.abs(centers[:, 1] - current_center[1])
-    distances = np.linalg.norm(centers - current_center, axis=1)
+    dims = 2 if match_space == 'xy' else 3
+    distances = np.linalg.norm(centers[:, :dims] - current_center[:dims], axis=1)
     allowed = (y_diff <= y_gates[slot-1] + 1e-10) & (distances <= center_gates[slot-1] + 1e-10)
     if not allowed.any():
         return None
-    size_error = np.mean(np.abs(np.log(np.maximum(sizes, 1e-6) /
-                                         np.maximum(current_size[None], 1e-6))), axis=1)
+    size_error = np.mean(np.abs(np.log(np.maximum(sizes[:, :dims], 1e-6) /
+                                         np.maximum(current_size[None, :dims], 1e-6))), axis=1)
     cost = w_center * (distances / center_gates[slot-1]) + w_size * (size_error / size_scale)
     eligible = np.flatnonzero(allowed)
     # Tie breaks: center distance, then historical region ID.
@@ -200,20 +241,22 @@ class FrameData:
         gt_ids = np.load(bbox_dir / f'bbox_token{bbox_index}.npy', allow_pickle=False).reshape(-1).astype(str)
         if len(gt_boxes) != len(gt_ids):
             raise ValueError(f'GT bbox/token count mismatch: {scene}/{order}')
-        point_labels = memberships(transform(xyz, self.extrinsic), gt_boxes)
+        point_labels = gt_memberships(xyz, gt_boxes, self.extrinsic, self.args.gt_space)
         labels, region_diagnostics = label_regions(proposals, point_labels, gt_ids,
-            self.args.gt_purity, self.args.min_gt_points, return_diagnostics=True)
+            self.args.gt_purity, self.args.min_gt_points, return_diagnostics=True,
+            reject_ties=self.args.gt_space == 'xy')
         accepted = [r for r in proposals if r['accepted']]
         reasons = Counter(row['reason'] for row in region_diagnostics)
         _, id_counts = np.unique(gt_ids, return_counts=True)
         record = dict(scene=scene, order=order, occ_frame_idx=bbox_index,
             radar_path=str(path), bbox_path=str(bbox_dir / f'bbox{bbox_index}.npy'),
+            gt_space=self.args.gt_space,
             gt_boxes=len(gt_boxes), duplicate_id_boxes=int(id_counts[id_counts > 1].sum()),
             p1_points=len(xyz), p1_unambiguous_gt_points=int((point_labels >= 0).sum()),
             proposals=len(proposals), accepted=len(accepted), labeled=len(labels),
             proposal_status_counts=json.dumps(dict(Counter(r['status'] for r in proposals)), sort_keys=True))
         for reason in ('no_support', 'no_gt_overlap', 'duplicate_id_only',
-                       'insufficient_gt_points', 'low_purity'):
+                       'insufficient_gt_points', 'low_purity', 'ambiguous_dominant'):
             record[reason] = reasons[reason]
         self.diagnostics[(scene, order)] = record
         self.region_diagnostics[(scene, order)] = [dict(scene=scene, order=order, **row)
@@ -238,7 +281,7 @@ def history_regions(current, previous, extrinsic):
 
 
 def evaluate(args):
-    if not (0 < args.gt_purity <= 1 and args.min_gt_points >= 1 and args.size_scale > 0):
+    if not (0 <= args.gt_purity <= 1 and args.min_gt_points >= 1 and args.size_scale > 0):
         raise ValueError('Invalid GT purity, min_gt_points or size scale')
     if any(x <= 0 for x in (*args.y_gates, *args.center_gates)):
         raise ValueError('All matching gates must be positive')
@@ -252,6 +295,7 @@ def evaluate(args):
     detailed = []
     start = time.perf_counter()
     frame_count = 0
+    dims = 2 if args.match_space == 'xy' else 3
     for scene in scenes:
         frames = data.scenes[scene]
         chosen = [i for i, info in enumerate(frames)
@@ -275,15 +319,15 @@ def evaluate(args):
                     truth = [h for h in transformed if scorable and hist_labels.get(h['id']) == actual]
                     y_ok = [h for h in truth if abs(h['aligned_center'][1] - r['center'][1]) <=
                             args.y_gates[slot-1] + 1e-10]
-                    center_ok = [h for h in y_ok if np.linalg.norm(h['aligned_center'] - r['center']) <=
+                    center_ok = [h for h in y_ok if np.linalg.norm(h['aligned_center'][:dims] - r['center'][:dims]) <=
                                  args.center_gates[slot-1] + 1e-10]
                     candidates_y = [h for h in transformed if abs(h['aligned_center'][1] - r['center'][1]) <=
                                     args.y_gates[slot-1] + 1e-10]
-                    candidates_center = [h for h in candidates_y if np.linalg.norm(h['aligned_center'] - r['center']) <=
+                    candidates_center = [h for h in candidates_y if np.linalg.norm(h['aligned_center'][:dims] - r['center'][:dims]) <=
                                          args.center_gates[slot-1] + 1e-10]
                     for wd, ws in WEIGHTS:
                         matched = select_match(r, transformed, slot, wd, ws,
-                                               args.y_gates, args.center_gates, args.size_scale)
+                                               args.y_gates, args.center_gates, args.size_scale, args.match_space)
                         prediction = hist_labels.get(matched['id']) if matched else None
                         row = dict(scene=scene, order=order, history_order=history_order, slot=slot,
                                    current_region=int(r['id']), current_id=actual, current_scorable=scorable,
@@ -330,11 +374,14 @@ def evaluate(args):
             writer.writerows(rows)
     config = {key: (str(value) if isinstance(value, Path) else value)
               for key, value in vars(args).items()}
-    (args.output_dir/'report.json').write_text(json.dumps(dict(schema_version=2, config=config, metrics=result,
+    (args.output_dir/'report.json').write_text(json.dumps(dict(schema_version=3, config=config, metrics=result,
         frames_evaluated=frame_count, seconds=time.perf_counter()-start,
         frame_diagnostics=frame_diagnostics,
         notes=['GT bbox IDs used for offline scoring ONLY; NEVER in matching.',
                'All accepted current regions are matched and exported, including unknown GT IDs.',
+               f'GT membership uses {args.gt_space}; temporal center/size costs use {args.match_space}.',
+               'XY GT labels reject tied dominant IDs; purity/point thresholds are explicit in config.',
+               'Loose XY membership measures projected association, not 3D point purity or occupancy quality.',
                'Only current_scorable rows contribute to GT precision/recall; unknown verdicts are blank.',
                'Precision excludes predictions with unknown history GT label; count them separately.',
                'Recall denominator is current labeled regions with a same-ID labeled history region.',
@@ -369,7 +416,9 @@ def main():
     p.add_argument('--max-frames-per-scene', type=int, default=0, help='0 = no limit')
     p.add_argument('--seed-percentile', type=float, default=97.)
     p.add_argument('--seed-mad', type=float, default=3.)
-    p.add_argument('--merge-space', choices=('xyz', 'xy'), default='xyz', help='Proposal grouping mode; GT scoring remains 3D')
+    p.add_argument('--merge-space', choices=('xyz', 'xy'), default='xyz', help='Proposal grouping mode, independent of GT/matching space')
+    p.add_argument('--gt-space', choices=('xyz', 'xy'), default='xyz', help='GT support-point inclusion: cuboid or XY footprint; scoring only')
+    p.add_argument('--match-space', choices=('xyz', 'xy'), default='xyz', help='Dimensions for temporal center gates and size costs')
     p.add_argument('--xy-box-gap-m', type=float, nargs=2, default=(.5, .5))
     p.add_argument('--no-xy-size-limit', action='store_true', help='XY proposal experiment without size caps; independent shape and GT scoring rules remain')
     p.add_argument('--box-size-m', type=float, nargs=3, default=(6., 3., 3.))

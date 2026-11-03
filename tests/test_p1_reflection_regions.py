@@ -223,6 +223,17 @@ class ReflectionRegionTests(unittest.TestCase):
             self.assertEqual(gt['region_labels'], {})
             self.assertEqual(gt['region_diagnostics'][0]['reason'], 'duplicate_id_only')
 
+    def test_xy_gt_overlay_ignores_height_and_records_loose_scoring(self):
+        with tempfile.TemporaryDirectory() as directory:
+            gt = self.make_gt_fixture(directory)
+            xyz = np.array([[10, 0, 100], [20, 0, 0], [30, 0, 0]])
+            result = dict(regions=[dict(id=7, accepted=True, support_point_ids=np.arange(3))])
+            gt = gt_diagnostics(result, xyz, gt, purity=0, min_gt_points=1, gt_space='xy')
+            self.assertEqual(gt['space'], 'xy')
+            np.testing.assert_array_equal(gt['point_labels'], [0, -1, -1])
+            self.assertEqual(gt['region_labels'], {7: '42'})
+            self.assertEqual(gt['region_diagnostics'][7]['dominant_fraction'], 1/3)
+
     def test_gt_missing_frame_mapping_and_mismatched_tokens_are_errors(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ValueError, 'occ_frame_idx'):
@@ -560,6 +571,7 @@ class ReflectionRegionTests(unittest.TestCase):
                 '--ann-file', str(annotation), '--bins', str(bins), '--no-rgb',
                 '--start-order', '80', '--end-order', '80', '--merge-space', 'xy',
                 '--no-xy-size-limit',
+                '--gt-space', 'xy', '--gt-purity', '0', '--min-gt-points', '1',
                 '--xy-box-gap-m', '.5', '.5', '--show-gt', '--bbox-root', str(bbox_root),
                 '--output-dir', str(xy_output)]
             run = subprocess.run(xy_command, cwd=ROOT, capture_output=True, text=True)
@@ -569,12 +581,15 @@ class ReflectionRegionTests(unittest.TestCase):
             self.assertFalse(xy_manifest['config']['algorithm']['xy_size_limit'])
             self.assertEqual(xy_manifest['config']['xy_merge_order'], 'filter_then_merge')
             xy_frame = json.loads((xy_output / 'scene3_order00080.json').read_text())
+            self.assertEqual(xy_frame['gt']['membership_space'], 'xy')
+            self.assertEqual(xy_frame['gt']['purity'], 0)
             good_ids = {r['id'] for r in xy_frame['fine_regions'] if r['accepted']}
             for region in xy_frame['regions']:
                 self.assertTrue(set(region['source_seed_ids']).issubset(good_ids))
             with np.load(xy_output / 'scene3_order00080.npz', allow_pickle=False) as arrays:
                 self.assertEqual(arrays['xyz'].shape, (43750, 3))
                 self.assertIn('gt_corners_radar', arrays)
+                self.assertEqual(str(arrays['gt_space']), 'xy')
 
 
 if __name__ == '__main__':

@@ -21,8 +21,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from tools.temporal_vis import vis_alignment as alignment
 from tools.temporal_vis.p1_reflection_regions import RegionConfig, extract_regions, npz_payload
-from tools.temporal_vis.audit_dynamic_objects import memberships, transform
-from tools.temporal_vis.benchmark_region_matching import label_regions
+from tools.temporal_vis.audit_dynamic_objects import transform
+from tools.temporal_vis.benchmark_region_matching import gt_memberships, label_regions
 
 GT_COLOR = '#008040'
 
@@ -60,10 +60,13 @@ def load_gt(info, scene, bbox_root, radar_to_lidar):
                 radar_to_lidar=radar_to_lidar)
 
 
-def gt_diagnostics(result, xyz, gt, purity=.6, min_gt_points=3):
-    point_labels = memberships(transform(xyz, gt['radar_to_lidar']), gt['boxes'])
+def gt_diagnostics(result, xyz, gt, purity=.6, min_gt_points=3, gt_space='xyz'):
+    point_labels = gt_memberships(xyz, gt['boxes'], gt['radar_to_lidar'], gt_space)
     labels, rows = label_regions(result['regions'], point_labels, gt['ids'], purity,
-                                min_gt_points, return_diagnostics=True)
+                                min_gt_points, return_diagnostics=True, reject_ties=gt_space == 'xy')
+    gt['space'] = gt_space
+    gt['purity'] = purity
+    gt['min_gt_points'] = min_gt_points
     gt['point_labels'] = point_labels
     gt['region_labels'] = labels
     gt['region_diagnostics'] = {row['region']: row for row in rows}
@@ -310,7 +313,8 @@ def render(result, xyz, power, destination, title, rgb_path=None, projection=Non
             ax.set_ylim(y_limits)
         detail.legend(handles=[Line2D([0], [0], color=GT_COLOR, lw=1.8, label='GT footprint (true yaw)'),
             Line2D([0], [0], color='#ff8800', marker='.', ls='', label='All support points'),
-            Line2D([0], [0], color='#00aabb', marker='o', markerfacecolor='none', ls='', label='Points inside GT (3D)'),
+            Line2D([0], [0], color='#00aabb', marker='o', markerfacecolor='none', ls='',
+                   label=f'Points inside GT ({"XY" if gt["space"] == "xy" else "3D"})'),
             Line2D([0], [0], color='magenta', marker='x', ls='', label='Ambiguous GT overlap')], fontsize=7, loc='upper right')
     for ax in (intensity, seeds):
         ax.set_xlim(config['x_limits'])
@@ -440,6 +444,7 @@ def main():
     parser.add_argument('--show-gt', action='store_true', help='Overlay GT boxes/point membership AFTER GT-free extraction')
     parser.add_argument('--bbox-root', type=Path, default=Path('data/K-RadarOcc/train'))
     parser.add_argument('--extrinsic', type=Path, help='Radar-to-LiDAR [4,4] .npy for GT overlay; default project calibration')
+    parser.add_argument('--gt-space', choices=('xyz', 'xy'), default='xyz', help='GT diagnostic membership: cuboid or XY footprint, never affects extraction')
     parser.add_argument('--gt-purity', type=float, default=.6, help='Diagnostic label purity, never affects extraction')
     parser.add_argument('--min-gt-points', type=int, default=3, help='Diagnostic point threshold, never affects extraction')
     parser.add_argument('--camera-dir', type=Path)
@@ -467,7 +472,7 @@ def main():
         parser.error('Check order range, stride, frame/display counts, crop and fps')
     if args.no_rgb and (args.projection_npy or args.rgb_image or args.camera_dir):
         parser.error('--no-rgb cannot be combined with RGB image/directory/projection options')
-    if not 0 < args.gt_purity <= 1 or args.min_gt_points < 1:
+    if not 0 <= args.gt_purity <= 1 or args.min_gt_points < 1:
         parser.error('Invalid GT diagnostic purity or minimum point count')
     if args.extrinsic and not args.show_gt:
         parser.error('--extrinsic is used with --show-gt')
@@ -541,7 +546,7 @@ def main():
         gt = None
         if args.show_gt:
             gt = gt_diagnostics(result, xyz, load_gt(info, args.scene, rooted(args.bbox_root), extrinsic),
-                                args.gt_purity, args.min_gt_points)
+                                args.gt_purity, args.min_gt_points, args.gt_space)
         rgb_path, mapping = None, None
         if not args.no_rgb:
             normalized = dict(info)
@@ -559,7 +564,8 @@ def main():
         arrays = npz_payload(result, xyz, power, coords)
         if gt is not None:
             arrays.update(gt_boxes_lidar=gt['boxes'], gt_ids=gt['ids'], gt_corners_radar=gt['corners'],
-                          point_gt_box_rows=gt['point_labels'], radar_to_lidar=gt['radar_to_lidar'])
+                          point_gt_box_rows=gt['point_labels'], radar_to_lidar=gt['radar_to_lidar'],
+                          gt_space=np.array(gt['space']))
         np.savez_compressed(output / f'{stem}.npz', **arrays)
         regions = [{k: v for k, v in r.items() if k not in ('support_point_ids', 'box_point_ids')} for r in result['regions']]
         fine_regions = [{k: v for k, v in r.items() if k not in ('support_point_ids', 'box_point_ids')} for r in result['fine_regions']]
@@ -569,6 +575,7 @@ def main():
             stats=result['stats'], thresholds=result['thresholds'], regions=regions, fine_regions=fine_regions)
         if gt is not None:
             record['gt'] = dict(source=gt['source'], boxes_lidar=gt['boxes'], ids=gt['ids'],
+                membership_space=gt['space'], purity=gt['purity'], min_gt_points=gt['min_gt_points'],
                 corners_radar=gt['corners'], duplicate_ids=gt['duplicate_ids'],
                 radar_to_lidar=gt['radar_to_lidar'],
                 point_convention='LiDAR bottom-center XYZ, full dimensions, yaw radians',

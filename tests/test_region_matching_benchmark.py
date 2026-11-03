@@ -10,10 +10,43 @@ import tempfile
 import numpy as np
 
 from tools.temporal_vis.benchmark_region_matching import (
-    aligned_box, label_regions, select_match, summarize)
+    aligned_box, gt_memberships, label_regions, select_match, summarize)
 
 
 class RegionMatchingTests(unittest.TestCase):
+    def test_xy_gt_membership_ignores_token_height_but_keeps_yaw(self):
+        boxes = np.array([[12.54, -.3, -1.7, 4, 2, 2, np.pi / 2]])
+        extrinsic = np.eye(4)
+        extrinsic[:3, 3] = [2.54, -.3, -.7]
+        xyz = np.array([[10, 0, 0], [10, 0, 100], [10, 1.5, -100], [11.5, 0, 0]])
+        np.testing.assert_array_equal(gt_memberships(xyz, boxes, extrinsic), [0, -1, -1, -1])
+        np.testing.assert_array_equal(gt_memberships(xyz, boxes, extrinsic, 'xy'), [0, 0, 0, -1])
+
+    def test_xy_gt_membership_uses_calibrated_projected_corners_with_tilt(self):
+        extrinsic = np.eye(4)
+        angle = np.pi / 4
+        c, s = np.cos(angle), np.sin(angle)
+        extrinsic[:3, :3] = [[c, 0, s], [0, 1, 0], [-s, 0, c]]
+        boxes = [[0, 0, 0, 2, 2, 4, 0]]
+        xyz = [[-2, 0, 100], [-2, 0, -100], [2, 0, 0]]
+        np.testing.assert_array_equal(gt_memberships(xyz, boxes, extrinsic, 'xy'), [0, 0, -1])
+
+    def test_xy_gt_overlaps_empty_boxes_and_tied_ids_are_unscorable(self):
+        points = [[0, 0, 100], [9, 0, 0]]
+        boxes = [[0, 0, 0, 2, 2, 2, 0], [0, 0, 10, 2, 2, 2, 0]]
+        np.testing.assert_array_equal(gt_memberships(points, boxes, np.eye(4), 'xy'), [-2, -1])
+        np.testing.assert_array_equal(gt_memberships(points, [], np.eye(4), 'xy'), [-1, -1])
+        regions = [dict(id=0, accepted=True, support_point_ids=[0, 1, 2])]
+        result, rows = label_regions(regions, [0, 1, -1], ['A', 'B'], purity=0,
+                                    min_gt_points=1, return_diagnostics=True, reject_ties=True)
+        self.assertEqual(result, {})
+        self.assertEqual(rows[0]['reason'], 'ambiguous_dominant')
+        result = label_regions(regions, [0, -1, -1], ['A'], purity=0,
+                               min_gt_points=1, reject_ties=True)
+        self.assertEqual(result, {0: 'A'})
+        self.assertEqual(label_regions(regions, [0, -1, -1], ['A', 'A'], purity=0,
+                                       min_gt_points=1, reject_ties=True), {})
+
     def test_gt_label_diagnostics_explain_each_exclusion(self):
         indices = [list(range(0, 5)), list(range(5, 9)), list(range(9, 15)),
                    list(range(15, 18)), list(range(18, 21)), []]
@@ -44,7 +77,8 @@ class RegionMatchingTests(unittest.TestCase):
         self.assertEqual(stats['recall'], 1.)
 
     def run_cli_fixture(self, directory, constant_power=False, gt_overlap=False, merge_space='xyz',
-                        no_xy_size_limit=False):
+                        no_xy_size_limit=False, gt_space='xyz', match_space='xyz',
+                        gt_z=None, gt_purity=.6, min_gt_points=3):
         root = Path(__file__).resolve().parents[1]
         count = 175 * 250
         power = np.zeros((8, count))
@@ -69,6 +103,8 @@ class RegionMatchingTests(unittest.TestCase):
             # All GT boxes are far from radar returns: proposals exist, GT labels do not.
             # Processed boxes use a BOTTOM center; cover radar-to-LiDAR Z offset.
             box = [25, 0, -5, 20, 10, 10, 0] if gt_overlap else [1000, 1000, 0, 2, 2, 2, 0]
+            if gt_z is not None:
+                box[2] = gt_z
             np.save(bbox_dir / f'bbox{i}.npy', [box])
             np.save(bbox_dir / f'bbox_token{i}.npy', [42])
             infos.append(dict(scene_id='3', order_in_scene=order, occ_frame_idx=i,
@@ -82,6 +118,8 @@ class RegionMatchingTests(unittest.TestCase):
                    '--bbox-root', str(directory / 'bbox_root'), '--scenes', '3',
                    '--start-order', '90', '--end-order', '90', '--seed-percentile', '95',
                    '--merge-space', merge_space,
+                   '--gt-space', gt_space, '--match-space', match_space,
+                   '--gt-purity', str(gt_purity), '--min-gt-points', str(min_gt_points),
                    '--output-dir', str(output)]
         if no_xy_size_limit:
             command.append('--no-xy-size-limit')
@@ -152,6 +190,38 @@ class RegionMatchingTests(unittest.TestCase):
             self.assertTrue(report['config']['no_xy_size_limit'])
             self.assertTrue(all(r['precision'] == 1. and r['recall'] == 1. for r in report['metrics']))
 
+    def test_cli_xy_scoring_recovers_height_only_misses_without_changing_links(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output, _ = self.run_cli_fixture(Path(directory), gt_overlap=True, gt_z=100,
+                                             merge_space='xy')
+            with (output / 'matches.csv').open() as stream:
+                original = list(csv.DictReader(stream))
+            original_report = json.loads((output / 'report.json').read_text())
+            self.assertTrue(all(r['current_labeled'] == 0 for r in original_report['metrics']))
+        with tempfile.TemporaryDirectory() as directory:
+            output, _ = self.run_cli_fixture(Path(directory), gt_overlap=True, gt_z=100,
+                merge_space='xy', gt_space='xy', gt_purity=0, min_gt_points=1)
+            with (output / 'matches.csv').open() as stream:
+                projected = list(csv.DictReader(stream))
+            report = json.loads((output / 'report.json').read_text())
+            self.assertEqual(report['config']['gt_space'], 'xy')
+            self.assertEqual(report['config']['match_space'], 'xyz')
+            self.assertTrue(all(r['precision'] == 1. and r['recall'] == 1. for r in report['metrics']))
+            fields = ('current_region', 'matched_region', 'predicted', 'candidates_after_center')
+            self.assertEqual([[r[f] for f in fields] for r in original],
+                             [[r[f] for f in fields] for r in projected])
+
+    def test_cli_full_xy_mode_is_recorded_and_has_valid_metrics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output, _ = self.run_cli_fixture(Path(directory), gt_overlap=True, gt_z=100,
+                merge_space='xy', gt_space='xy', match_space='xy', gt_purity=0, min_gt_points=1)
+            report = json.loads((output / 'report.json').read_text())
+            self.assertEqual(report['config']['match_space'], 'xy')
+            self.assertTrue(all(r['precision'] == 1. and r['recall'] == 1. for r in report['metrics']))
+            with (output / 'frame_diagnostics.csv').open() as stream:
+                frames = list(csv.DictReader(stream))
+            self.assertTrue(all(r['gt_space'] == 'xy' for r in frames))
+
     def setUp(self):
         self.current = {'id': 2, 'center': np.array([20., -5., 0.]),
                         'box_size': np.array([6., 3., 3.])}
@@ -170,6 +240,19 @@ class RegionMatchingTests(unittest.TestCase):
         match = select_match(self.current, [h], 2, 1., 0.,
                              self.y_gates, self.center_gates)
         self.assertEqual(match['id'], 5)
+
+    def test_xy_match_ignores_height_in_center_gate_and_size_cost(self):
+        high = self.history(0, 20.1, -5., [6., 3., 300.])
+        high['aligned_center'][2] = 100.
+        far = self.history(1, 23., -5., [7., 3., 3.])
+        self.assertIsNone(select_match(self.current, [high], 1, 1., 0.,
+                                       self.y_gates, self.center_gates))
+        match = select_match(self.current, [high, far], 1, 0., 1.,
+                             self.y_gates, self.center_gates, match_space='xy')
+        self.assertEqual(match['id'], 0)
+        high['aligned_center'][1] = -4.
+        self.assertIsNone(select_match(self.current, [high], 1, 1., 0.,
+                                       self.y_gates, self.center_gates, match_space='xy'))
 
     def test_center_and_size_weights_choose_different_matches(self):
         close_large = self.history(0, 20.1, -5., [12., 5., 5.])
