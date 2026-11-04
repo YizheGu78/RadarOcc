@@ -4,6 +4,7 @@
 #  Modified by Zhiqi Li
 # ---------------------------------------------
 import argparse
+import math
 import mmcv
 import os
 import torch
@@ -38,6 +39,7 @@ def parse_args():
     parser.add_argument('config', help='test config file path')
     parser.add_argument('checkpoint', help='checkpoint file')
     parser.add_argument('--out', help='output result file in pickle format')
+    parser.add_argument('--metrics-json', help='Save dataset.evaluate IoU metrics as JSON')
     parser.add_argument(
         '--fuse-conv-bn',
         action='store_true',
@@ -274,7 +276,12 @@ def main():
                 eval_kwargs.pop(key, None)
             eval_kwargs.update(dict(metric=args.eval, **kwargs))
 
-            print(dataset.evaluate(outputs, **eval_kwargs))
+            metrics = dataset.evaluate(outputs, **eval_kwargs)
+            print(metrics)
+            if args.metrics_json:
+                os.makedirs(osp.dirname(osp.abspath(args.metrics_json)), exist_ok=True)
+                mmcv.dump({k: float(v) if math.isfinite(float(v)) else None
+                           for k, v in metrics.items()}, args.metrics_json)
 
 if __name__ == '__main__':
     main()
