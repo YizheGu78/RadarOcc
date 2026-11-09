@@ -4,10 +4,31 @@
 # inherit EvalHook but BaseDistEvalHook.
 
 import os.path as osp
+import json
+import math
+from numbers import Real
+from pathlib import Path
 import torch.distributed as dist
 from mmcv.runner import DistEvalHook as BaseDistEvalHook
 from torch.nn.modules.batchnorm import _BatchNorm
 from mmcv.runner import EvalHook as BaseEvalHook
+
+
+def save_box_z_metrics(runner):
+    """Preserve exact validation values before TextLogger rounds its JSON log."""
+    model = getattr(runner.model, 'module', runner.model)
+    if not hasattr(model, 'box_z_fusion'):
+        return
+    row = dict(mode='val', epoch=runner.epoch+1)
+    row.update({k: float(v) if math.isfinite(v) else None
+                for k, v in runner.log_buffer.output.items()
+                if k.startswith(('SC', 'SSC')) and isinstance(v, Real)})
+    if 'SSC_mean' not in row:
+        return
+    path = Path(runner.work_dir)/'val_metrics.jsonl'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('a') as stream:
+        stream.write(json.dumps(row, allow_nan=False)+'\n')
 
 
 class OccEvalHook(BaseEvalHook):
@@ -24,6 +45,7 @@ class OccEvalHook(BaseEvalHook):
         
         runner.log_buffer.output['eval_iter_num'] = len(self.dataloader)
         key_score = self.evaluate(runner, results)
+        save_box_z_metrics(runner)
         if self.save_best:
             self._save_ckpt(runner, key_score)
             
@@ -67,6 +89,7 @@ class OccDistEvalHook(BaseDistEvalHook):
             runner.log_buffer.output['eval_iter_num'] = len(self.dataloader)
             
             key_score = self.evaluate(runner, results)
+            save_box_z_metrics(runner)
 
             if self.save_best:
                 self._save_ckpt(runner, key_score)

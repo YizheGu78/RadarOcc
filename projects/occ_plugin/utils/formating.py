@@ -62,7 +62,9 @@ def format_SC_results(mean_ious, return_dic=False):
     dic = {}
     
     for cls_name, cls_iou in zip(class_names, class_ious):
-        dic[cls_name] = np.round(cls_iou, 3)
+        # Keep full precision for checkpoint selection and exported metrics.
+        # Rounding belongs only in the human-readable table.
+        dic[cls_name] = float(cls_iou)
         x.add_row([cls_name, np.round(cls_iou, 3)])
     
     if return_dic:
@@ -99,11 +101,11 @@ def format_SSC_results(mean_ious, return_dic=False):
     dic = {}
     
     for cls_name, cls_iou in zip(class_names, class_ious):
-        dic[cls_name] = np.round(cls_iou, 3)
+        dic[cls_name] = float(cls_iou)
         x.add_row([cls_name, np.round(cls_iou, 3)])
     
     mean_ious = sum(mean_ious[1:]) / len(mean_ious[1:])
-    dic['mean'] = np.round(mean_ious, 3)
+    dic['mean'] = float(mean_ious)
     x.add_row(['mean', np.round(mean_ious, 3)])
     
     if return_dic:
