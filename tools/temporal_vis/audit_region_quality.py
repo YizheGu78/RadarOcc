@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Independent, CPU-only quality audit for P1 reflection-region proposals and links.
 
-No GT is used by region extraction or matching. GT is consulted AFTER proposals
-and geometric associations have been selected. Does not train/modify RadarOcc.
+GT IDs are attached for offline scoring, never consumed by GT-free region
+extraction or geometric match selection. Does not train/modify RadarOcc.
 """
 import argparse
 import csv
