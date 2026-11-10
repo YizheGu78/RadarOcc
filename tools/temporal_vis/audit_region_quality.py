@@ -420,6 +420,24 @@ def execute(args):
         rows = [r for r in all_matches if r["configuration"] == name]
         stats = summarize(rows)
         table.append(dict(configuration=name, **stats, decision=decision(stats)))
+    # Reconcile against the six-scene A/B/C values in the reference report.
+    # A mismatch means the new audit results cannot be compared to the screenshot.
+    regression = None
+    expected_scenes = {"1", "2", "15", "22", "23", "55"}
+    if (included == expected_scenes and args.start_order == 80
+            and args.end_order == 200 and args.stride == 5
+            and args.max_frames_per_scene == 0):
+        reference = {"A_original": (234, 465), "B_y_only": (351, 465),
+                     "C_y_and_center": (360, 465)}
+        regression = {x["configuration"]: dict(
+            expected_correct=reference[x["configuration"]][0],
+            expected_eligible=reference[x["configuration"]][1],
+            observed_correct=x["correct_loose"], observed_eligible=x["eligible_loose"],
+            matches=(x["correct_loose"], x["eligible_loose"]) ==
+                    reference[x["configuration"]]) for x in table}
+        if not all(v["matches"] for v in regression.values()):
+            for x in table:
+                x["decision"] = "INVALID BASELINE: count mismatch; inspect annotation/GT/config"
     write_csv(args.output_dir/"comparison.csv", table)
     # Inspect lowest-purity links first. NOT a representative/random sample.
     bad = [r for r in all_matches if r["same_id_loose"]]
@@ -439,6 +457,7 @@ def execute(args):
         counts=dict(regions=len(all_regions), links=len(all_matches), objects=len(all_objects)),
         object_coverage=obj_summary,
         per_configuration=table,
+        baseline_regression=regression,
         limitations=[
             "This is post-hoc GT auditing; proposal extraction/matching never use GT.",
             "Box purity is the fraction of P1 radar returns in box inside THIS instance's 3D GT box; other returns are not necessarily clutter.",
@@ -468,6 +487,8 @@ def execute(args):
                 "loose_correct_3d_point_confirmation_rate",
                 "matched_min_box_xyz_purity_median", "precision_conservative") else v
                for k,v in x.items()}))
+    if regression is not None:
+        lines += ["", "历史六场景计数回归：" + ("PASS" if all(x["matches"] for x in regression.values()) else "FAIL，禁止根据审计结果推进")]
     lines += ["", "## GT 目标覆盖（与 A/B/C 匹配门限无关）", "",
               f"GT 目标-帧数：{len(all_objects)}；在分析 RoI 内有 3D 雷达点的目标-帧数：{len(radar_objects)}。",
               f"有 XYZ 雷达点的目标中，至少被一个接受框覆盖到 1 个目标点的比例：{pct(obj_summary['object_frame_any_box_coverage_rate'])}。",
