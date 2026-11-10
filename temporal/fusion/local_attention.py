@@ -69,24 +69,34 @@ class LocalTemporalAttention(nn.Module):
         nn.init.zeros_(self.output.bias)
 
     def forward(self, features, aligned_xyz, frame_offsets, valid_mask, point_valid_mask=None,
-                timestamps=None):
+                timestamps=None, query_indices=None):
         current = features[:, -1]
         if features.shape[-1] != 8 or not torch.isfinite(features).all():
             raise ValueError('P1 descriptors must be finite with 8 channels')
         b, t, n, _ = features.shape
         if t == 1:
             return current, dict(used_history=False, queries_with_history=0)
-        if self.selector is None:
+        sparse = query_indices is not None
+        if sparse:
+            if len(query_indices) != b:
+                raise ValueError('query_indices must contain one array per batch item')
+            for q in query_indices:
+                if np.asarray(q).ndim != 1 or len(np.unique(q)) != len(q) or np.any(np.asarray(q) < 0) or np.any(np.asarray(q) >= n):
+                    raise ValueError('Unique in-range query indices required')
+            if self.selector is None:
+                raise ValueError('Sparse query budgets currently require Box Top-8 selection')
+            from ..core.sparse_topk import select_query_subset
+            ids_np, mask_np = select_query_subset(self.selector, features, aligned_xyz,
+                valid_mask, timestamps, point_valid_mask, query_indices)
+        elif self.selector is None:
             ids_np, mask_np = local_neighbors(aligned_xyz, valid_mask, self.k, self.radius_m,
                                             point_valid_mask=point_valid_mask)
         else:
             ids_np, mask_np = self.selector(features, aligned_xyz, valid_mask,
                 timestamps=timestamps, point_valid_mask=point_valid_mask)
-        if not mask_np.any():
+        if not any(m.any() for m in mask_np):
             return current, dict(used_history=False, queries_with_history=0)
         device = features.device
-        ids = torch.as_tensor(ids_np, device=device)
-        mask = torch.as_tensor(mask_np, device=device)
         xyz = torch.as_tensor(aligned_xyz, device=device, dtype=torch.float32)
         offsets = torch.as_tensor(frame_offsets, device=device, dtype=torch.float32)
         if offsets.shape != (b, t) or not torch.isfinite(offsets).all():
@@ -99,15 +109,20 @@ class LocalTemporalAttention(nn.Module):
         hist_time = (offsets[:, :-1] - offsets[:, -1:]).repeat_interleave(n, dim=1)
         result = []
         for batch in range(b):
+            selected = np.asarray(query_indices[batch], np.int64) if sparse else np.arange(n)
+            ids = torch.as_tensor(ids_np[batch], device=device)
+            mask = torch.as_tensor(mask_np[batch], device=device)
+            selected_t = torch.as_tensor(selected, device=device)
             chunks = []
-            for start in range(0, n, self.chunk_size):
-                end = min(start+self.chunk_size, n)
-                ix, good = ids[batch, start:end], mask[batch, start:end]
-                rel = (hist_xyz[batch][ix] - xyz[batch, -1, start:end, None]) / self.radius_m
+            for start in range(0, len(selected), self.chunk_size):
+                end = min(start+self.chunk_size, len(selected))
+                qids = selected_t[start:end]
+                ix, good = ids[start:end], mask[start:end]
+                rel = (hist_xyz[batch][ix] - xyz[batch, -1, qids, None]) / self.radius_m
                 dt = hist_time[batch][ix, None] / self.time_scale
                 pos = self.position(torch.cat((rel, dt), dim=-1))
                 kv = history[batch][ix]
-                q = self.q(encoded[batch, -1, start:end]).view(-1, self.heads, self.dim)
+                q = self.q(encoded[batch, -1, qids]).view(-1, self.heads, self.dim)
                 key = (self.k_proj(kv) + pos).view(end-start, -1, self.heads, self.dim)
                 value = (self.v(kv) + pos).view_as(key)
                 logits = (q[:, None] * key).sum(-1) / self.dim**0.5
@@ -119,11 +134,20 @@ class LocalTemporalAttention(nn.Module):
                 correction = correction * good.any(dim=1, keepdim=True)
                 # Relative residual f + f*expm1(delta): positive power stays
                 # positive, zeros stay zero, Doppler IDs 3:6 remain exact.
-                src = current[batch, start:end]
+                src = current[batch, qids]
                 power = src[:, [0, 1, 2, 6, 7]]
                 fused = power + power * torch.expm1(correction).to(power.dtype)
                 chunks.append(torch.cat((fused[:, :3], src[:, 3:6], fused[:, 3:]), dim=-1))
-            result.append(torch.cat(chunks, dim=0))
+            if sparse:
+                # Differentiable scatter; untouched rows preserve the exact
+                # single-frame descriptor and the Range Attention input size.
+                fused = current[batch].clone()
+                if chunks:
+                    fused = fused.index_copy(0, selected_t, torch.cat(chunks, dim=0))
+                result.append(fused)
+            else:
+                result.append(torch.cat(chunks, dim=0))
         return torch.stack(result), dict(used_history=True,
-            queries_with_history=int(mask_np.any(axis=-1).sum()))
+            queries_with_history=sum(int(m.any(axis=-1).sum()) for m in mask_np),
+            temporal_queries=sum(len(q) for q in query_indices) if sparse else b*n)
 

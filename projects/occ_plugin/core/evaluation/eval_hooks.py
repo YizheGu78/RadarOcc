@@ -17,7 +17,8 @@ from mmcv.runner import EvalHook as BaseEvalHook
 def save_box_z_metrics(runner):
     """Preserve exact validation values before TextLogger rounds its JSON log."""
     model = getattr(runner.model, 'module', runner.model)
-    if not hasattr(model, 'box_z_fusion'):
+    plugin = getattr(model, 'temporal_plugin', None)
+    if not hasattr(model, 'box_z_fusion') and getattr(plugin, 'query_budget', None) is None:
         return
     row = dict(mode='val', epoch=runner.epoch+1)
     row.update({k: float(v) if math.isfinite(v) else None

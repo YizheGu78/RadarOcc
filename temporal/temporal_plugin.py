@@ -36,12 +36,19 @@ class TemporalPlugin(nn.Module):
         debug=None,
         attention=None,
         power_mask=None,
+        query_budget=None,
     ):
         super().__init__()
         self.mode = str(mode).lower()
         self.position = str(position).upper()
         self.alignment_cfg = dict(alignment or {})
         self.geometry = None
+        self.query_budget = None
+        if query_budget is not None:
+            from .core.query_budget import TemporalQueryBudget
+            self.query_budget = TemporalQueryBudget(**dict(query_budget))
+            if self.mode != 'ego_attention':
+                raise ValueError('query_budget requires ego_attention and a frozen Box Top-8 selector')
         self.power_mask_cfg = dict(power_mask or {})
         self.power_mask_enabled = bool(self.power_mask_cfg.get('enabled', False))
         self.power_mask_radius = float(self.power_mask_cfg.get('radius_m', 3.7))
@@ -79,6 +86,8 @@ class TemporalPlugin(nn.Module):
             raise NotImplementedError(
                 "The current regression stage supports P1 only."
             )
+        if self.query_budget is not None and self.fusion.selector is None:
+            raise ValueError('query_budget requires attention.selection')
 
     def forward(
         self,
@@ -161,6 +170,17 @@ class TemporalPlugin(nn.Module):
                 selection_args = {}
                 if self.mode == 'ego_attention' and self.fusion.selector is not None:
                     selection_args['timestamps'] = cpu_array(timestamps)
+                if self.query_budget is not None:
+                    if timestamps is None:
+                        raise ValueError('query_budget requires temporal timestamps')
+                    queries, budget_debug = self.query_budget.select_batch(
+                        cpu_array(features[:, -1:]), cpu_array(coords), raw_xyz, cpu_array(poses),
+                        cpu_array(timestamps), mask,
+                        self.alignment_cfg.get('radar_to_lidar'), point_valid)
+                    selection_args['query_indices'] = queries
+                    fusion_debug.update(query_budget=budget_debug,
+                        query_keep_rate=sum(len(q) for q in queries)/(batch_size*num_points),
+                        temporal_queries=sum(len(q) for q in queries))
                 output, attention_debug = self.fusion(
                     features, aligned_xyz, cpu_array(frame_offsets), mask,
                     point_valid_mask=point_valid, **selection_args)
