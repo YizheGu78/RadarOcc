@@ -125,5 +125,5 @@ original radar geometry and dataset Python dependencies must be installed.
 CPU-only synthetic tests:
 
 ~~~bash
-python -m unittest tests.test_region_quality_audit -v
+python -m unittest discover -s tests -p "test_region_quality_audit.py" -v
 ~~~
