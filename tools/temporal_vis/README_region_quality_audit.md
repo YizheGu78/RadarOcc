@@ -12,8 +12,9 @@ purity=0 and min_gt_points=1. A single target-associated support point can
 therefore suffice even if many search-box points are unrelated. Conditional
 Precision ignores history-identity-unknown predictions.
 
-This audit reuses the same proposal code, ego alignment, and region matching;
-ground truth is examined only AFTER predictions are selected.
+This audit reuses the same proposal code, ego alignment, and region matching.
+GT IDs are attached for offline scoring but are never provided to the
+proposal extractor or geometric match selector.
 
 ## Execute on the machine containing K-Radar data
 
