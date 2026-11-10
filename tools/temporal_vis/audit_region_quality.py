@@ -323,11 +323,18 @@ def summarize(rows):
     )
 
 
-def decision(stats):
+def decision(stats, object_summary=None):
     """Predeclared *screening*, not a calibrated proof of fusion performance."""
     n = stats["correct_loose"]
     if n < 30:
         return "INCONCLUSIVE: fewer than 30 same-ID links; enlarge sample"
+    if object_summary is not None:
+        n_objects = object_summary["gt_objects_with_xyz_radar"]
+        assigned = object_summary["object_frame_assigned_loose_rate"]
+        if n_objects < 30 or assigned is None:
+            return "INCONCLUSIVE: insufficient annotated GT objects with 3D radar"
+        if assigned < .25:
+            return "PAUSE: <25% GT objects with radar evidence get any loose region"
     strict = stats["loose_correct_strict_confirm_rate"]
     evidence = stats["loose_correct_3d_point_confirmation_rate"]
     purity = stats["matched_min_box_xyz_purity_median"]
@@ -335,7 +342,9 @@ def decision(stats):
         return "INCONCLUSIVE: missing scorable 3D evidence"
     if strict < 0.25 and evidence < 0.35 and purity < 0.15:
         return "PAUSE: audit calibration + examples; do not start expensive fusion training"
-    if strict >= 0.60 and evidence >= 0.70 and purity >= 0.35:
+    object_ok = (object_summary is None or
+                 object_summary["object_frame_assigned_loose_rate"] >= .5)
+    if strict >= 0.60 and evidence >= 0.70 and purity >= 0.35 and object_ok:
         return "PILOT: reasonable to run small controlled fusion ablation"
     return "REVISE/INSPECT: no sufficient evidence to commit to fusion training"
 
@@ -419,7 +428,7 @@ def execute(args):
     for name in GATES:
         rows = [r for r in all_matches if r["configuration"] == name]
         stats = summarize(rows)
-        table.append(dict(configuration=name, **stats, decision=decision(stats)))
+        table.append(dict(configuration=name, **stats, decision=decision(stats, obj_summary)))
     # Reconcile against the six-scene A/B/C values in the reference report.
     # A mismatch means the new audit results cannot be compared to the screenshot.
     regression = None
