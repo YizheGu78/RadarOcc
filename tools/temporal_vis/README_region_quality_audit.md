@@ -84,12 +84,17 @@ analysis RoI; samples are object-by-frame counts, not independent objects.
 
 ### Predeclared screening, not a statistical proof
 
-Among >=30 loose same-ID links, the script emits PAUSE only if all three
-are severely weak: strict ID confirmation <25%, target-point evidence
-in both boxes <35%, and median minimum(current,history) 3D Box Purity <15%.
+Screening first requires >=30 loose same-ID links and >=30 GT object-frame
+observations with a genuine XYZ radar return. The method is PAUSED for
+calibration/example review if fewer than 25% of these radar-visible GT
+objects get any accepted loose-ID region. It also emits PAUSE when all
+three association-quality measures are severely weak: strict ID
+confirmation <25%, >=3 3D target points in both boxes <35%, and median
+minimum(current,history) 3D Box Purity <15%.
 
-It emits PILOT when the same three values reach >=60%, >=70%, and >=35%.
-Otherwise it emits REVISE/INSPECT or INCONCLUSIVE. These heuristics are
+It emits PILOT when object assignment is >=50% and the three association
+measures reach >=60%, >=70%, and >=35%. Otherwise it emits
+REVISE/INSPECT or INCONCLUSIVE. These heuristics are
 intended to triage engineering work. They are not calibrated scientific
 cutoffs and cannot establish downstream improvement by themselves.
 
