@@ -11,6 +11,10 @@ import json
 from collections import Counter
 from functools import lru_cache
 from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
 
 import numpy as np
 from scipy.spatial import ConvexHull
@@ -185,6 +189,33 @@ def make_frame_loader(data, args):
             rid = int(region["id"])
             target = frame["labels"].get(rid)
             quality[rid] = quality_for_region(region, target, xyz_tags, xy_tags, corners)
+        # Object-level coverage uses ONLY targets with actual XYZ radar returns in
+        # the analysis RoI. Separately retain all annotated GT objects, even if
+        # no radar returns are present; do not hide proposal failures.
+        eligible = (np.isfinite(xyz).all(1) &
+                    (xyz >= data.config.lower).all(1) &
+                    (xyz < data.config.upper).all(1))
+        union_support = np.zeros(len(xyz), dtype=bool)
+        union_box = np.zeros(len(xyz), dtype=bool)
+        for region in frame["accepted"]:
+            union_support[np.asarray(region["support_point_ids"], int)] = True
+            union_box[np.asarray(region["box_point_ids"], int)] = True
+        objects = []
+        for token, multiplicity in Counter(tokens.tolist()).items():
+            if multiplicity != 1:
+                continue
+            hit = (xyz_tags == token) & eligible
+            n = int(hit.sum())
+            objects.append(dict(
+                scene=scene, order=order, gt_id=token,
+                gt_has_3d_p1_points=n > 0, n_xyz_p1_points=n,
+                support_covered_xyz_points=int((hit & union_support).sum()),
+                box_covered_xyz_points=int((hit & union_box).sum()),
+                support_xyz_coverage=divide((hit & union_support).sum(), n),
+                box_xyz_coverage=divide((hit & union_box).sum(), n),
+                has_assigned_loose_region=token in frame["labels"].values(),
+                has_assigned_strict_region=token in strict.values()))
+        frame["objects"] = objects
         frame["strict_labels"] = strict
         frame["quality"] = quality
         return frame
@@ -320,7 +351,7 @@ def write_csv(path, rows):
 
 def execute(args):
     args.output_dir.mkdir(parents=True, exist_ok=False)
-    all_regions, all_matches = [], []
+    all_regions, all_matches, all_objects = [], [], []
     included = set()
     for ann_file in args.ann_files:
         local = argparse.Namespace(**vars(args))
@@ -354,6 +385,7 @@ def execute(args):
             for i in needed:
                 order = int(frames[i]["order_in_scene"])
                 frame = load(scene, order)
+                all_objects.extend(frame["objects"])
                 for r in frame["accepted"]:
                     rid = int(r["id"])
                     q = frame["quality"][rid]
@@ -366,7 +398,23 @@ def execute(args):
     if not included:
         raise ValueError("No scenes selected; check --ann-files / --scenes")
     write_csv(args.output_dir/"regions.csv", all_regions)
+    write_csv(args.output_dir/"objects.csv", all_objects)
     write_csv(args.output_dir/"matches.csv", all_matches)
+    radar_objects = [r for r in all_objects if r["gt_has_3d_p1_points"]]
+    obj_summary = dict(
+        gt_object_frame_instances=len(all_objects),
+        gt_objects_with_xyz_radar=len(radar_objects),
+        object_frame_assigned_loose_rate=divide(
+            sum(r["has_assigned_loose_region"] for r in radar_objects), len(radar_objects)),
+        object_frame_assigned_strict_rate=divide(
+            sum(r["has_assigned_strict_region"] for r in radar_objects), len(radar_objects)),
+        object_frame_any_box_coverage_rate=divide(
+            sum(r["box_covered_xyz_points"] > 0 for r in radar_objects), len(radar_objects)),
+        object_frame_any_support_coverage_rate=divide(
+            sum(r["support_covered_xyz_points"] > 0 for r in radar_objects), len(radar_objects)),
+        median_object_xyz_radar_coverage_by_boxes=median(
+            r["box_xyz_coverage"] for r in radar_objects),
+    )
     table = []
     for name in GATES:
         rows = [r for r in all_matches if r["configuration"] == name]
@@ -388,7 +436,8 @@ def execute(args):
         scoring=dict(original_gt_space="xy", original_gt_purity=0, original_min_gt_points=1,
             match_space="xy", strict_gt_space="xyz", strict_gt_purity=args.strict_purity,
             strict_min_gt_points=args.strict_min_points),
-        counts=dict(regions=len(all_regions), links=len(all_matches)),
+        counts=dict(regions=len(all_regions), links=len(all_matches), objects=len(all_objects)),
+        object_coverage=obj_summary,
         per_configuration=table,
         limitations=[
             "This is post-hoc GT auditing; proposal extraction/matching never use GT.",
@@ -419,7 +468,13 @@ def execute(args):
                 "loose_correct_3d_point_confirmation_rate",
                 "matched_min_box_xyz_purity_median", "precision_conservative") else v
                for k,v in x.items()}))
-    lines += ["", "注意：3D 点证据确认 = 同 ID 的当前和历史框内分别至少有 3 个该目标的 3D GT 归属点。",
+    lines += ["", "## GT 目标覆盖（与 A/B/C 匹配门限无关）", "",
+              f"GT 目标-帧数：{len(all_objects)}；在分析 RoI 内有 3D 雷达点的目标-帧数：{len(radar_objects)}。",
+              f"有 XYZ 雷达点的目标中，至少被一个接受框覆盖到 1 个目标点的比例：{pct(obj_summary['object_frame_any_box_coverage_rate'])}。",
+              f"有 XYZ 雷达点的目标中，至少被一个接受区域支持点覆盖到 1 个目标点的比例：{pct(obj_summary['object_frame_any_support_coverage_rate'])}。",
+              f"有 XYZ 雷达点的目标中，得到宽松 GT ID 区域的比例：{pct(obj_summary['object_frame_assigned_loose_rate'])}。",
+              f"有 XYZ 雷达点的目标中，得到严格 GT ID 区域的比例：{pct(obj_summary['object_frame_assigned_strict_rate'])}。",
+              "", "注意：3D 点证据确认 = 同 ID 的当前和历史框内分别至少有 3 个该目标的 3D GT 归属点。",
               "严格 XYZ ID = 支持点至少 3 个、Support Purity 至少 {:.0%}；其分母不同于宽松 Recall。".format(args.strict_purity),
               "最差一侧 Box Purity = min(当前框纯度, 历史框纯度)。未知/未标注反射不能直接称为杂波。",
               "低纯度样例见 inspect_low_purity_links.csv；需检查雷达与 GT 标定、物体可见性。",
