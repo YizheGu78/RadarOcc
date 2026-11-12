@@ -22,6 +22,8 @@ from mmcv.cnn.bricks.transformer import build_transformer_layer_sequence
 from mmcv.runner.base_module import BaseModule
 from .deformable_self_attention import DeformSelfAttention
 from .deformable_cross_attention import MSDeformableAttention3D
+from .deformable_self_attention_3D_custom import DeformSelfAttention3DCustom
+from .deformable_cross_attention_3D_custom import DeformCrossAttention3DCustom
 
 @TRANSFORMER.register_module()
 class PerceptionTransformer3D(BaseModule):
@@ -75,7 +77,11 @@ class PerceptionTransformer3D(BaseModule):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
         for m in self.modules():
-            if isinstance(m, MSDeformableAttention3D) or isinstance(m, DeformSelfAttention):
+            # Old type check omitted the active *3DCustom classes, so the
+            # preceding Xavier pass overwrote their zero offset/logit weights.
+            # if isinstance(m, MSDeformableAttention3D) or isinstance(m, DeformSelfAttention):
+            if isinstance(m, (MSDeformableAttention3D, DeformSelfAttention,
+                              DeformSelfAttention3DCustom, DeformCrossAttention3DCustom)):
                 try:
                     m.init_weight()
                 except AttributeError:

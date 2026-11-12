@@ -45,7 +45,8 @@ class P0TemporalBase(nn.Module):
     def __init__(self, bins_path, frame_nums=4, channels=32, chunk_size=1024,
                  bev_bounds=(-4., -64., 84., 64.), cell_size=.8,
                  max_log_correction=.5, time_scale_frames=3., enabled=True,
-                 radar_to_lidar=None, height_bounds=(-4., 8.), height_cell_size=1.):
+                 radar_to_lidar=None, height_bounds=(-4., 8.), height_cell_size=1.,
+                 coordinate_convention='legacy_positive_v1'):
         super().__init__()
         if frame_nums < 2 or channels < 1 or chunk_size < 1:
             raise ValueError('Need at least two frames and positive channels/chunk_size')
@@ -60,7 +61,7 @@ class P0TemporalBase(nn.Module):
                 or height_bounds[1] <= height_bounds[0] or not math.isfinite(height_cell_size)
                 or height_cell_size <= 0):
             raise ValueError('Invalid physical height bounds/cell size')
-        self.geometry = RadarBinGeometry.from_file(bins_path)
+        self.geometry = RadarBinGeometry.from_file(bins_path, coordinate_convention=coordinate_convention)
         self.frame_nums, self.channels, self.chunk_size = frame_nums, channels, chunk_size
         # Pad XY to multiples of four: all CenterFormer scales then have exactly
         # the same physical extent and normalized reference coordinates.

@@ -11,7 +11,10 @@
 # ---------------------------------------------
 
 from .multi_scale_deformable_attn_3D_custom_function import MultiScaleDeformableAttn3DCustomFunction_fp16, MultiScaleDeformableAttn3DCustomFunction_fp32
-from mmcv.ops.multi_scale_deform_attn import multi_scale_deformable_attn_pytorch
+# from mmcv.ops.multi_scale_deform_attn import multi_scale_deformable_attn_pytorch
+# MMCV fallback is 2D; retain the call-site name with a true 3D implementation.
+from .multi_scale_deformable_attn_3D_custom_function import (
+    multi_scale_deformable_attn_3d_pytorch as multi_scale_deformable_attn_pytorch)
 import warnings
 import torch
 import torch.nn as nn
@@ -224,7 +227,11 @@ class DeformSelfAttention3DCustom(BaseModule):
             value = value.half()
 
 
-        query = torch.cat([value[:bs], query], -1)
+        # query = torch.cat([value[:bs], query], -1)
+        # Queue storage is [B,queue,N,C]; the first B rows are not the
+        # first queue entry of every batch when B>1.
+        first_queue = value.reshape(bs, self.num_bev_queue, num_value, embed_dims)[:, 0]
+        query = torch.cat([first_queue, query], -1)
         value = self.value_proj(value)
 
         assert key_padding_mask is None
@@ -288,7 +295,7 @@ class DeformSelfAttention3DCustom(BaseModule):
 
         if not self.batch_first:
             output = output.permute(1, 0, 2)
-        return self.dropout(output) + identity
+        # return self.dropout(output) + identity  # Made the residual flag unreachable.
         if residual:
             return self.dropout(output) + identity
         else:

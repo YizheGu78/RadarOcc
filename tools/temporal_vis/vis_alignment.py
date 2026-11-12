@@ -206,11 +206,12 @@ def render_power(raw, scores, mask, offsets, output, title, max_points=2000, rgb
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    geometry_module.add_coordinate_argument(parser)
     parser.add_argument('--ann-file', type=Path, default=ROOT / 'data/annotations/kradar_dict_val_official_temporal_doppler8.pkl')
     parser.add_argument('--bins', type=Path, help='Actual bin NPZ or K-Radar info_arr.mat; required unless --debug-file')
     parser.add_argument('--extrinsic', type=Path, help='Optional 4x4 T_lidar_from_radar NPY; default matches existing RadarOcc convention')
-    parser.add_argument('--azimuth-sign', type=int, choices=(-1, 1), default=1)
-    parser.add_argument('--elevation-sign', type=int, choices=(-1, 1), default=1)
+    parser.add_argument('--azimuth-sign', type=int, choices=(-1, 1), default=None)
+    parser.add_argument('--elevation-sign', type=int, choices=(-1, 1), default=None)
     parser.add_argument('--scene', default='3')
     parser.add_argument('--current-order', type=int, default=80, help='order_in_scene, not radar filename ID')
     parser.add_argument('--frame-nums', type=int, default=4)
@@ -263,7 +264,7 @@ def main():
     for info, valid in zip(sequence, mask):
         if valid and not info.get('ego_pose_valid', False):
             raise ValueError('Invalid ego pose in selected sequence')
-    geometry = RadarBinGeometry.from_file(args.bins, azimuth_sign=args.azimuth_sign, elevation_sign=args.elevation_sign)
+    geometry = geometry_module.geometry_from_args(args)
     loaded = [load_p1(i.get('sparse_radar_path') or i['radar_path']) for i in sequence]
     raw = geometry.to_xyz(np.stack([x[0] for x in loaded]))
     poses = np.stack([i['ego_pose'] for i in sequence])
@@ -276,7 +277,8 @@ def main():
                         power_scores=np.stack([x[1] for x in loaded])[None])
     summary = dict(scene=args.scene, current_order=args.current_order, orders=[i['order_in_scene'] for i in sequence],
                    radar_frame_ids=[i.get('radar_frame_id') for i in sequence], valid_mask=mask.tolist(),
-                   bins=str(args.bins), azimuth_sign=args.azimuth_sign, elevation_sign=args.elevation_sign,
+                   bins=str(args.bins), azimuth_sign=geometry.azimuth_sign, elevation_sign=geometry.elevation_sign,
+                   coordinate_convention=geometry.coordinate_convention,
                    radar_to_lidar=(extrinsic if extrinsic is not None else geometry_module.radar_to_lidar_default()).tolist(),
                    transforms=transforms[0].tolist(), points_per_frame=int(raw.shape[1]), rgb=rgb_mapping)
     Path(str(prefix) + '.json').write_text(json.dumps(summary, indent=2), encoding='utf-8')

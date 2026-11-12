@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT))
 from tools.temporal_vis import vis_alignment as va
 from tools.temporal_vis.p1_reflection_regions import RegionConfig, extract_regions
 from tools.temporal_vis.benchmark_region_matching import aligned_box, select_match
-from temporal.core.ego_alignment import radar_to_lidar_default, validate_transform
+from temporal.core.ego_alignment import radar_to_lidar_default, validate_transform, add_coordinate_argument, geometry_from_args
 
 
 def sha(path):
@@ -23,20 +23,27 @@ def sha(path):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
+    add_coordinate_argument(p)
     p.add_argument('--ann-file', type=Path, required=True)
     p.add_argument('--output-dir', type=Path, required=True)
     p.add_argument('--bins', type=Path, default=Path('data/K-Radar-official-meta/resources/info_arr.mat'))
     p.add_argument('--resume', action='store_true')
+    p.add_argument('--y-gates', nargs=3, type=float, default=[4, 5, 3])
+    p.add_argument('--center-gates', nargs=3, type=float, default=[4, 6, 8])
     p.add_argument('--max-frames', type=int, default=0, help='Smoke cache only; incomplete caches cannot train')
     args = p.parse_args()
+    if not np.isfinite(args.y_gates+args.center_gates).all() or min(args.y_gates+args.center_gates) <= 0:
+        p.error('Gates must be finite and positive')
     cfg = RegionConfig(seed_percentile=97, seed_mad=3, merge_space='xy', xy_box_gap=(.5, .5),
                        box_size=(6, 3, 3), max_box_size=(20, 6, 6))
     ext = radar_to_lidar_default()
     policy = dict(format='box_z_pairs_v1', ann_sha256=sha(args.ann_file), bins_sha256=sha(args.bins),
-        region_config=asdict(cfg), y_gates=[4, 5, 3], center_gates=[4, 6, 8],
+        region_config=asdict(cfg), y_gates=args.y_gates, center_gates=args.center_gates,
         weights=[1, 0], radar_to_lidar=ext.tolist(), history_order='t-1,t-2,t-3',
         extractor_sha256=sha(ROOT/'tools/temporal_vis/p1_reflection_regions.py'),
         matcher_sha256=sha(ROOT/'tools/temporal_vis/benchmark_region_matching.py'), gt_used=False)
+    if args.coordinate_convention != 'legacy_positive_v1':
+        policy['coordinate_convention'] = args.coordinate_convention
     policy = json.loads(json.dumps(policy))
     infos = va.read_infos(args.ann_file)
     groups, records, sources = {}, {}, {}
@@ -57,7 +64,7 @@ def main():
             raise ValueError('Cache protocol mismatch; choose a new directory')
     else:
         protocol.write_text(json.dumps(policy, indent=2)+'\n')
-    geometry = va.RadarBinGeometry.from_file(args.bins)
+    geometry = geometry_from_args(args)
 
     @lru_cache(maxsize=16)
     def frame(path):
@@ -105,7 +112,7 @@ def main():
                         center, size = aligned_box(r['center'], r['box_size'], relative)
                         candidates.append(dict(id=r['id'], aligned_center=center, aligned_size=size))
                     for k, r in enumerate(regions):
-                        h = select_match(r, candidates, j+1, 1., 0., [4, 5, 3], [4, 6, 8], match_space='xy')
+                        h = select_match(r, candidates, j+1, 1., 0., args.y_gates, args.center_gates, match_space='xy')
                         if h is not None:
                             history[k, j] = np.r_[h['aligned_center'], h['aligned_size']]
                             matched[k, j] = True

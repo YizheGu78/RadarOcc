@@ -91,7 +91,7 @@ def save_ranker(path, ranker, policy=None, **metadata):
                     state_dict=ranker.state_dict(), metadata=metadata), path)
 
 
-def load_ranker(path, expected_policy=None):
+def load_ranker(path, expected_policy=None, expected_coordinate_convention=None):
     if not Path(path).is_file():
         raise FileNotFoundError(f'Pretrain the Top-8 ranker first; checkpoint missing: {path}')
     payload = torch.load(path, map_location='cpu', weights_only=True)
@@ -99,6 +99,9 @@ def load_ranker(path, expected_policy=None):
         raise ValueError('Not a standalone learned Top-8 checkpoint')
     if expected_policy is not None and payload['policy'] != expected_policy:
         raise ValueError('Ranker checkpoint search/descriptor/time policy disagrees with config')
+    convention = payload.get('metadata', {}).get('coordinate_convention', 'legacy_positive_v1')
+    if expected_coordinate_convention is not None and convention != expected_coordinate_convention:
+        raise ValueError(f'Ranker coordinate convention {convention} != {expected_coordinate_convention}; rebuild and retrain')
     ranker = PairRanker(**payload['model_config'])
     ranker.load_state_dict(payload['state_dict'], strict=True)
     return ranker, payload
@@ -108,7 +111,7 @@ class BoxTopKSelector(nn.Module):
     """64 -> 8 per frame. Ranks detached fixed descriptors, returns indices only."""
     def __init__(self, method='learned', checkpoint=None, frozen=True, candidate_k=64,
                  top_k=8, x_half_by_history=(4., 6., 8.), y_half=1.5, z_half=1.,
-                 query_chunk_size=512, cache_dir=None, cache_mode='readwrite'):
+                 query_chunk_size=512, cache_dir=None, cache_mode='readwrite', coordinate_convention=None):
         super().__init__()
         if method not in ('learned', 'distance') or candidate_k != 64 or top_k != 8:
             raise ValueError('This experiment uses learned/distance 64-candidate Top-8')
@@ -119,13 +122,14 @@ class BoxTopKSelector(nn.Module):
                 *x_half_by_history, y_half, z_half) <= 0:
             raise ValueError('Positive finite box dimensions and query chunk required')
         self.method, self.query_chunk_size = method, query_chunk_size
+        self.coordinate_convention = coordinate_convention
         self.policy = dict(DEFAULT_POLICY, candidate_k=candidate_k, top_k=top_k,
                            x_half_by_history=list(x_half_by_history), y_half=y_half, z_half=z_half)
         self.ranker = None
         if method == 'learned':
             if checkpoint is None:
                 raise ValueError('learned selection requires a pretrained checkpoint')
-            self.ranker, _ = load_ranker(checkpoint, self.policy)
+            self.ranker, _ = load_ranker(checkpoint, self.policy, coordinate_convention)
             self.ranker.requires_grad_(False)
             self.ranker.eval()
         from .selection_cache import SelectionCache
@@ -150,7 +154,8 @@ class BoxTopKSelector(nn.Module):
         for name in ('learned_topk.py', 'box_candidates.py', 'selection_cache.py'):
             source.update(Path(__file__).with_name(name).read_bytes())
         device = features.device
-        return json.dumps(dict(format='selection_indices_v1', policy=self.policy,
+        extra = {} if self.coordinate_convention is None else dict(coordinate_convention=self.coordinate_convention)
+        return json.dumps(dict(format='selection_indices_v1', policy=self.policy, **extra,
             method=self.method, weights=self._cache_weights, source=source.hexdigest(),
             torch=str(torch.__version__), device=str(device),
             hardware=torch.cuda.get_device_name(device) if device.type == 'cuda' else 'cpu',

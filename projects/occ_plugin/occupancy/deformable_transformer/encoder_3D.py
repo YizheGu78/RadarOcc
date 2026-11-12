@@ -215,8 +215,13 @@ class VoxFormerEncoder3D(TransformerLayerSequence):
            len_bev = sph_ref_3d.shape[0]
            sph_ref_3d = sph_ref_3d.unsqueeze(0).repeat(bs, 1, 1) #b,N,3
            sph_ref_3d = sph_ref_3d.unsqueeze(2) #b,N,1(layer),3
-           sph_ref_3d = torch.stack([sph_ref_3d, sph_ref_3d], 1).reshape(
-                bs*2, len_bev, num_bev_level, 3)
+           # Before projection-chain correction (kept for comparison):
+           # sph_ref_3d = torch.stack([sph_ref_3d, sph_ref_3d], 1).reshape(
+           #      bs*2, len_bev, num_bev_level, 3)
+           # Spherical cross-attention has num_bev_queue=1 and value batch B.
+           # Only self-attention above uses the two-entry hybrid queue.
+           if value is None or value.shape[0] != bs:
+               raise ValueError('Spherical cross-attention requires value batch B.')
            residual = False
 
         # reference_points_cam, bev_mask = self.point_sampling(

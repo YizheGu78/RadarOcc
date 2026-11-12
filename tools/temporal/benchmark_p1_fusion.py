@@ -11,11 +11,12 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from temporal import build_temporal_plugin
-from temporal.core.ego_alignment import RadarBinGeometry
+from temporal.core.ego_alignment import RadarBinGeometry, add_coordinate_argument
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    add_coordinate_argument(parser)
     parser.add_argument('--bins-path', required=True)
     parser.add_argument('--mode', choices=('ra_adta', 'ego_attention'), default='ra_adta')
     parser.add_argument('--points', type=int, default=43750)
@@ -31,7 +32,7 @@ def main():
         parser.error('CUDA is unavailable; explicitly pass --device cpu for a CPU smoke check')
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
-    bins = RadarBinGeometry.from_file(args.bins_path)
+    bins = RadarBinGeometry.from_file(args.bins_path, coordinate_convention=args.coordinate_convention)
     # Match the baseline's 175 range groups / 250 points for default N. These
     # are synthetic tokens, not real Top-K measurements or an IoU experiment.
     ranges = min(175, len(bins.bins[0]), args.points)
@@ -47,7 +48,7 @@ def main():
     mask = torch.ones(1, 4, dtype=torch.bool, device=device)
     attention = {} if args.chunk_size is None else dict(chunk_size=args.chunk_size)
     plugin = build_temporal_plugin(dict(mode=args.mode,
-        alignment=dict(bins_path=args.bins_path), attention=attention)).to(device).train()
+        alignment=dict(bins_path=args.bins_path, coordinate_convention=args.coordinate_convention), attention=attention)).to(device).train()
     optimizer = torch.optim.AdamW(plugin.parameters(), lr=3e-4)
 
     def synchronize():

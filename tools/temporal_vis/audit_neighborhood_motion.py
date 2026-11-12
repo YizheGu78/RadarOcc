@@ -250,6 +250,7 @@ def run(args, data, table, config):
 
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
+    audit.va.geometry_module.add_coordinate_argument(p)
     p.add_argument('--ann-file',type=Path,default=Path('data/annotations/kradar_dict_test_official_temporal_doppler8.pkl'))
     p.add_argument('--bbox-root',type=Path,default=Path('data/K-RadarOcc/train'))
     p.add_argument('--bins',type=Path,default=Path('data/K-Radar-official-meta/resources/info_arr.mat'))

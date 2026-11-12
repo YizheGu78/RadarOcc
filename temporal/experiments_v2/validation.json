@@ -1,0 +1,339 @@
+{
+  "coordinate_tests": {
+    "passed": true,
+    "tests": 7,
+    "skipped": 0,
+    "actual_GT_frames": [
+      {
+        "scene": "11",
+        "order": 233,
+        "points": 43750,
+        "unique_GT_points": 2535
+      },
+      {
+        "scene": "27",
+        "order": 439,
+        "points": 43750,
+        "unique_GT_points": 126
+      },
+      {
+        "scene": "8",
+        "order": 272,
+        "points": 43750,
+        "unique_GT_points": 213
+      },
+      {
+        "scene": "18",
+        "order": 436,
+        "points": 43750,
+        "unique_GT_points": 220
+      },
+      {
+        "scene": "20",
+        "order": 405,
+        "points": 43750,
+        "unique_GT_points": 653
+      }
+    ],
+    "baseline_note": "Original single-frame feature-to-occupancy projection was not changed or certified by these checks."
+  },
+  "legacy_and_component_tests_passed": 117,
+  "checkpoint_cache_guards": {
+    "real_new_ranker_load": true,
+    "real_legacy_ranker_rejected": true,
+    "real_legacy_box_cache_rejected": true
+  },
+  "ports": {
+    "centerformer": {
+      "method": "centerformer",
+      "points": 43750,
+      "identity": true,
+      "finite_gradients": true,
+      "offset_gradient": 4.617500235326588e-05,
+      "descriptor_objectives": [
+        34.059326171875,
+        34.05078125
+      ],
+      "diagnostics": {
+        "used_history": true,
+        "queries_with_history": 30773,
+        "queries_in_volume": 30985,
+        "mean_abs_offset_cells": 0.8333250284194946,
+        "source_levels": 6,
+        "height_slices": 12
+      }
+    },
+    "rodnet": {
+      "method": "rodnet",
+      "points": 43750,
+      "identity": true,
+      "finite_gradients": true,
+      "offset_gradient": 0.0001340205781161785,
+      "descriptor_objectives": [
+        34.059326171875,
+        34.05870056152344
+      ],
+      "diagnostics": {
+        "used_history": true,
+        "queries_with_history": 30506,
+        "queries_in_volume": 30985,
+        "mean_abs_offset_cells": 0.0,
+        "temporal_taps": 4,
+        "height_slices": 12
+      }
+    }
+  },
+  "executed_steps": [
+    {
+      "id": "P01",
+      "action": "run",
+      "smoke": true,
+      "elapsed_seconds": 2.5519843101501465,
+      "command": [
+        "python",
+        "tools/temporal/train_top8_ranker.py",
+        "prepare",
+        "--ann-file",
+        "data/annotations/kradar_dict_train_official_temporal_doppler8.pkl",
+        "--split",
+        "train",
+        "--output-dir",
+        "data/geometry_v2/smoke/ranker/train",
+        "--coordinate-convention",
+        "kradar_physical_v2",
+        "--scenes",
+        "11",
+        "--max-frames-per-scene",
+        "4",
+        "--max-queries-per-frame",
+        "32"
+      ],
+      "completed": true,
+      "coordinate_convention": "kradar_physical_v2"
+    },
+    {
+      "id": "V02",
+      "action": "run",
+      "smoke": true,
+      "elapsed_seconds": 6.208259344100952,
+      "command": [
+        "python",
+        "tools/temporal_vis/audit_neighborhood_motion.py",
+        "--ann-file",
+        "data/annotations/kradar_dict_train_official_temporal_doppler8.pkl",
+        "--scene",
+        "11",
+        "--start-order",
+        "80",
+        "--end-order",
+        "200",
+        "--stride",
+        "5",
+        "--output-dir",
+        "outputs/geometry_v2/smoke/motion",
+        "--coordinate-convention",
+        "kradar_physical_v2",
+        "--max-frames",
+        "1"
+      ],
+      "completed": true,
+      "coordinate_convention": "kradar_physical_v2"
+    },
+    {
+      "id": "V06",
+      "action": "run",
+      "smoke": true,
+      "elapsed_seconds": 2.6037514209747314,
+      "command": [
+        "python",
+        "tools/temporal_vis/visualize_query_budget.py",
+        "--ann-files",
+        "data/annotations/kradar_dict_val_official_temporal_doppler8.pkl",
+        "--scenes",
+        "1",
+        "2",
+        "--output-dir",
+        "outputs/geometry_v2/smoke/query_budget",
+        "--coordinate-convention",
+        "kradar_physical_v2",
+        "--frames-per-scene",
+        "1",
+        "--no-plots"
+      ],
+      "completed": true,
+      "coordinate_convention": "kradar_physical_v2"
+    },
+    {
+      "id": "V08",
+      "action": "run",
+      "smoke": false,
+      "elapsed_seconds": 30.49048638343811,
+      "command": [
+        "python",
+        "-m",
+        "temporal.check_p0",
+        "--method",
+        "rodnet",
+        "--device",
+        "cpu",
+        "--config",
+        "temporal/experiments_v2/configs/rodnet_tdc.py"
+      ],
+      "completed": true,
+      "coordinate_convention": "kradar_physical_v2"
+    },
+    {
+      "id": "V05",
+      "action": "run",
+      "smoke": true,
+      "elapsed_seconds": 3.5289313793182373,
+      "command": [
+        "python",
+        "tools/temporal_vis/audit_region_quality.py",
+        "--ann-files",
+        "data/annotations/kradar_dict_val_official_temporal_doppler8.pkl",
+        "--start-order",
+        "80",
+        "--end-order",
+        "200",
+        "--stride",
+        "5",
+        "--output-dir",
+        "outputs/geometry_v2/smoke/region_abc_val",
+        "--coordinate-convention",
+        "kradar_physical_v2",
+        "--max-frames-per-scene",
+        "1"
+      ],
+      "completed": true,
+      "coordinate_convention": "kradar_physical_v2"
+    },
+    {
+      "id": "V03",
+      "action": "run",
+      "smoke": true,
+      "elapsed_seconds": 1.6387529373168945,
+      "command": [
+        "python",
+        "tools/temporal_vis/benchmark_region_matching.py",
+        "--ann-file",
+        "data/annotations/kradar_dict_train_official_temporal_doppler8.pkl",
+        "--scenes",
+        "11",
+        "--start-order",
+        "80",
+        "--end-order",
+        "200",
+        "--stride",
+        "5",
+        "--seed-percentile",
+        "97",
+        "--merge-space",
+        "xy",
+        "--max-box-size-m",
+        "20",
+        "6",
+        "6",
+        "--gt-space",
+        "xy",
+        "--match-space",
+        "xy",
+        "--gt-purity",
+        "0",
+        "--min-gt-points",
+        "1",
+        "--output-dir",
+        "outputs/geometry_v2/smoke/regions_train",
+        "--coordinate-convention",
+        "kradar_physical_v2",
+        "--max-frames-per-scene",
+        "1"
+      ],
+      "completed": true,
+      "coordinate_convention": "kradar_physical_v2"
+    },
+    {
+      "id": "P05",
+      "action": "run",
+      "smoke": true,
+      "elapsed_seconds": 2.2685182094573975,
+      "command": [
+        "python",
+        "tools/temporal/cache_box_z_pairs.py",
+        "--ann-file",
+        "data/annotations/kradar_dict_train_official_temporal_doppler8_20pct.pkl",
+        "--output-dir",
+        "data/geometry_v2/smoke/box_pairs/train20",
+        "--coordinate-convention",
+        "kradar_physical_v2",
+        "--max-frames",
+        "2"
+      ],
+      "completed": true,
+      "coordinate_convention": "kradar_physical_v2"
+    },
+    {
+      "id": "V00",
+      "action": "run",
+      "smoke": false,
+      "elapsed_seconds": 2.8630106449127197,
+      "command": [
+        "python",
+        "tools/temporal/check_geometry_v2.py",
+        "--output",
+        "outputs/geometry_v2/checks.json"
+      ],
+      "completed": true,
+      "coordinate_convention": "kradar_physical_v2"
+    },
+    {
+      "id": "P02",
+      "action": "run",
+      "smoke": true,
+      "elapsed_seconds": 2.074028491973877,
+      "command": [
+        "python",
+        "tools/temporal/train_top8_ranker.py",
+        "prepare",
+        "--ann-file",
+        "data/annotations/kradar_dict_val_official_temporal_doppler8.pkl",
+        "--split",
+        "val",
+        "--output-dir",
+        "data/geometry_v2/smoke/ranker/val",
+        "--coordinate-convention",
+        "kradar_physical_v2",
+        "--scenes",
+        "1",
+        "--max-frames-per-scene",
+        "4",
+        "--max-queries-per-frame",
+        "32"
+      ],
+      "completed": true,
+      "coordinate_convention": "kradar_physical_v2"
+    },
+    {
+      "id": "V07",
+      "action": "run",
+      "smoke": false,
+      "elapsed_seconds": 20.5467689037323,
+      "command": [
+        "python",
+        "-m",
+        "temporal.check_p0",
+        "--method",
+        "centerformer",
+        "--device",
+        "cpu",
+        "--config",
+        "temporal/experiments_v2/configs/centerformer.py"
+      ],
+      "completed": true,
+      "coordinate_convention": "kradar_physical_v2"
+    }
+  ],
+  "cuda_available": false,
+  "full_occupancy_training_started": false,
+  "baseline_project_files_modified": false
+}

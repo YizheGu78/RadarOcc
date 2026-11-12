@@ -35,6 +35,7 @@ BANDS = [(0., 12.8, '00_12.8m'), (12.8, 25.6, '12.8_25.6m'),
 
 def args_parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    va.geometry_module.add_coordinate_argument(p)
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument('--ann-file', type=Path, help='Temporal frame-level annotation pkl')
     g.add_argument('--debug-file', type=Path, help='Existing alignment NPZ from vis_alignment.py or TemporalPlugin')
@@ -49,8 +50,8 @@ def args_parser():
     p.add_argument('--k', type=int, default=8)
     p.add_argument('--ego-mask-radius', type=float, default=0.0,
                    help='0: current P1 baseline keeps ego returns; 3.7: mask37-like XY self-return mask')
-    p.add_argument('--azimuth-sign', type=int, choices=(-1, 1), default=1)
-    p.add_argument('--elevation-sign', type=int, choices=(-1, 1), default=1)
+    p.add_argument('--azimuth-sign', type=int, choices=(-1, 1), default=None)
+    p.add_argument('--elevation-sign', type=int, choices=(-1, 1), default=None)
     p.add_argument('--extrinsic', type=Path, help='Optional radar_to_lidar 4x4 NPY; default repo convention')
     p.add_argument('--output-dir', type=Path, default=Path('outputs/temporal_matching_audit'))
     p.add_argument('--max-plots', type=int, default=6, help='Number of BEV manual inspection examples')
@@ -70,8 +71,7 @@ def build_from_annotation(args):
     scene = va.scene_infos(infos, args.scene)
     if not scene:
         raise ValueError(f'Scene {args.scene} not found in {args.ann_file}')
-    geometry = va.RadarBinGeometry.from_file(args.bins, azimuth_sign=args.azimuth_sign,
-                                             elevation_sign=args.elevation_sign)
+    geometry = va.geometry_module.geometry_from_args(args)
     extrinsic = np.load(args.extrinsic, allow_pickle=False) if args.extrinsic else None
     selected = [(i, info) for i, info in enumerate(scene)
                 if args.start_order <= int(info['order_in_scene']) <= args.end_order]

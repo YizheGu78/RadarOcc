@@ -10,6 +10,29 @@ from mmdet.models import NECKS
 
 import torch.nn.functional as F
 import pdb
+from contextlib import contextmanager, nullcontext
+
+
+@contextmanager
+def _recompute_batchnorm_buffers(module):
+    """Use temporary running buffers during activation recomputation only.
+
+    Training BatchNorm still uses batch statistics and keeps the same graph.
+    Replaying a checkpoint must not update inference statistics a second time.
+    """
+    originals = []
+    for layer in module.modules():
+        if isinstance(layer, nn.modules.batchnorm._BatchNorm) and layer.track_running_stats:
+            for name in ('running_mean', 'running_var', 'num_batches_tracked'):
+                original = getattr(layer, name)
+                if original is not None:
+                    originals.append((layer, name, original))
+                    setattr(layer, name, original.clone())
+    try:
+        yield
+    finally:
+        for layer, name, original in originals:
+            setattr(layer, name, original)
 
 @NECKS.register_module()
 class FPN3D(BaseModule):
@@ -69,6 +92,18 @@ class FPN3D(BaseModule):
             self.lateral_convs.append(l_conv)
             self.fpn_convs.append(fpn_conv)
 
+    def _checkpoint_layer(self, module, value):
+        if self.checkpoint_use_reentrant:
+            def replay(x):
+                # Reentrant checkpoint's first forward is under no_grad;
+                # its backward replay enables gradients.
+                context = _recompute_batchnorm_buffers(module) if torch.is_grad_enabled() else nullcontext()
+                with context:
+                    return module(x)
+            return checkpoint(replay, value, use_reentrant=True)
+        return checkpoint(module, value, use_reentrant=False,
+            context_fn=lambda: (nullcontext(), _recompute_batchnorm_buffers(module)))
+
     @auto_fp16()
     def forward(self, inputs):
         """Forward function.
@@ -85,8 +120,9 @@ class FPN3D(BaseModule):
         laterals = []
         for i, lateral_conv in enumerate(self.lateral_convs):
             if self.with_cp:
-                lateral_i = checkpoint(lateral_conv, inputs[i],
-                                       use_reentrant=self.checkpoint_use_reentrant)
+                # lateral_i = checkpoint(lateral_conv, inputs[i],
+                #                        use_reentrant=self.checkpoint_use_reentrant)
+                lateral_i = self._checkpoint_layer(lateral_conv, inputs[i])
             else:
                 lateral_i = lateral_conv(inputs[i])
             laterals.append(lateral_i)
@@ -104,8 +140,9 @@ class FPN3D(BaseModule):
         outs = []
         for i, fpn_conv in enumerate(self.fpn_convs):
             if self.with_cp:
-                out_i = checkpoint(fpn_conv, laterals[i],
-                                   use_reentrant=self.checkpoint_use_reentrant)
+                # out_i = checkpoint(fpn_conv, laterals[i],
+                #                    use_reentrant=self.checkpoint_use_reentrant)
+                out_i = self._checkpoint_layer(fpn_conv, laterals[i])
             else:
                 out_i = fpn_conv(laterals[i])
             outs.append(out_i)

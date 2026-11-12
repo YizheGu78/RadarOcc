@@ -131,6 +131,7 @@ def render(xyz, before, after, radius, path, title, zoom_m, resolution):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
+    geometry_module.add_coordinate_argument(p)
     p.add_argument('--repo-root', type=Path, default=ROOT)
     p.add_argument('--ann-dir', type=Path, default=Path('data/annotations'))
     p.add_argument('--splits', nargs='+', choices=['train', 'val', 'test'], default=['train', 'val', 'test'])
@@ -151,7 +152,7 @@ def main():
         return path if path.is_absolute() else args.repo_root/path
     output = rooted(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
-    geometry = geometry_module.RadarBinGeometry.from_file(rooted(args.bins))
+    geometry = geometry_module.geometry_from_args(args, rooted(args.bins))
     rows = []
     for split in args.splits:
         ann = rooted(args.ann_dir)/f'kradar_dict_{split}_official_temporal_doppler8.pkl'

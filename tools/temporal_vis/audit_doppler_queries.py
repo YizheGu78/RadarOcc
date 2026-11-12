@@ -239,6 +239,7 @@ def report_files(output, summary, all_summary, frames, args, manifest):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
+    va.geometry_module.add_coordinate_argument(p)
     p.add_argument('--scenes', nargs='+', default=['1', '2', '3', '15', '22'])
     p.add_argument('--ann-files', nargs='+', type=Path, default=[
         Path(f'data/annotations/kradar_dict_{s}_official_temporal_doppler8.pkl') for s in ('val', 'test')])
@@ -306,7 +307,7 @@ def main():
         tasks.append((scene, path, rows, positions))
     output.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault('MPLCONFIGDIR', str(output/'matplotlib_cache'))
-    geometry = va.RadarBinGeometry.from_file(rooted(args.bins))
+    geometry = va.geometry_module.geometry_from_args(args, rooted(args.bins))
     extrinsic = va.geometry_module.radar_to_lidar_default() if args.extrinsic is None else np.load(rooted(args.extrinsic), allow_pickle=False)
     extrinsic = va.geometry_module.validate_transform(extrinsic)
     signs = [1, -1] if args.doppler_sign == 'both' else [int(args.doppler_sign)]

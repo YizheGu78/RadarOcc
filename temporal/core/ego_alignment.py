@@ -3,6 +3,23 @@ from pathlib import Path
 
 import numpy as np
 
+LEGACY_COORDINATES = 'legacy_positive_v1'
+KRADAR_COORDINATES = 'kradar_physical_v2'
+COORDINATE_SIGNS = {LEGACY_COORDINATES: (1, 1), KRADAR_COORDINATES: (-1, -1)}
+
+
+def add_coordinate_argument(parser):
+    """Old commands remain reproducible; new experiment runners explicitly opt in."""
+    parser.add_argument('--coordinate-convention', choices=tuple(COORDINATE_SIGNS),
+                        default=LEGACY_COORDINATES)
+
+
+def geometry_from_args(args, bins_path=None):
+    return RadarBinGeometry.from_file(bins_path or args.bins,
+        coordinate_convention=getattr(args, 'coordinate_convention', LEGACY_COORDINATES),
+        azimuth_sign=getattr(args, 'azimuth_sign', None),
+        elevation_sign=getattr(args, 'elevation_sign', None))
+
 
 def validate_transform(matrix, name="transform"):
     matrix = np.asarray(matrix, dtype=np.float64)
@@ -33,7 +50,15 @@ class RadarBinGeometry:
     K-Radar MAT keys: arrRange, arrAzimuth, arrElevation (angles in degrees).
     Signs are explicit overrides for source angle-axis conventions.
     """
-    def __init__(self, range_m, azimuth_rad, elevation_rad, azimuth_sign=1, elevation_sign=1):
+    def __init__(self, range_m, azimuth_rad, elevation_rad, azimuth_sign=None, elevation_sign=None,
+                 coordinate_convention=LEGACY_COORDINATES):
+        if coordinate_convention not in COORDINATE_SIGNS:
+            raise ValueError('Unknown coordinate convention: '+str(coordinate_convention))
+        signs = COORDINATE_SIGNS[coordinate_convention]
+        azimuth_sign = signs[0] if azimuth_sign is None else azimuth_sign
+        elevation_sign = signs[1] if elevation_sign is None else elevation_sign
+        if coordinate_convention == KRADAR_COORDINATES and (azimuth_sign, elevation_sign) != signs:
+            raise ValueError('kradar_physical_v2 requires azimuth/elevation signs -1/-1')
         if azimuth_sign not in (-1, 1) or elevation_sign not in (-1, 1):
             raise ValueError("Angle signs must be -1 or +1")
         self.bins = [np.asarray(x, dtype=np.float64).reshape(-1) for x in
@@ -45,6 +70,9 @@ class RadarBinGeometry:
         if any(np.abs(x).max() > np.pi for x in self.bins[1:]):
             raise ValueError("Angle tables must be radians, not degrees")
         self.azimuth_sign, self.elevation_sign = azimuth_sign, elevation_sign
+        self.coordinate_convention = (KRADAR_COORDINATES if (azimuth_sign, elevation_sign) == (-1, -1)
+                                      else LEGACY_COORDINATES if (azimuth_sign, elevation_sign) == (1, 1)
+                                      else 'custom_signs')
 
     @classmethod
     def from_file(cls, path, **kwargs):

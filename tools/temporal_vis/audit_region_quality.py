@@ -22,6 +22,7 @@ from scipy.spatial import ConvexHull
 from tools.temporal_vis.benchmark_region_matching import (
     FrameData, gt_memberships, history_regions, label_regions, select_match)
 from tools.temporal_vis.audit_dynamic_objects import transform
+from temporal.core.ego_alignment import add_coordinate_argument
 
 GATES = {
     "A_original": ((0.5, 1.0, 1.5), (4.0, 6.0, 8.0)),
@@ -433,7 +434,8 @@ def execute(args):
     # A mismatch means the new audit results cannot be compared to the screenshot.
     regression = None
     expected_scenes = {"1", "2", "15", "22", "23", "55"}
-    if (included == expected_scenes and args.start_order == 80
+    if (getattr(args, 'coordinate_convention', 'legacy_positive_v1') == 'legacy_positive_v1'
+            and included == expected_scenes and args.start_order == 80
             and args.end_order == 200 and args.stride == 5
             and args.max_frames_per_scene == 0):
         reference = {"A_original": (234, 465), "B_y_only": (351, 465),
@@ -515,6 +517,7 @@ def execute(args):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
+    add_coordinate_argument(p)
     p.add_argument("--ann-files", nargs="+", required=True, type=Path)
     p.add_argument("--bbox-root", type=Path, default=Path("data/K-RadarOcc/train"))
     p.add_argument("--bins", type=Path, default=Path("data/K-Radar-official-meta/resources/info_arr.mat"))

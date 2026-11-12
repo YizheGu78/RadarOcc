@@ -405,6 +405,7 @@ def load_scene(root, ann_file, requested_scene, list_only=False):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    alignment.geometry_module.add_coordinate_argument(parser)
     parser.add_argument('--repo-root', type=Path, default=ROOT)
     parser.add_argument('--ann-file', type=Path, help='Explicit temporal PKL; omit to locate scene in full train/val/test PKLs')
     parser.add_argument('--list-scenes', action='store_true', help='List annotation scenes/order ranges and exit without loading radar/RGB')
@@ -414,8 +415,8 @@ def main():
     parser.add_argument('--end-order', type=int, default=200)
     parser.add_argument('--stride', type=int, default=5)
     parser.add_argument('--max-frames', type=int, default=0, help='0 means all selected orders')
-    parser.add_argument('--azimuth-sign', type=int, choices=(-1, 1), default=1)
-    parser.add_argument('--elevation-sign', type=int, choices=(-1, 1), default=1)
+    parser.add_argument('--azimuth-sign', type=int, choices=(-1, 1), default=None)
+    parser.add_argument('--elevation-sign', type=int, choices=(-1, 1), default=None)
     parser.add_argument('--xy-resolution', type=float, default=.5)
     parser.add_argument('--z-resolution', type=float, default=1.)
     parser.add_argument('--x-limits', type=float, nargs=2, default=[0., 85.])
@@ -518,7 +519,7 @@ def main():
     if args.projection_npy:
         projection = np.load(rooted(args.projection_npy), allow_pickle=False)
         project_points(np.zeros((0, 3)), projection)
-    geometry = alignment.RadarBinGeometry.from_file(bins, azimuth_sign=args.azimuth_sign, elevation_sign=args.elevation_sign)
+    geometry = alignment.geometry_module.geometry_from_args(args, bins)
     extrinsic = None
     if args.show_gt:
         extrinsic = (np.load(rooted(args.extrinsic), allow_pickle=False) if args.extrinsic

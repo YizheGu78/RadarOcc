@@ -57,7 +57,12 @@ class RadarOcc_small(BEVDepth):
         self.occ_encoder_neck = builder.build_neck(occ_encoder_neck)
         self.occ_fuser = builder.build_fusion_layer(occ_fuser) if occ_fuser is not None else None
         
-        self.azimuth_indices, self.elevation_indices, self.range_indices = self.init_param_for_inter()
+        # self.azimuth_indices, self.elevation_indices, self.range_indices = self.init_param_for_inter()
+        # Legacy interpolation constants are unused by the active projection.
+        # Keep them device-portable without changing checkpoint parameter keys.
+        for name, value in zip(('azimuth_indices', 'elevation_indices', 'range_indices'),
+                               self.init_param_for_inter()):
+            self.register_buffer(name, value, persistent=False)
 
         # DG-STF is optional.  Baseline configs leave temporal_cfg=None and
         # therefore execute the exact original single-frame path.
@@ -94,15 +99,21 @@ class RadarOcc_small(BEVDepth):
         azimuth_idx = torch.tensor(azimuth_idx, dtype=torch.float32)
         elevation_idx = torch.tensor(elevation_idx, dtype=torch.float32)
 
-        return azimuth_idx.cuda(),elevation_idx.cuda(),range_idx.cuda()
+        # return azimuth_idx.cuda(),elevation_idx.cuda(),range_idx.cuda()
+        return azimuth_idx, elevation_idx, range_idx
     
 
     def cartesian_to_spherical(self, x, y, z):
         # 避免 r=0，以及浮点误差使 z/r 超出 [-1, 1]
         r = torch.sqrt(x**2 + y**2 + z**2).clamp_min(1e-6)
-        theta = torch.atan2(y, x)
+        # Before projection-chain correction (kept for comparison):
+        # theta = torch.atan2(y, x)
+        # K-Radar original angle tables use the opposite azimuth/elevation
+        # signs to physical radar XYZ. Invert the official forward conversion.
+        theta = -torch.atan2(y, x)
         ratio = (z / r).clamp(min=-1.0, max=1.0)
-        phi = torch.asin(ratio)
+        # phi = torch.asin(ratio)
+        phi = -torch.asin(ratio)
         return r, theta, phi
 
     def get_reference_points_spherical(self,H=128, W=128, Z=14, bs=1, device='cpu',scale=4, dtype=torch.float,spherical_shape=[64,64,10]):
@@ -157,10 +168,27 @@ class RadarOcc_small(BEVDepth):
         # Thus add 0.5 in Range and 0.25 in Azimuth/Elevation before dividing
         # by the corresponding feature dimension. No VoxFormer code is changed.
         rs_index = ((rs / r_res) + 0.5) / range_shape
+        # Encoder indices are 2*A_raw+149 and 2*E_raw-9, then stride 4.
+        # A_raw = angle_deg+53; E_raw = angle_deg+18. For scale=2,
+        # these offsets are 63.75 and 6.75 feature cells before +0.5.
         thetas_index = ((thetas / theta_res) + (azi_shape // 2) + 0.25) / azi_shape
         phis_index = ((phis / phi_res) + (ele_shape // 2) + 0.25) / ele_shape
-        ref_3d_spherical = torch.stack([thetas_index,rs_index,phis_index],-1) #azi,range,ele
+        # ref_3d_spherical = torch.stack([thetas_index,rs_index,phis_index],-1) #azi,range,ele
+        # Storage is [A,R,E]; the CUDA sampler accepts [width,height,depth]
+        # = [R,A,E]. Equal A/R sizes must not hide the axis permutation.
+        ref_3d_spherical = torch.stack([rs_index, thetas_index, phis_index], -1)
         return ref_3d_spherical
+
+    @staticmethod
+    def project_spherical_residual(spherical, references, cart_shape):
+        """Sample [B,C,A,R,E] at physical Cartesian centres into [B,C,X,Y,Z]."""
+        batch, channels = spherical.shape[:2]
+        # PyTorch's 5D sampler expects [B,C,D,H,W], grid components [W,H,D].
+        source = spherical.permute(0, 1, 4, 2, 3).contiguous()  # [B,C,E,A,R]
+        grid = (2 * references - 1).reshape(1, *cart_shape, 3)
+        grid = grid.expand(batch, *cart_shape, 3)
+        return F.grid_sample(source, grid, mode='bilinear', padding_mode='zeros',
+                             align_corners=False).reshape(batch, channels, *cart_shape)
 
 
 
@@ -508,8 +536,12 @@ class RadarOcc_small(BEVDepth):
         
         pts_feats = pts_enc_feats['pts_feats']
         spherical_feat = pts_enc_feats['x']
-        h,w,z = [128,128,14]
-        spherical_pos_self= self.positional_encoding(torch.zeros((batch_size, h,w,z)).to(dtype).cuda()).to(dtype) 
+        h,w,z = [128,128,14]  # [A,R,E], distinct from Cartesian XYZ.
+        if tuple(spherical_feat.shape[2:]) != (h, w, z):
+            raise ValueError('Small projection requires spherical [A,R,E]=[128,128,14].')
+        # spherical_pos_self= self.positional_encoding(torch.zeros((batch_size, h,w,z)).to(dtype).cuda()).to(dtype)
+        spherical_mask = spherical_feat.new_zeros((batch_size, h, w, z), dtype=dtype)
+        spherical_pos_self = self.positional_encoding(spherical_mask).to(dtype)
         # 44,27
         vox_feats_flatten = spherical_feat.flatten(2) 
         vox_coords, ref_3d = self.get_ref_3d()
@@ -531,14 +563,25 @@ class RadarOcc_small(BEVDepth):
             self.time_stats['self_attn'].append(t1 - t0)
             t0 = time.time()
         # vox_feats_diff= vox_feats_diff.permute(0,2,1)
-        voxel_feat = vox_feats_diff.reshape((1,self.embed_dims,h,w,z))
-        residual = voxel_feat
+        # voxel_feat = vox_feats_diff.reshape((1,self.embed_dims,h,w,z))
+        # The encoder returns [B,N,C], not [B,C,N]. Preserve cell/channel IDs.
+        voxel_feat = vox_feats_diff.transpose(1, 2).reshape(batch_size, self.embed_dims, h, w, z)
+        # residual = voxel_feat  # Spherical cells cannot be added to Cartesian cells.
         voxel_queries = self.cart_voxel_emb.weight.to(dtype)
-        bev_pos_self_attn = self.positional_encoding(torch.zeros((batch_size, 128,128,14)).to(dtype).cuda()).to(dtype) 
-        spherical_pos= self.positional_encoding(torch.zeros((batch_size,  h,w,z)).to(dtype).cuda()).to(dtype) 
+        # bev_pos_self_attn = self.positional_encoding(torch.zeros((batch_size, 128,128,14)).to(dtype).cuda()).to(dtype)
+        # spherical_pos= self.positional_encoding(torch.zeros((batch_size, h,w,z)).to(dtype).cuda()).to(dtype)
+        cart_shape = (128, 128, 14)
+        cart_mask = spherical_feat.new_zeros((batch_size, *cart_shape), dtype=dtype)
+        bev_pos_self_attn = self.positional_encoding(cart_mask).to(dtype)
+        spherical_pos = self.positional_encoding(spherical_mask).to(dtype)
         voxel_queries = voxel_queries.permute(1,0)
-        voxel_queries = voxel_queries.unsqueeze(0)
-        sph_ref_3d = self.get_reference_points_spherical(device=spherical_feat.device,spherical_shape=[ h,w,z],scale=2)
+        # voxel_queries = voxel_queries.unsqueeze(0)
+        voxel_queries = voxel_queries.unsqueeze(0).expand(batch_size, -1, -1)
+        # sph_ref_3d = self.get_reference_points_spherical(device=spherical_feat.device,spherical_shape=[h,w,z],scale=2)
+        sph_ref_3d = self.get_reference_points_spherical(
+            device=spherical_feat.device, dtype=voxel_feat.dtype,
+            spherical_shape=[h, w, z], scale=2)
+        residual = self.project_spherical_residual(voxel_feat, sph_ref_3d, cart_shape)
         vox_feats_diff = self.transformer.get_cart_features(
             voxel_queries,
             voxel_feat, 
@@ -555,9 +598,11 @@ class RadarOcc_small(BEVDepth):
         )
 
 
-        vox_feats_diff =vox_feats_diff.reshape(128, 128, 14, self.embed_dims)
-        voxel_feat = vox_feats_diff.permute(3,0,1,2)
-        voxel_feat = voxel_feat.unsqueeze(0) + residual
+        # vox_feats_diff = vox_feats_diff.reshape(128, 128, 14, self.embed_dims)
+        # voxel_feat = vox_feats_diff.permute(3,0,1,2)
+        # voxel_feat = voxel_feat.unsqueeze(0) + residual
+        voxel_feat = vox_feats_diff.transpose(1, 2).reshape(batch_size, self.embed_dims, *cart_shape)
+        voxel_feat = voxel_feat + residual  # Both branches now refer to the same XYZ cells.
         
 
         # voxel_queries = self.cart_voxel_emb.weight.to(dtype)
@@ -856,7 +901,8 @@ class RadarOcc_small(BEVDepth):
         pred_c = output['output_voxels'][0]
         target_voxels = gt_occ
         B, C, H, W, D = pred_c.shape
-        ratio = target_voxels.shape[2] // H
+        # ratio = target_voxels.shape[2] // H  # Used GT Y for prediction X.
+        ratio = target_voxels.shape[1] // H
         if ratio != 1:
             target_voxels = target_voxels.reshape(B, H, ratio, W, ratio, D, ratio).permute(0,1,3,5,2,4,6).reshape(B, H, W, D, ratio**3)
             empty_mask = target_voxels.sum(-1) == self.empty_idx
@@ -919,7 +965,10 @@ class RadarOcc_small(BEVDepth):
         if eval_type == 'SC':
             # 0 1 split
 
-            gt[gt != self.empty_idx] = 1
+            # gt[gt != self.empty_idx] = 1
+            # Keep ignored GT=255 out of the near-range histograms as well.
+            # The global histogram already uses noise_mask; the ROI ones do not.
+            gt[(gt != self.empty_idx) & noise_mask] = 1
             pred[pred != self.empty_idx] = 1
 
             range2=  fast_hist(pred[:32,48:80,:], gt[:32,48:80,:], max_label=2)

@@ -18,10 +18,11 @@ def main():
     parser.add_argument('--method', choices=['centerformer', 'rodnet'], required=True)
     parser.add_argument('--device', default='cpu')
     parser.add_argument('--index', type=int, default=10)
+    parser.add_argument('--config', help='Optional versioned experiment config')
     args = parser.parse_args()
     torch.set_num_threads(4)
     torch.manual_seed(42)
-    cfg = Config.fromfile('temporal/'+args.method+'/config_p0.py')
+    cfg = Config.fromfile(args.config or 'temporal/'+args.method+'/config_p0.py')
     importlib.import_module(cfg.plugin_dir.rstrip('/').replace('/', '.'))
     from projects.occ_plugin.occupancy.detectors.radarocc_self_small import RadarOcc_small
     from temporal.adapters import P1TopKAdapter

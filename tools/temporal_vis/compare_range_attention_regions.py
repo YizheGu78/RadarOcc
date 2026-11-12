@@ -245,6 +245,7 @@ def render_comparison(results, xyz, scores, output, title, gt=None, rgb_path=Non
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    alignment.geometry_module.add_coordinate_argument(p)
     p.add_argument('--config', type=Path, default=Path('projects/configs/baselines/RadarOcc_Small_5060_true_fp32.py'))
     p.add_argument('--checkpoint', type=Path, required=True)
     p.add_argument('--ann-file', type=Path, help='Temporal split PKL; auto-locate if omitted')
@@ -290,7 +291,7 @@ def main():
         raise FileExistsError('Choose an empty --output-dir to avoid mixing results')
     args.output_dir.mkdir(parents=True, exist_ok=True)
     model = load_frozen_range_module(resolved(args.config), resolved(args.checkpoint))
-    geometry = alignment.RadarBinGeometry.from_file(resolved(args.bins))
+    geometry = alignment.geometry_module.geometry_from_args(args, resolved(args.bins))
     cfg = RegionConfig(seed_percentile=97, seed_mad=3, merge_space='xy',
                        xy_box_gap=(.5,.5), box_size=(6,3,3), max_box_size=(20,6,6))
     extrinsic = alignment.geometry_module.radar_to_lidar_default()

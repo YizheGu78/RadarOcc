@@ -15,7 +15,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from temporal.core.query_budget import TemporalQueryBudget, causal_ego_velocity
-from temporal.core.ego_alignment import RadarBinGeometry, radar_to_lidar_default
+from temporal.core.ego_alignment import RadarBinGeometry, radar_to_lidar_default, add_coordinate_argument
 from tools.temporal_vis import vis_p1_reflection_regions as vis
 from tools.temporal_vis.audit_doppler_queries import (rooted, read_frame, gt_masks_for_frame,
                                                      evaluate_mask, write_csv)
@@ -73,6 +73,7 @@ def render(xyz, state, masks, gt, path, title):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
+    add_coordinate_argument(p)
     p.add_argument('--output-dir', type=Path, default=Path('outputs/query_budget/five_scenes_64_32'))
     p.add_argument('--scenes', nargs='+', default=['1', '2', '3', '15', '22'])
     p.add_argument('--start-order', type=int, default=80)
@@ -96,7 +97,7 @@ def main():
     hashes = source_hashes()
     renderer = None if args.no_plots else ProcessPoolExecutor(args.plot_workers, mp_context=get_context('spawn'))
     pending = []
-    geometry = RadarBinGeometry.from_file(ROOT/'data/K-Radar-official-meta/resources/info_arr.mat')
+    geometry = RadarBinGeometry.from_file(ROOT/'data/K-Radar-official-meta/resources/info_arr.mat', coordinate_convention=args.coordinate_convention)
     extrinsic = radar_to_lidar_default()
     selectors = {k: TemporalQueryBudget(per_range=k, **POLICY) for k in (64, 32)}
     inventory = [(rooted(path), vis.annotation_scenes(rooted(path))) for path in args.ann_files]

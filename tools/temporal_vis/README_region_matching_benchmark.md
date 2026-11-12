@@ -1,3 +1,5 @@
+> 坐标修正版请使用仓库根目录的 `temporal/experiments_v2/EXPERIMENTS.md`。本页旧命令保留 legacy 坐标以便复现；支持的离线工具需显式传入 `--coordinate-convention kradar_physical_v2`。旧权重/缓存不能作为 v2 训练产物。
+
 # P2 Region Matching weight benchmark (offline; no Learned KNN)
 
 This experiment evaluates **region-to-region** matches before adding interpolation or Temporal Cross-Attention. It uses the same geometry-only reflection proposal algorithm as `vis_p1_reflection_regions.py`, with no model, Ranker, checkpoint, or GPU dependency.

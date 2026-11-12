@@ -77,7 +77,7 @@ class Dataset:
         self.ext = (np.load(args.extrinsic, allow_pickle=False) if args.extrinsic
                     else va.geometry_module.radar_to_lidar_default())
         va.geometry_module.validate_transform(self.ext, 'radar_to_lidar')
-        self.geometry = va.RadarBinGeometry.from_file(args.bins)
+        self.geometry = va.geometry_module.geometry_from_args(args)
 
     @lru_cache(maxsize=32)
     def annotation(self, order):
@@ -363,6 +363,7 @@ def occupancy(args, data):
 
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
+    va.geometry_module.add_coordinate_argument(p)
     p.add_argument('experiment', choices=['match','box','occupancy'])
     p.add_argument('--ann-file', type=Path, default=Path('data/annotations/kradar_dict_test_official_temporal_doppler8.pkl'))
     p.add_argument('--bbox-root', type=Path, default=Path('data/K-RadarOcc/train'))

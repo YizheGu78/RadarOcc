@@ -1,3 +1,5 @@
+> 坐标修正版请使用仓库根目录的 `temporal/experiments_v2/EXPERIMENTS.md`。本页旧命令保留 legacy 坐标以便复现；支持的离线工具需显式传入 `--coordinate-convention kradar_physical_v2`。旧权重/缓存不能作为 v2 训练产物。
+
 # 第一阶段：等体积方向性方框对比
 
 只运行离线 Token 搜索，不调用 RadarOcc，不训练，不使用 Doppler 或 Attention，也不运行球形 KNN。

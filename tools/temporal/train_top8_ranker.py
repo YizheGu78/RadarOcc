@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT))
 from temporal.core.box_candidates import box_candidates
 from temporal.core.learned_topk import (DEFAULT_POLICY, FORMAT, PairRanker,
     load_ranker, masked_topk, ranking_loss, save_ranker)
+from temporal.core.ego_alignment import add_coordinate_argument, LEGACY_COORDINATES
 from tools.temporal_vis.audit_dynamic_objects import Dataset, memberships, transform
 from tools.temporal_vis import directional_box_matching as boxes
 from tools.temporal_vis import vis_alignment as va
@@ -90,7 +91,7 @@ def prepare(args):
             bins=args.bins, extrinsic=args.extrinsic, ego_mask_radius=0.,
             start_order=args.start_order, end_order=args.end_order, stride=args.stride,
             max_frames=args.max_frames_per_scene or sys.maxsize, history_mode='dataset',
-            gaps=[1, 2, 3])
+            gaps=[1, 2, 3], coordinate_convention=args.coordinate_convention)
         data = RankerDataset(cfg)
 
         @lru_cache(maxsize=4)
@@ -196,6 +197,7 @@ def prepare(args):
         raise ValueError('No paired queries; check annotations, scenes, poses and bbox paths')
     write_json(args.output_dir/'duplicate_ids.json', list(duplicate_frames.values()))
     write_json(args.output_dir/'manifest.json', dict(format=FORMAT, split=args.split,
+        coordinate_convention=args.coordinate_convention,
         duplicate_id_policy='exclude_all_ambiguous_boxes_from_supervision_v1',
         duplicate_id_frames=len(duplicate_frames),
         policy=DEFAULT_POLICY, annotation_sha256=raw_hash, bins_sha256=digest_file(args.bins),
@@ -257,6 +259,8 @@ def ensure_disjoint(train, val):
     for key in ('bins_sha256', 'extrinsic_sha256'):
         if train.manifest[key] != val.manifest[key]:
             raise ValueError(f'Train/val geometry mismatch: {key}')
+    if train.manifest.get('coordinate_convention', LEGACY_COORDINATES) != val.manifest.get('coordinate_convention', LEGACY_COORDINATES):
+        raise ValueError('Train/val coordinate convention mismatch')
 
 
 def on_device(batch, device):
@@ -349,6 +353,7 @@ def train(args):
         metric = sum(row['success'] for row in scored)/denominator
         write_metrics(args.work_dir/f'val_epoch_{epoch:03d}.csv', rows)
         metadata = dict(epoch=epoch, val_recall_at8=metric,
+            coordinate_convention=training.manifest.get('coordinate_convention', LEGACY_COORDINATES),
             train_manifest_sha256=digest_file(args.train_cache/'manifest.json'),
             val_manifest_sha256=digest_file(args.val_cache/'manifest.json'))
         save_ranker(args.work_dir/'last.pth', model, **metadata)
@@ -363,6 +368,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
     cache = commands.add_parser('prepare')
+    add_coordinate_argument(cache)
     cache.add_argument('--ann-file', type=Path, required=True)
     cache.add_argument('--bbox-root', type=Path, default=Path('data/K-RadarOcc/train'))
     cache.add_argument('--bins', type=Path, default=Path('data/K-Radar-official-meta/resources/info_arr.mat'))
@@ -411,7 +417,8 @@ def main():
         train(args)
     else:
         data = PairCache(args.cache)
-        model, _ = load_ranker(args.checkpoint, DEFAULT_POLICY)
+        model, _ = load_ranker(args.checkpoint, DEFAULT_POLICY,
+            data.manifest.get('coordinate_convention', LEGACY_COORDINATES))
         model.to(args.device)
         rows = evaluate(model, DataLoader(data, batch_size=args.batch_size, num_workers=0), args.device)
         args.output.parent.mkdir(parents=True, exist_ok=True)

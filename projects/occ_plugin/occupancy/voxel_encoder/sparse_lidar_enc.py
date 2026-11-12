@@ -550,11 +550,25 @@ class RadarEncV8small(nn.Module):
         coors_padded = torch.cat([coors[:,0].unsqueeze(-1),ele_ind.unsqueeze(-1),range_ind.unsqueeze(-1),azi_ind.unsqueeze(-1)],-1)
 
         coors_padded = coors_padded.int()  
+        # Before projection-chain correction (kept for comparison):
+        # sparse_rdr_cube = torch.cat((ele_ind.float().unsqueeze(-1),
+        #                         range_ind.float().unsqueeze(-1),
+        #                         azi_ind.float().unsqueeze(-1),
+        #                         voxel_features), dim=-1).to(torch.float32).cuda()
+        # input_sp_tensor = spconv.SparseConvTensor(sparse_rdr_cube.to(torch.float32), coors_padded, self.sparse_shape_xyz[::-1], batch_size)
         sparse_rdr_cube = torch.cat((ele_ind.float().unsqueeze(-1),
-                                range_ind.float().unsqueeze(-1),
-                                azi_ind.float().unsqueeze(-1),
-                                voxel_features), dim=-1).to(torch.float32).cuda()
-        input_sp_tensor = spconv.SparseConvTensor(sparse_rdr_cube.to(torch.float32), coors_padded, self.sparse_shape_xyz[::-1], batch_size)
+                                    range_ind.float().unsqueeze(-1),
+                                    azi_ind.float().unsqueeze(-1),
+                                    voxel_features), dim=-1).to(torch.float32)
+        # Keep the existing [E,R,A]=[56,512,512] lattice and its 14 output
+        # elevation cells. E_raw=0..4/33..36 lies outside it. Crop, never clamp.
+        # This MUST follow range_attn: it consumes all 175*K input tokens.
+        limits = coors_padded.new_tensor([batch_size, *self.sparse_shape_xyz[::-1]])
+        valid = ((coors_padded >= 0) & (coors_padded < limits)).all(dim=1)
+        coors_padded = coors_padded[valid]
+        sparse_rdr_cube = sparse_rdr_cube[valid].contiguous()
+        input_sp_tensor = spconv.SparseConvTensor(
+            sparse_rdr_cube, coors_padded, self.sparse_shape_xyz[::-1], batch_size)
 
         x = self.conv_input(input_sp_tensor)
         x_conv1 = self.conv1(x)

@@ -312,7 +312,8 @@ class OccHead(nn.Module):
         #     loss_dict['loss_voxel_select_{}'.format(tag)] =  self.loss_voxel_geo_scal_weight * geo_scal_loss(output_voxels, target_voxels, ignore_index=255, non_empty_idx=self.empty_idx)
         # # resize gt                       
         B, C, H, W, D = output_voxels.shape
-        ratio = target_voxels.shape[2] // H
+        # ratio = target_voxels.shape[2] // H  # Used GT Y for prediction X.
+        ratio = target_voxels.shape[1] // H
         if ratio != 1:
             target_voxels = target_voxels.reshape(B, H, ratio, W, ratio, D, ratio).permute(0,1,3,5,2,4,6).reshape(B, H, W, D, ratio**3)
             empty_mask = target_voxels.sum(-1) == self.empty_idx

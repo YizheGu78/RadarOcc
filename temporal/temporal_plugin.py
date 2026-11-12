@@ -58,8 +58,9 @@ class TemporalPlugin(nn.Module):
         if self.alignment_cfg:
             self.geometry = RadarBinGeometry.from_file(
                 self.alignment_cfg['bins_path'],
-                azimuth_sign=self.alignment_cfg.get('azimuth_sign', 1),
-                elevation_sign=self.alignment_cfg.get('elevation_sign', 1),
+                azimuth_sign=self.alignment_cfg.get('azimuth_sign'),
+                elevation_sign=self.alignment_cfg.get('elevation_sign'),
+                coordinate_convention=self.alignment_cfg.get('coordinate_convention', 'legacy_positive_v1'),
             )
         debug = dict(debug or {})
         if self.power_mask_enabled and self.geometry is None:
@@ -75,7 +76,10 @@ class TemporalPlugin(nn.Module):
         if self.mode == 'ego_attention':
             if self.geometry is None:
                 raise ValueError('ego_attention requires alignment.bins_path')
-            self.fusion = LocalTemporalAttention(**dict(attention or {}))
+            options = dict(attention or {})
+            if options.get('selection') is not None and self.geometry.coordinate_convention == 'kradar_physical_v2':
+                options['selection'] = dict(options['selection'], coordinate_convention='kradar_physical_v2')
+            self.fusion = LocalTemporalAttention(**options)
         elif self.mode == 'ra_adta':
             if self.geometry is None:
                 raise ValueError('ra_adta requires alignment.bins_path')

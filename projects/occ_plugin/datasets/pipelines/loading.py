@@ -145,7 +145,8 @@ class LoadOccupancy(object):
         pcd_label = pcd[..., -1:]
         pcd_label[pcd_label==0] = 255
         if self.simply_label:
-            pcd_label[pcd_label>=3] = 2 #only 0 empty, 1 obstcale, 2 object
+            # pcd_label[pcd_label>=3] = 2 # Also converted ignored 255 to foreground.
+            pcd_label[(pcd_label>=3) & (pcd_label!=255)] = 2
         pcd_np_cor = self.voxel2world(pcd[..., [2,1,0]] + 0.5)  # x y z
         untransformed_occ = copy.deepcopy(pcd_np_cor)  # N 4
         # bevdet augmentation

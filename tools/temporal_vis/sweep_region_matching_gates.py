@@ -188,6 +188,10 @@ def write_summary(output, report, metrics):
         'true_pair_diagnostics.csv：同 ID 历史区域的最小 Y 差与最小 XY 距离（可能来自不同历史候选）。',
         'report.json：参考配置、选参结果、限制说明及全段探索性最优结果。', '']
     (output/'summary.md').write_text('\n'.join(lines))
+    if report.get('config', {}).get('coordinate_convention') == 'kradar_physical_v2':
+        path = output/'summary.md'
+        text = path.read_text().replace('Scene 3', '参考训练场景')
+        path.write_text('> 使用参考报告的 kradar_physical_v2 坐标与训练场景；未继承旧 scene3 门限结论。\n\n'+text)
     # A static research figure, separate from the benchmark artifacts.
     try:
         import matplotlib

@@ -79,11 +79,8 @@ def render(output, report):
         '各场景均使用 order 80–200、stride 5；所有区域提取和 GT 归属条件保持参考报告设置。', '',
         '本报告的 recommended 是进入验证前固定的 scene 3 方案，不表示验证后仍应无条件采用。', '',
         '## 本次结果的含义', '',
-        '放宽 Y 的收益在六个外部场景上得到支持。中心距离一并扩大虽然进一步增加召回，'
-        '但也增加未知身份预测；在本次数据上，y_only 的保守 F1 略优于 recommended。'
-        '优先平衡方案可保留原中心距离 4/6/8 m，仅改 Y 为 4/5/3 m；'
-        '若优先召回，再采用中心距离 4/12/16 m。该取舍是查看本次验证结果后的判断，'
-        '不能再把这些场景称为后续选参的未见测试集。', '',
+        '本报告只展示预先冻结配置在下表场景上的实际指标；不预设放宽门限是否有收益。'
+        '如果据此再次选参，这些场景就不能继续充当该选择的未见测试集。', '',
         '保守 P = correct / predicted；未知历史身份预测也计入分母，'
         '不表示它们已被证实为错误。保守 F1 = 2*correct/(predicted+has_true_history)。', '',
         '## 各场景结果（合并 t-1/t-2/t-3）', '',
@@ -124,6 +121,9 @@ def render(output, report):
         '  --workers 2 \\',
         '  --output-dir outputs/region_matching_benchmark/cross_scene_validation_new', '```']
     (output/'summary.md').write_text('\n'.join(lines)+'\n')
+    if report['config'].get('coordinate_convention') == 'kradar_physical_v2':
+        path = output/'summary.md'
+        path.write_text(path.read_text().replace('scene 3', '参考训练场景').replace('六个外部场景', '本次验证场景'))
     try:
         import matplotlib
         matplotlib.use('Agg')

@@ -180,13 +180,15 @@ def lovasz_softmax_flat(probas, labels, classes='present'):
     """
     if probas.numel() == 0:
         # only void pixels, the gradients should be 0
-        return probas * 0.
+        # return probas * 0.  # Empty vector -> mean() becomes NaN downstream.
+        return probas.sum() * 0.
     C = probas.size(1)
     losses = []
     class_to_sum = list(range(C)) if classes in ['all', 'present'] else classes
     for c in class_to_sum:
         fg = (labels == c).float() # foreground for class c
-        if (classes is 'present' and fg.sum() == 0):
+        # if (classes is 'present' and fg.sum() == 0):
+        if (classes == 'present' and fg.sum() == 0):
             continue
         if C == 1:
             if len(classes) > 1:
@@ -227,7 +229,8 @@ def flatten_probas(probas, labels, ignore=None):
     if ignore is None:
         return probas, labels
     valid = (labels != ignore)
-    vprobas = probas[valid.nonzero().squeeze()]
+    # vprobas = probas[valid.nonzero().squeeze()]  # One valid voxel lost its P axis.
+    vprobas = probas[valid]
     vlabels = labels[valid]
     return vprobas, vlabels
 

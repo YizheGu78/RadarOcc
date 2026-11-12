@@ -28,12 +28,14 @@ def scatter_field(features, coords, shape):
     return values.T.reshape(1, features.shape[-1], r, a, e), (count > 0).to(features).reshape(1, 1, r, a, e)
 
 
-def physical_grid(xyz, bins):
+def physical_grid(xyz, bins, azimuth_sign=1, elevation_sign=1):
     """Differentiable fractional indices on actual monotonic bins; grid tuple E,A,R."""
     radius = xyz.square().sum(-1).clamp_min(1e-12).sqrt()
     horizontal = xyz[..., :2].square().sum(-1).clamp_min(1e-12).sqrt()
-    spherical = (radius, torch.atan2(xyz[..., 1], xyz[..., 0]+1e-12),
-                 torch.atan2(xyz[..., 2], horizontal))
+    # Invert signed physical angles into the ORIGINAL ascending tensor tables.
+    # Do not reverse the descriptor tensor or its integer R/A/E indices.
+    spherical = (radius, torch.atan2(xyz[..., 1], xyz[..., 0]+1e-12)*azimuth_sign,
+                 torch.atan2(xyz[..., 2], horizontal)*elevation_sign)
     indices, valid = [], torch.isfinite(xyz).all(-1) & (radius > 1e-6)
     for value, table in zip(spherical, bins):
         hi = torch.searchsorted(table, value.contiguous()).clamp(1, len(table)-1)
@@ -44,8 +46,9 @@ def physical_grid(xyz, bins):
     return torch.stack(indices[::-1], -1), valid
 
 
-def masked_interpolate(field, observation, xyz, bins, min_weight=1e-4):
-    grid, inside = physical_grid(xyz, bins)
+def masked_interpolate(field, observation, xyz, bins, min_weight=1e-4,
+                       azimuth_sign=1, elevation_sign=1):
+    grid, inside = physical_grid(xyz, bins, azimuth_sign, elevation_sign)
     shape = xyz.shape[:-1]
     grid = grid.reshape(1, -1, 1, 1, 3)
     numerator = F.grid_sample(field, grid, mode='bilinear', padding_mode='zeros', align_corners=False)
@@ -74,7 +77,8 @@ def map_coordinates(points, current, history, mode, alpha=None, beta=None, sampl
 
 class BoxZP0Fusion(nn.Module):
     def __init__(self, bins, mode='Z1', dim=64, heads=4, samples=8, chunk_size=2048,
-                 lambda_scale=.001, lambda_shift=.001, min_interp_weight=1e-4, enabled=True):
+                 lambda_scale=.001, lambda_shift=.001, min_interp_weight=1e-4, enabled=True,
+                 coordinate_convention='legacy_positive_v1'):
         super().__init__()
         if mode not in ('Z0', 'Z1', 'Z2', 'Z3') or dim % heads or min(samples, chunk_size) < 1:
             raise ValueError('Invalid Z ablation settings')
@@ -82,6 +86,9 @@ class BoxZP0Fusion(nn.Module):
         self.samples, self.chunk_size, self.enabled = samples, chunk_size, enabled
         self.lambda_scale, self.lambda_shift = lambda_scale, lambda_shift
         self.min_interp_weight = min_interp_weight
+        from temporal.core.ego_alignment import COORDINATE_SIGNS
+        self.azimuth_sign, self.elevation_sign = COORDINATE_SIGNS[coordinate_convention]
+        self.coordinate_convention = coordinate_convention
         for name, table in zip(('range_bins', 'azimuth_bins', 'elevation_bins'), bins):
             table = torch.as_tensor(table, dtype=torch.float32)
             if len(table) < 2 or not torch.isfinite(table).all() or not (table[1:] > table[:-1]).all():
@@ -107,6 +114,7 @@ class BoxZP0Fusion(nn.Module):
 
     def xyz(self, indices):
         radius, az, el = (table[indices[:, i]] for i, table in enumerate(self.bins))
+        az, el = az*self.azimuth_sign, el*self.elevation_sign
         return torch.stack((radius*el.cos()*az.cos(), radius*el.cos()*az.sin(), radius*el.sin()), -1)
 
     def pair_parameters(self, current, history):
@@ -162,7 +170,8 @@ class BoxZP0Fusion(nn.Module):
                 mapped = mapped if self.mode == 'Z0' else mapped[:, None]
                 inside = ((mapped-hb[:, None, :3]).abs() <= hb[:, None, 3:]/2+1e-6).all(-1)
                 local = mapped @ inverse[j, :3, :3].T+inverse[j, :3, 3]
-                values, valid = masked_interpolate(*grids[j], local, self.bins, self.min_interp_weight)
+                values, valid = masked_interpolate(*grids[j], local, self.bins, self.min_interp_weight,
+                                                   self.azimuth_sign, self.elevation_sign)
                 exists = matched[box_ids, j, None]
                 valid = valid & inside & exists
                 attempted += int(exists.expand_as(valid).sum()); valid_samples += int(valid.sum())

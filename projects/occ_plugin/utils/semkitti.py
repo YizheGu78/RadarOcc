@@ -73,6 +73,8 @@ def geo_scal_loss(pred, ssc_target, ignore_index=255, non_empty_idx=0):
 
     # Remove unknown voxels
     mask = ssc_target != ignore_index
+    if not mask.any():
+        return pred.sum() * 0.0  # All ignored: no supervision, retain autograd.
     nonempty_target = ssc_target != non_empty_idx
     nonempty_target = nonempty_target[mask].float()
     nonempty_probs = nonempty_probs[mask]
@@ -87,11 +89,20 @@ def geo_scal_loss(pred, ssc_target, ignore_index=255, non_empty_idx=0):
     precision = precision.clamp(0.0, 1.0)
     recall = recall.clamp(0.0, 1.0)
     spec = spec.clamp(0.0, 1.0)
-    return (
-        F.binary_cross_entropy(precision, torch.ones_like(precision))
-        + F.binary_cross_entropy(recall, torch.ones_like(recall))
-        + F.binary_cross_entropy(spec, torch.ones_like(spec))
-    )
+    # Before audit, absent occupied/free targets added constant BCE(0,1)
+    # penalties. They have no meaningful recall/specificity target.
+    # return (
+    #     F.binary_cross_entropy(precision, torch.ones_like(precision))
+    #     + F.binary_cross_entropy(recall, torch.ones_like(recall))
+    #     + F.binary_cross_entropy(spec, torch.ones_like(spec))
+    # )
+    loss = pred.sum() * 0.0
+    if nonempty_target.sum() > 0:
+        loss = loss + F.binary_cross_entropy(precision, torch.ones_like(precision))
+        loss = loss + F.binary_cross_entropy(recall, torch.ones_like(recall))
+    if (1 - nonempty_target).sum() > 0:
+        loss = loss + F.binary_cross_entropy(spec, torch.ones_like(spec))
+    return loss
 
 
 def sem_scal_loss(pred, ssc_target, ignore_index=255):
@@ -100,6 +111,8 @@ def sem_scal_loss(pred, ssc_target, ignore_index=255):
     loss = 0
     count = 0
     mask = ssc_target != ignore_index
+    if not mask.any():
+        return pred.sum() * 0.0
     n_classes = pred.shape[1]
     for i in range(0, n_classes):
 
@@ -148,6 +161,9 @@ def CE_ssc_loss(pred, target, class_weights=None, ignore_index=255):
     """
     :param: prediction: the predicted tensor, must be [BS, C, ...]
     """
+    if not (target != ignore_index).any():
+        # CrossEntropyLoss(mean) otherwise returns NaN for zero valid targets.
+        return pred.sum() * 0.0
     criterion = nn.CrossEntropyLoss(
         weight=class_weights, ignore_index=ignore_index, reduction="mean"
     )

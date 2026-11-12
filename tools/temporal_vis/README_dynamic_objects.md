@@ -1,3 +1,5 @@
+> 坐标修正版请使用仓库根目录的 `temporal/experiments_v2/EXPERIMENTS.md`。本页旧命令保留 legacy 坐标以便复现；支持的离线工具需显式传入 `--coordinate-convention kradar_physical_v2`。旧权重/缓存不能作为 v2 训练产物。
+
 # 动态目标 KNN 与 Occupancy 诊断
 
 `audit_dynamic_objects.py` 包含两项实验，不训练模型，不需要 PyTorch/CUDA。

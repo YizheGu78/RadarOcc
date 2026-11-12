@@ -11,7 +11,10 @@
 # ---------------------------------------------
 
 from .multi_scale_deformable_attn_3D_custom_function import MultiScaleDeformableAttn3DCustomFunction_fp16, MultiScaleDeformableAttn3DCustomFunction_fp32
-from mmcv.ops.multi_scale_deform_attn import multi_scale_deformable_attn_pytorch
+# from mmcv.ops.multi_scale_deform_attn import multi_scale_deformable_attn_pytorch
+# MMCV fallback is 2D; retain the call-site name with a true 3D implementation.
+from .multi_scale_deformable_attn_3D_custom_function import (
+    multi_scale_deformable_attn_3d_pytorch as multi_scale_deformable_attn_pytorch)
 import warnings
 import torch
 import torch.nn as nn
@@ -231,7 +234,16 @@ class DeformCrossAttention3DCustom(BaseModule):
         sampling_offsets = sampling_offsets.permute(0, 3, 1, 2, 4, 5, 6)\
             .reshape(bs*self.num_bev_queue, num_query, self.num_heads, self.num_levels, self.num_points, 3)
 
-        assert reference_points.shape[-1] == 3
+        # assert reference_points.shape[-1] == 3
+        # Reject a duplicated 2B reference batch rather than silently letting
+        # the CUDA kernel consume only B batches from it.
+        expected_reference_shape = (bs * self.num_bev_queue, num_query, self.num_levels, 3)
+        if tuple(reference_points.shape) != expected_reference_shape:
+            raise ValueError(
+                f'Cross-attention references must be {expected_reference_shape}, '
+                f'got {tuple(reference_points.shape)}.')
+        if value.shape[0] != reference_points.shape[0]:
+            raise ValueError('Cross-attention value and reference batch sizes differ.')
         offset_normalizer = torch.stack(
             [spatial_shapes[..., 1], spatial_shapes[..., 0],spatial_shapes[..., 2]], -1)#hwz
         sampling_locations = reference_points[:, :, None, :, None, :] \

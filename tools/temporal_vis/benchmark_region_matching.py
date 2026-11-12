@@ -195,7 +195,7 @@ class FrameData:
         self.args = args
         self.diagnostics = {}
         self.region_diagnostics = {}
-        self.geometry = va.RadarBinGeometry.from_file(args.bins)
+        self.geometry = va.geometry_module.geometry_from_args(args)
         self.extrinsic = (np.load(args.extrinsic, allow_pickle=False) if args.extrinsic
                           else va.geometry_module.radar_to_lidar_default())
         va.geometry_module.validate_transform(self.extrinsic, 'radar_to_lidar')
@@ -405,6 +405,7 @@ def evaluate(args):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
+    va.geometry_module.add_coordinate_argument(p)
     p.add_argument('--ann-file', type=Path, required=True, help='Full temporal split annotation PKL')
     p.add_argument('--bbox-root', type=Path, default=Path('data/K-RadarOcc/train'))
     p.add_argument('--bins', type=Path, default=Path('data/K-Radar-official-meta/resources/info_arr.mat'))
