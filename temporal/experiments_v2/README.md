@@ -4,6 +4,16 @@
 它保留原V00～V11、P01～P07、T00～T14编号，新增V12/V13/V14公共检查与T15无对齐memory对照。
 每项写明目的、操作、前置、与谁比较、GT用途、结果位置，以及训练/验证/恢复命令。
 
+所有模型训练结束后，运行 `bash tools/temporal/run_all_fusion_ablation.sh`，
+按方案串行验证同一最佳权重的融合开启/旁路两臂，覆盖T01～T15，包括CenterFormer和RODNet TDC。
+T00独立单帧只验证一次，用于区分推理融合收益与整个训练方案的收益。
+默认使用各自`best_SSC_mean*.pth`，缺少权重的方案明确跳过，不回退到latest。
+可先加`--dry-run`核对清单；用`--ids T00 T01 T03 T10 T11`只跑指定方案；
+有多个best时用`--checkpoint T10=/绝对路径/指定权重.pth`指定。
+结果在`outputs/geometry_v2/projection_fixed_20261112/fusion_on_off/REPORT.md`与`summary.csv`。
+同一命令再次执行会复用已完成、权重/验证标注/源码指纹一致的两臂；变化后需用`--output-dir`另建输出目录。
+T14旁路仍保留近场power屏蔽；所有方案严格加载全部权重，从checkpoint保存配置构建，使用统一val20，且不执行训练更新。
+
 本轮沿用之前的**20%连续窗口、15 epochs、seed42、AdamW 3e-4、scratch**协议。
 “从头”表示不加载旧occupancy权重，不表示改成完整训练集。
 新单帧RadarOcc是T00，其余T模型均使用同一个修正后的Small主干；所有T模型都需要重训。

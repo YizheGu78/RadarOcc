@@ -2,6 +2,8 @@
 
 本表在原V/P/T安排表上更新，保留V00～V11、P01～P07、T00～T14编号；新增V12/V13/V14检查和T15无对齐memory对照。
 
+已完成的power区域离线诊断见[实验记录：Seed参数敏感性与最终Z尺寸筛除对照](POWER_REGION_EXPERIMENT_RECORD.md)，含控制变量、数据、六组Seed与18组Z对照、结果解释和复现命令；不改动本表训练参数。
+
 **本轮所有occupancy模型从头训练，T00单帧也必须重跑。** 沿用之前20%连续窗口、seed42、15 epochs协议；“从头”指不加载旧模型，不代表把数据改成全量训练集。
 
 共同主干版本：`small_physical_model_audit_20261112`；训练目录：`work_dirs/geometry_v2/projection_fixed_20261112/<method>/`。
@@ -172,6 +174,22 @@ python tools/temporal/run_geometry_v2.py ablate-knn \
 
 结果写入`outputs/geometry_v2/projection_fixed_20261112/knn_fusion_ablation_<checkpoint名>/REPORT.md`。用同一新权重和val20先on再off；off仍是联合训练过的主干，不能替代独立T00。
 该命令不训练参数；旧投影checkpoint不允许混入本轮正式对比。
+
+## 所有方案：同一最佳权重开启/旁路融合
+
+所有方案训练结束后，一次性串行运行T01～T15（含CenterFormer、RODNet TDC）；T00独立单帧额外验证一次作为参照。
+
+```bash
+bash tools/temporal/run_all_fusion_ablation.sh --dry-run  # 只检查权重和验证协议
+bash tools/temporal/run_all_fusion_ablation.sh
+bash tools/temporal/run_all_fusion_ablation.sh --ids T00 T01 T03 T10 T11  # 可选：只跑部分方案
+```
+
+默认选择各目录唯一的best_SSC_mean*.pth；缺少best则明确跳过，不使用latest。有多个best时用--checkpoint T10=/绝对路径/权重.pth指定。
+汇总在`outputs/geometry_v2/projection_fixed_20261112/fusion_on_off/REPORT.md`和`summary.csv`；每项保存protocol.json、on_metrics.json、off_metrics.json和comparison.csv。
+两臂严格加载同一份全部权重，使用checkpoint保存的配置和相同val20；off保留T14近场power屏蔽，只旁路融合。不开启训练，不更新checkpoint。
+再次执行会复用已完成且权重/标注/源码指纹一致的两臂；中断项继续。变化后请用--output-dir另建输出目录。失败和缺权重不会填入伪造的指标。
+summary.csv还记录历史实际使用次数；融合开关差值不能代替与独立T00的比较。可加--require-all要求所有指定方案均有合格权重才开始。
 
 ## 每项做什么、为什么做、看什么及完整命令
 
@@ -488,6 +506,40 @@ python tools/temporal/run_geometry_v2.py run V09
 ```bash
 python tools/temporal_vis/validate_region_matching_gates.py --reference-report outputs/geometry_v2/regions_train/report.json --ann-files data/annotations/kradar_dict_val_official_temporal_doppler8.pkl --exclude-scenes 11 --y-gates 4 5 3 --center-gates 4 6 8 --output-dir outputs/geometry_v2/gates_cross_val
 ```
+
+**2026-11-16 已完成：新门限的六场景 A/B/C 对照。** 用户固定新门限为 Y=[2,2,1.5]m、XY中心距离=[8,10,12]m，顺序对应 t-1/t-2/t-3。本次参考训练场景11的 V03 配置，采用修正坐标 `kradar_physical_v2`、P97/MAD 3.0、XY合并、中心/尺寸权重1/0。各场景取 order 80～200、stride=5，共25个当前帧；六场景共150帧、450个当前帧/历史间隔对。
+
+| 本次方案 | Y门限（m） | XY中心距离门限（m） |
+|---|---|---|
+| A：原门限 | 0.5 / 1 / 1.5 | 4 / 6 / 8 |
+| B：只调整Y | 2 / 2 / 1.5 | 4 / 6 / 8 |
+| C：同时调整Y和中心距离 | 2 / 2 / 1.5 | 8 / 10 / 12 |
+
+注意：本次 A/B/C 是这组三方案对照的名称；上面 `run V09` 的历史预设 B 仍为 Y=[4,5,3]、中心距离=[4,6,8]，不会自动改为本次 B 或 C。复现本轮结果请使用以下明确指定参数的命令，重复运行时换一个尚不存在的输出目录：
+
+```bash
+source use_radarocc5060.sh
+python tools/temporal_vis/validate_region_matching_gates.py \
+  --reference-report outputs/geometry_v2/regions_train/report.json \
+  --ann-files data/annotations/kradar_dict_val_official_temporal_doppler8.pkl \
+              data/annotations/kradar_dict_test_official_temporal_doppler8.pkl \
+  --exclude-scenes 3 11 \
+  --y-gates 2 2 1.5 --center-gates 8 10 12 \
+  --workers 2 \
+  --output-dir outputs/geometry_v2/projection_fixed_20261112/gates_cross_scene_y2_2_1p5_d8_10_12_20261116
+```
+
+| 六个外部场景汇总（1、2、15、22、23、55，不含选参场景11） | 正确/存在正确历史 | Recall | Precision | 保守Precision | 保守F1 |
+|---|---:|---:|---:|---:|---:|
+| A | 589 / 1047 | 56.26% | 97.03% | 85.24% | 67.78% |
+| B | 775 / 1047 | 74.02% | 97.12% | 85.26% | 79.24% |
+| C | 827 / 1047 | 78.99% | 96.73% | 83.54% | 81.20% |
+
+C在本轮六场景汇总的Recall和保守F1最高；B的保守Precision更高，场景15、55的保守F1也更偏向B。val来源两场景中，C/B保守F1为85.01%/83.07%；test来源四场景中为79.87%/77.90%。全部汇总均先累加计数，再计算比例。
+
+本次GT口径为宽松XY归属（purity=0、min_gt_points=1）；Precision排除历史身份未知的预测，保守Precision将其计入分母。结果评价区域关联，不代表occupancy精度。这些场景此前已参与诊断，不能称为完全未接触的最终测试集。训练配置、P05/P06配对缓存尚未因本次结果而改写。
+
+完整截图格式表格及选参场景参考行：[abc_results.md](../../outputs/geometry_v2/projection_fixed_20261112/gates_cross_scene_y2_2_1p5_d8_10_12_20261116/abc_results.md)；详细分历史间隔结果、原始计数与完整命令：[summary.md](../../outputs/geometry_v2/projection_fixed_20261112/gates_cross_scene_y2_2_1p5_d8_10_12_20261116/summary.md)。六场景帧数、配置、分母、计数守恒与源码hash检查全部通过，18项区域匹配回归测试通过，见同目录 `verification.json`。
 
 ### V10 场景3：大对称搜索框 × K=8/32/64
 

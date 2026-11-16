@@ -235,5 +235,237 @@ class PhysicalCoordinateTests(unittest.TestCase):
             torch.testing.assert_close(value, state[key], rtol=0, atol=0)
 
 
+class FusionBatchEvaluationTests(unittest.TestCase):
+    def test_best_checkpoint_selection_never_uses_latest_or_guesses(self):
+        from tools.temporal.ablate_all_fusion import choose_checkpoint
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root/'latest.pth').touch()
+            self.assertIsNone(choose_checkpoint(root))
+            first = root/'best_SSC_mean_epoch_3.pth'
+            first.touch()
+            self.assertEqual(choose_checkpoint(root), first)
+            (root/'best_SSC_mean_epoch_7.pth').touch()
+            with self.assertRaisesRegex(ValueError, 'Multiple best'):
+                choose_checkpoint(root)
+            self.assertEqual(choose_checkpoint(root, first), first)
+
+    def test_all_temporal_methods_have_a_supported_boundary(self):
+        from mmcv import Config
+        from tools.temporal.ablate_all_fusion import model_signature
+        from temporal.experiments_v2.registry import experiments
+        signatures = []
+        for spec in experiments().values():
+            if spec['kind'] != 'occupancy-training':
+                continue
+            cfg = Config.fromfile(str(ROOT/spec['config']))
+            signature = model_signature(cfg.model)
+            if spec['id'] != 'T00':
+                self.assertFalse(cfg.data.val.current_only)
+                self.assertTrue(signature['mode'] or signature['box'] or signature['port'] or signature['unaligned'])
+            signatures.append(json.dumps(signature, sort_keys=True))
+        self.assertEqual(len(signatures), 16)
+        self.assertEqual(len(set(signatures)), 16)
+
+    def test_plain_and_imported_plugin_bypass_keeps_weights_and_restores_on_error(self):
+        from types import SimpleNamespace
+        from temporal.centerformer.fusion import CenterFormerP0
+        from temporal.rodnet.fusion import RODNetP0
+        from temporal.fusion.unaligned_memory import UnalignedMemoryTemporal
+        from tools.temporal.run_geometry_v2 import model_fusion_bypass
+        if not BINS.exists():
+            self.skipTest('K-Radar bin resource unavailable')
+        modules = [CenterFormerP0(bins_path=str(BINS), channels=8, heads=2),
+                   RODNetP0(bins_path=str(BINS), channels=8),
+                   UnalignedMemoryTemporal(embed_dims=8, num_heads=2, num_layers=1, memory_tokens=2)]
+        features = torch.arange(1*4*3*8).reshape(1, 4, 3, 8).float()
+        coords = torch.zeros(1, 4, 3, 3)
+        for module in modules:
+            state = {key: value.clone() for key, value in module.state_dict().items()}
+            original_forward = module.forward
+            with self.assertRaisesRegex(RuntimeError, 'deliberate failure'):
+                with model_fusion_bypass(SimpleNamespace(temporal_plugin=module), True):
+                    result, debug = module(features=features, coords=coords)
+                    self.assertTrue(torch.equal(result, features[:, -1]))
+                    self.assertTrue(debug['fusion_bypassed'])
+                    raise RuntimeError('deliberate failure')
+            self.assertEqual(module.forward, original_forward)
+            for key, value in module.state_dict().items():
+                torch.testing.assert_close(value, state[key], rtol=0, atol=0)
+
+    def test_box_bypass_uses_last_time_slot_and_preserves_module(self):
+        from types import SimpleNamespace
+        from tools.temporal.run_geometry_v2 import model_fusion_bypass
+        bins = [np.array([1., 2.]), np.array([-.1, .1]), np.array([-.1, .1])]
+        module = BoxZP0Fusion(bins, dim=8, heads=2)
+        module.diagnostics = dict(fused_queries=5)
+        original_forward = module.forward
+        state = {k: v.clone() for k, v in module.state_dict().items()}
+        features = torch.arange(4*3*8).reshape(4, 3, 8).float()
+        with model_fusion_bypass(SimpleNamespace(box_z_fusion=module), True):
+            output = module(features, torch.zeros(4, 3, 3), {})
+            self.assertTrue(torch.equal(output, features[-1]))
+            self.assertTrue(module.diagnostics['fusion_bypassed'])
+        self.assertEqual(module.forward, original_forward)
+        self.assertEqual(module.diagnostics, dict(fused_queries=5))
+        for key, value in module.state_dict().items():
+            torch.testing.assert_close(value, state[key], rtol=0, atol=0)
+
+    def test_near_power_mask_remains_active_when_attention_is_bypassed(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from mmcv import Config
+        from temporal.builder import build_temporal_plugin
+        from tools.temporal.run_geometry_v2 import model_fusion_bypass
+        if not BINS.exists():
+            self.skipTest('K-Radar bin resource unavailable')
+        cfg = Config.fromfile(str(ROOT/'temporal/experiments_v2/configs/knn_mask37.py'))
+        module = build_temporal_plugin(cfg.model.temporal_cfg).eval()
+        module.geometry = RadarBinGeometry([1., 10.], [0.], [0.])
+        features = torch.ones(1, 4, 2, 8)
+        coords = torch.zeros(1, 4, 2, 3, dtype=torch.long)
+        coords[:, :, 1, 0] = 1
+        kwargs = dict(poses=np.tile(np.eye(4), (1, 4, 1, 1)),
+                      frame_offsets=np.arange(-3, 1)[None], valid_mask=np.ones((1, 4), bool))
+        with patch.object(module.fusion, 'forward', side_effect=lambda x, *a, **kw: (x[:, -1]+2, {})):
+            on, _ = module(features, coords, **kwargs)
+            with model_fusion_bypass(SimpleNamespace(temporal_plugin=module), True):
+                off, _ = module(features, coords, **kwargs)
+            self.assertFalse(torch.equal(on, off))
+        self.assertTrue(torch.equal(off[0, 0, [0, 1, 2, 6, 7]], torch.zeros(5)))
+        self.assertTrue(torch.equal(off[0, 1], torch.ones(8)))
+        self.assertTrue(torch.equal(off[..., 3:6], features[:, -1, :, 3:6]))
+        self.assertTrue(torch.equal(features, torch.ones_like(features)))
+
+    def test_checkpoint_preflight_rejects_wrong_method_version_and_val_split(self):
+        import copy
+        from mmcv import Config
+        from temporal.experiments_v2.registry import experiments
+        from tools.temporal.ablate_all_fusion import inspect_checkpoint, validation_contract
+        spec = experiments()['T10']
+        cfg = Config.fromfile(str(ROOT/spec['config']))
+        contract = validation_contract(cfg)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'best.pth'
+            def save(config):
+                torch.save(dict(meta=dict(config=config.pretty_text, epoch=3),
+                                state_dict={'weight': torch.ones(1)}), path)
+            save(cfg)
+            self.assertEqual(inspect_checkpoint(path, spec, contract)['epoch'], 3)
+            with self.assertRaisesRegex(ValueError, 'method disagrees'):
+                inspect_checkpoint(path, experiments()['T11'], contract)
+            old = copy.deepcopy(cfg)
+            old.projection_version = 'old'
+            save(old)
+            with self.assertRaisesRegex(ValueError, 'Old projection'):
+                inspect_checkpoint(path, spec, contract)
+            changed = copy.deepcopy(cfg)
+            changed.data.val.ann_file = 'data/annotations/different.pkl'
+            save(changed)
+            with self.assertRaisesRegex(ValueError, 'common val20'):
+                inspect_checkpoint(path, spec, contract)
+
+    def test_summary_contains_baseline_delta_and_missing_runs_without_fake_metrics(self):
+        from tools.temporal.ablate_all_fusion import collect
+        metrics = dict(SSC_mean=.3, SSC_Foreground=.2, SSC_Background=.4,
+                       **{'SC_non-empty': .5}, SSC1_mean=.4, SSC2_mean=.5)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            items = []
+            for identifier, arms in [('T00', ['reference']), ('T10', ['on', 'off'])]:
+                target = output/identifier
+                target.mkdir()
+                for arm in arms:
+                    values = dict(metrics, SSC_mean=.2 if arm == 'off' else .3)
+                    (target/f'{arm}_metrics.json').write_text(json.dumps(dict(metrics=values,
+                        fusion_diagnostics=dict(batches_using_history=int(arm == 'on'), queries_with_history=4))))
+                items.append(dict(id=identifier, method=identifier, status='completed', output=str(target)))
+            items.append(dict(id='T11', method='rodnet_tdc', status='missing', reason='No best'))
+            collect(dict(experiments=items, validation=dict(annotation='val20')), output)
+            with (output/'summary.csv').open() as stream:
+                rows = {row['id']: row for row in csv.DictReader(stream)}
+            self.assertAlmostEqual(float(rows['T10']['on_minus_off_pp']), 10.)
+            self.assertAlmostEqual(float(rows['T10']['on_minus_T00_pp']), 0.)
+            self.assertEqual(rows['T11']['on_SSC_mean'], '')
+            self.assertEqual(rows['T11']['status'], 'missing')
+
+    def test_paired_evaluator_loads_once_and_resumes_only_the_missing_arm(self):
+        from unittest.mock import patch
+        from mmcv import Config
+        from tools.temporal.run_geometry_v2 import knn_ablation
+        cfg = Config.fromfile(str(ROOT/'temporal/experiments_v2/configs/centerformer.py'))
+        if not (ROOT/cfg.data.val.ann_file).exists():
+            self.skipTest('val20 annotation unavailable')
+
+        class ToyPlugin(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.bias = torch.nn.Parameter(torch.tensor(2.))
+
+            def forward(self, features, coords):
+                return features[:, -1]+self.bias, dict(used_history=True, queries_with_history=2)
+
+        class ToyModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.temporal_plugin = ToyPlugin()
+
+            def cuda(self):
+                return self
+
+            def forward(self, features, coords):
+                return self.temporal_plugin(features, coords)[0]
+
+        class ToyDataset:
+            CLASSES = ('free', 'background', 'foreground')
+
+            def __len__(self):
+                return 2
+
+            def evaluate(self, aggregate):
+                score = aggregate['score']
+                return {key: score for key in ('SSC_mean', 'SSC_Foreground', 'SSC_Background',
+                                               'SC_non-empty', 'SSC1_mean', 'SSC2_mean')}
+
+        visits = []
+        def evaluate(model, loader):
+            visits.append(id(model))
+            values = [model(torch.ones(1, 4, 2, 8), torch.zeros(1, 4, 2, 3)) for _ in loader]
+            return dict(score=float(torch.stack(values).mean())/10)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint = root/'best.pth'
+            torch.save(dict(meta=dict(config=cfg.pretty_text, epoch=3), state_dict=ToyModel().state_dict()), checkpoint)
+            output = root/'paired'
+            with patch('torch.cuda.is_available', return_value=True), \
+                 patch('torch.cuda.set_device'), \
+                 patch('mmdet.apis.set_random_seed'), \
+                 patch('mmcv.parallel.MMDataParallel', side_effect=lambda model, **kw: model), \
+                 patch('mmdet3d.models.build_model', side_effect=lambda *a, **kw: ToyModel()) as build, \
+                 patch('projects.occ_plugin.datasets.builder.custom_build_dataset', return_value=ToyDataset()), \
+                 patch('projects.occ_plugin.datasets.builder.build_dataloader', return_value=[0, 1]), \
+                 patch('projects.occ_plugin.occupancy.apis.test.custom_single_gpu_test', side_effect=evaluate):
+                result = knn_ablation(checkpoint, output, identifier='T10', resume=True)
+                self.assertEqual(build.call_count, 1)
+                self.assertEqual(visits[0], visits[1])
+                self.assertAlmostEqual(result['on']['SSC_mean'], .3)
+                self.assertAlmostEqual(result['off']['SSC_mean'], .1)
+                on_report = json.loads((output/'on_metrics.json').read_text())
+                self.assertEqual(on_report['fusion_diagnostics']['queries_with_history'], 4)
+                self.assertEqual(json.loads((output/'off_metrics.json').read_text())['fusion_diagnostics']['batches_using_history'], 0)
+                (output/'off_metrics.json').unlink()
+                knn_ablation(checkpoint, output, identifier='T10', resume=True)
+                self.assertEqual(len(visits), 3)  # Re-evaluate off only.
+            with patch('torch.cuda.is_available', return_value=False):
+                again = knn_ablation(checkpoint, output, identifier='T10', resume=True)
+                self.assertEqual(result, again)
+            changed = torch.load(checkpoint, weights_only=False)
+            changed['state_dict']['temporal_plugin.bias'].fill_(7.)
+            torch.save(changed, checkpoint)
+            with self.assertRaisesRegex(ValueError, 'Checkpoint/data/code changed'):
+                knn_ablation(checkpoint, output, identifier='T10', resume=True)
+
+
 if __name__ == '__main__':
     unittest.main()

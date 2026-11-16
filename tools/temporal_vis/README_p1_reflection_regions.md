@@ -8,6 +8,50 @@ after region extraction for diagnostic overlays; they never define proposals.
 
 ## Run
 
+### Controlled seed-percentile / MAD comparison
+
+Use the corrected physical coordinates to compare all six combinations of
+percentiles 95/97/98 and Seed MAD 3/4 on exactly one frame:
+
+```bash
+source use_radarocc5060.sh
+python tools/temporal_vis/sweep_reflection_seeds.py \
+  --scene 3 --order 85 \
+  --output-dir outputs/geometry_v2/projection_fixed_20261112/seed_sweep_scene3_order85_20261113
+```
+
+Choose a new output directory when rerunning. This runs two separate controlled
+groups: the historical XYZ 12x4x4 m rule and the current XY rule with 20x6 m
+horizontal limits. Within each group, only the two seed parameters change.
+Support thresholds, region growth, merging and box constraints stay fixed; the
+script checks that the per-point support and analysis masks are identical.
+Outputs include `index.html`, six-panel stage comparisons, individual RGB/BEV
+figures, `REPORT.md`, `summary.csv`, `thresholds_by_range.csv`, exact per-case
+configs and arrays, and optional-evaluation-only 3D GT token coverage.
+The comparisons do not change model code or training configurations. Scene 3
+is a historical test-scene diagnostic and is not used to select new training
+parameters.
+
+The complete Chinese experiment record, including a controlled final-Z-height
+ablation, is [POWER_REGION_EXPERIMENT_RECORD.md](../../temporal/experiments_v2/POWER_REGION_EXPERIMENT_RECORD.md).
+To add paired final-height controls without changing seeds, region growth,
+XY grouping, or pre-filter box geometry:
+
+```bash
+python tools/temporal_vis/sweep_reflection_seeds.py \
+  --from-sweep outputs/geometry_v2/projection_fixed_20261112/seed_sweep_scene3_order85_20261113 \
+  --z-caps 4 6 \
+  --output-dir outputs/geometry_v2/projection_fixed_20261112/seed_sweep_scene3_order85_z_ablation_20261113
+```
+
+This compares no final height cap, 4 m, and 6 m for each of the six seed
+combinations (18 cases). A cap rejects whole already-merged boxes by their
+total height including padding; it does not clip Z coordinates or rerun
+merging. All diagnostic gates are local to this experiment script. Production
+extraction and training settings remain unchanged. Use new directories for reruns.
+
+### Single-frame or sequence inspection
+
 From the project root in the existing environment:
 
 ```bash

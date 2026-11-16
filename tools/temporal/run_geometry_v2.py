@@ -62,6 +62,22 @@ def check_checkpoint(path, current_only=False):
         raise ValueError('Expected a full-model checkpoint trained with kradar_physical_v2; legacy resume/eval refused')
 
 
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open('rb') as stream:
+        for block in iter(lambda: stream.read(4*1024*1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def write_json_atomic(path, value):
+    """Publish complete reports, so interruption cannot leave a partial arm."""
+    path = Path(path)
+    temporary = path.with_name(path.name+'.tmp')
+    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2)+'\n', encoding='utf-8')
+    temporary.replace(path)
+
+
 def model_smoke(identifier, index=0):
     """Real one-batch CUDA forward/backward + val inference, with no weight save."""
     import copy
@@ -184,7 +200,51 @@ def fusion_bypass(plugin, enabled):
             del plugin.forward
 
 
-def knn_ablation(checkpoint_path, output, dry_run=False):
+def fusion_target(model):
+    """Find the fusion boundary, retaining current-frame preprocessing."""
+    box = getattr(model, 'box_z_fusion', None)
+    if box is not None:
+        return box, 'box'
+    plugin = getattr(model, 'temporal_plugin', None)
+    if plugin is None:
+        return None, 'single_frame'
+    # In particular, T14's power mask must stay enabled in BOTH arms.
+    fusion = getattr(plugin, 'fusion', None)
+    return (fusion, 'attention') if fusion is not None else (plugin, 'plugin')
+
+
+@contextmanager
+def model_fusion_bypass(model, enabled):
+    target, kind = fusion_target(model)
+    if not enabled or target is None:
+        yield
+        return
+    if kind != 'box':
+        with fusion_bypass(target, True):
+            yield
+        return
+    # Box-Z uses [T,N,C] -> [N,C], rather than the plugin tuple interface.
+    previous = dict(target.diagnostics)
+    had_forward = 'forward' in target.__dict__
+    original = target.__dict__.get('forward')
+
+    def current_box_frame(features, coords, pairs):
+        target.diagnostics = dict(fused_queries=0, used_history=False, fusion_bypassed=True)
+        return features[-1]
+
+    target.forward = current_box_frame
+    try:
+        yield
+    finally:
+        target.diagnostics = previous
+        if had_forward:
+            target.forward = original
+        else:
+            del target.forward
+
+
+def knn_ablation(checkpoint_path, output, dry_run=False, *, identifier='T01',
+                 resume=False, annotation_sha256=None):
     """Paired full-val inference of one checkpoint, with only fusion bypassed."""
     import copy
     import importlib
@@ -193,33 +253,77 @@ def knn_ablation(checkpoint_path, output, dry_run=False):
     from mmcv import Config
 
     checkpoint_path = checkpoint_path.resolve()
-    check_checkpoint(checkpoint_path)
+    checkpoint_stat = checkpoint_path.stat()
+    check_checkpoint(checkpoint_path, current_only=identifier == 'T00')
     payload = torch.load(checkpoint_path, map_location='cpu', mmap=True, weights_only=False)
     saved_config = payload.get('meta', {}).get('config', '')
-    if CONVENTION not in saved_config:
-        raise ValueError('Expected a v2 KNN full-model checkpoint')
+    if identifier != 'T00' and CONVENTION not in saved_config:
+        raise ValueError('Expected a v2 temporal full-model checkpoint')
     cfg = Config.fromstring(saved_config, '.py')
     temporal_cfg = cfg.model.get('temporal_cfg') or {}
     attention = temporal_cfg.get('attention') or {}
-    if (temporal_cfg.get('mode') != 'ego_attention' or attention.get('selection') is not None
+    if identifier == 'T01' and (temporal_cfg.get('mode') != 'ego_attention'
+            or attention.get('selection') is not None
             or temporal_cfg.get('query_budget') or temporal_cfg.get('power_mask')):
         raise ValueError('ablate-knn currently supports the plain KNN T01 configuration only')
-    if cfg.data.val.get('current_only', True):
+    if identifier != 'T00' and cfg.data.val.get('current_only', True):
         raise ValueError('Expected the same real four-frame validation inputs in both arms')
-    if output.exists():
+    if output.exists() and not resume:
         raise FileExistsError(f'Use a new output directory; existing paired results are retained: {output}')
     seed = int(payload.get('meta', {}).get('seed', 42))
-    protocol = dict(checkpoint=str(checkpoint_path), checkpoint_epoch=payload.get('meta', {}).get('epoch'),
+    annotation = ROOT/cfg.data.val.ann_file
+    actual_annotation_hash = hashlib.sha256(annotation.read_bytes()).hexdigest()
+    if annotation_sha256 is not None and actual_annotation_hash != annotation_sha256:
+        raise ValueError('Validation annotation changed since batch preflight')
+    checkpoint_hash = file_sha256(checkpoint_path)
+    arms = ['reference'] if identifier == 'T00' else ['on', 'off']
+    protocol = dict(id=identifier, checkpoint=str(checkpoint_path), checkpoint_epoch=payload.get('meta', {}).get('epoch'),
+        checkpoint_sha256=checkpoint_hash, annotation_sha256=actual_annotation_hash,
         checkpoint_bytes=checkpoint_path.stat().st_size,
         annotation=str(cfg.data.val.ann_file), seed=seed, coordinate_convention=CONVENTION,
-        config_source='checkpoint.meta.config', arms=['on', 'off'],
+        config_source='checkpoint.meta.config', arms=arms,
         projection_version=PROJECTION_VERSION, series=SERIES,
-        off_behavior='Same loaded model and four-frame inputs; temporal output replaced by current descriptors',
+        off_behavior='Same loaded model and four-frame inputs; bypass fusion only, retaining current-frame power masking',
         training=False, output=str(output))
     if dry_run:
         print(json.dumps(protocol, ensure_ascii=False, indent=2))
         return
-    if not torch.cuda.is_available():
+    fingerprints = source_fingerprints()
+    fingerprints['tools/temporal/run_geometry_v2.py'] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    temporal_sources = [p for p in (ROOT/'temporal').rglob('*.py') if 'tests' not in p.parts]
+    temporal_sources += list((ROOT/'projects/unaligned_temporal').glob('*.py'))
+    temporal_sources += [ROOT/p for p in (
+        'projects/occ_plugin/occupancy/detectors/radarocc_box_z.py',
+        'projects/occ_plugin/datasets/box_z_dataset.py',
+        'projects/occ_plugin/datasets/temporal_kradar_dataset.py',
+        'tools/temporal/ablate_all_fusion.py')]
+    for path in temporal_sources:
+        fingerprints[str(path.relative_to(ROOT))] = file_sha256(path)
+    protocol['source_sha256'] = fingerprints
+    protocol['saved_config_sha256'] = hashlib.sha256(saved_config.encode()).hexdigest()
+    protocol_id = hashlib.sha256(json.dumps(protocol, sort_keys=True).encode()).hexdigest()
+    protocol['protocol_id'] = protocol_id
+    previous_path = output/'protocol.json'
+    if previous_path.exists():
+        previous = json.loads(previous_path.read_text())
+        if previous.get('protocol_id') != protocol_id:
+            raise ValueError(f'Checkpoint/data/code changed; choose a new output directory: {output}')
+    completed = {}
+    for arm in arms:
+        path = output/f'{arm}_metrics.json'
+        if path.exists():
+            entry = json.loads(path.read_text())
+            if not entry.get('completed') or entry.get('protocol_id') != protocol_id:
+                raise ValueError(f'Invalid or stale arm report: {path}')
+            completed[arm] = entry
+    if len(completed) == len(arms):
+        results = {arm: entry['metrics'] for arm, entry in completed.items()}
+        if identifier != 'T00':
+            write_fusion_comparison(output, identifier, checkpoint_path,
+                                    completed[arms[0]]['samples'], results)
+        print('Reuse completed identical paired evaluation:', output, flush=True)
+        return results
+    if len(completed) < len(arms) and not torch.cuda.is_available():
         raise RuntimeError('CUDA is unavailable. Use --dry-run; no full inference was started.')
 
     from mmcv.parallel import MMDataParallel
@@ -238,6 +342,11 @@ def knn_ablation(checkpoint_path, output, dry_run=False):
     loader = build_dataloader(dataset, 1, 0, dist=False, shuffle=False, seed=seed)
     model_cfg = copy.deepcopy(cfg.model)
     model_cfg.train_cfg = None
+    # Evaluation artifacts belong to this experiment, never append training diagnostics.
+    if model_cfg.get('box_z_cfg'):
+        model_cfg.box_z_cfg.diagnostic_path = None
+    if model_cfg.get('temporal_cfg'):
+        model_cfg.temporal_cfg.debug = dict(enabled=False)
     model = build_model(model_cfg, test_cfg=cfg.get('test_cfg'))
     # Preserve OrderedDict._metadata: spconv uses version=2 to identify its
     # kernel layout. Converting to a plain dict would trigger a wrong transpose.
@@ -248,9 +357,13 @@ def knn_ablation(checkpoint_path, output, dry_run=False):
     model.CLASSES = payload.get('meta', {}).get('CLASSES', dataset.CLASSES)
     parallel = MMDataParallel(model.cuda(), device_ids=[0])
     parallel.eval()
+    target, target_kind = fusion_target(model)
+    if (target is None) != (identifier == 'T00'):
+        raise ValueError('Checkpoint temporal interface disagrees with experiment ID')
     protocol['validation_samples'] = len(dataset)
-    output.mkdir(parents=True)
-    (output/'protocol.json').write_text(json.dumps(protocol, ensure_ascii=False, indent=2)+'\n')
+    protocol['bypass_boundary'] = target_kind
+    output.mkdir(parents=True, exist_ok=resume)
+    write_json_atomic(output/'protocol.json', protocol)
 
     def serializable(value):
         if isinstance(value, np.ndarray):
@@ -264,33 +377,68 @@ def knn_ablation(checkpoint_path, output, dry_run=False):
         return value
 
     results = {}
-    for arm in ('on', 'off'):
+    for arm in arms:
+        current_stat = checkpoint_path.stat()
+        if (current_stat.st_size, current_stat.st_mtime_ns) != (
+                checkpoint_stat.st_size, checkpoint_stat.st_mtime_ns):
+            raise ValueError('Checkpoint changed during paired evaluation; choose a new output directory')
+        if arm in completed:
+            results[arm] = completed[arm]['metrics']
+            print(f'Fusion {arm}: reuse completed identical protocol', flush=True)
+            continue
         set_random_seed(seed, deterministic=True)
         print(f'\nFusion {arm}: evaluating {len(dataset)} identical validation samples', flush=True)
         started = time.time()
-        with fusion_bypass(model.temporal_plugin, enabled=arm == 'off'):
-            aggregate = custom_single_gpu_test(parallel, loader)
-            metrics = serializable(dataset.evaluate(aggregate))
+        stats = dict(calls=0, batches_using_history=0, queries_with_history=0)
+
+        def observe(module, inputs, value):
+            debug = value[1] if isinstance(value, tuple) else getattr(module, 'diagnostics', {})
+            stats['calls'] += 1
+            queries = int(debug.get('queries_with_history', debug.get('fused_queries', 0)))
+            if debug.get('mode') == 'unaligned_memory' and debug.get('used_history'):
+                queries = value[0].shape[0]*value[0].shape[1]
+            stats['queries_with_history'] += queries
+            stats['batches_using_history'] += int(bool(debug.get('used_history', queries > 0)))
+
+        handle = target.register_forward_hook(observe) if target is not None else None
+        try:
+            with model_fusion_bypass(model, enabled=arm == 'off'):
+                aggregate = custom_single_gpu_test(parallel, loader)
+                metrics = serializable(dataset.evaluate(aggregate))
+        finally:
+            if handle is not None:
+                handle.remove()
+        if not all(np.isfinite(float(v)) for v in metrics.values()):
+            raise RuntimeError(f'Nonfinite validation metrics in arm {arm}')
         results[arm] = metrics
-        (output/f'{arm}_metrics.json').write_text(json.dumps(dict(arm=arm, completed=True,
+        write_json_atomic(output/f'{arm}_metrics.json', dict(arm=arm, completed=True,
+            protocol_id=protocol_id, fusion_diagnostics=stats,
             samples=len(dataset), elapsed_seconds=time.time()-started, metrics=metrics,
-            confusion=serializable(aggregate)), ensure_ascii=False, indent=2)+'\n')
+            confusion=serializable(aggregate)))
+    if identifier == 'T00':
+        return results
+    write_fusion_comparison(output, identifier, checkpoint_path, len(dataset), results)
+    print('Paired evaluation complete:', output/'REPORT.md')
+    return results
+
+
+def write_fusion_comparison(output, identifier, checkpoint_path, samples, results):
     fields = ('SSC_mean', 'SSC_Foreground', 'SSC_Background', 'SC_non-empty', 'SSC1_mean', 'SSC2_mean')
     rows = [dict(metric=key, on=results['on'][key], off=results['off'][key],
                  on_minus_off_pp=100*(results['on'][key]-results['off'][key])) for key in fields]
     with (output/'comparison.csv').open('w', newline='') as stream:
         writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
         writer.writeheader(); writer.writerows(rows)
-    text = ['# 同一KNN checkpoint：融合开/关验证', '',
-        f'Checkpoint: `{checkpoint_path}`；验证样本：{len(dataset)}。', '',
+    text = [f'# {identifier} 同一checkpoint：融合开/关验证', '',
+        f'Checkpoint: `{checkpoint_path}`；验证样本：{samples}。', '',
         '| 指标 | 开启融合 | 关闭融合 | 开启−关闭（百分点） |', '| --- | --- | --- | --- |']
     for row in rows:
         text.append(f'| {row["metric"]} | {row["on"]:.2%} | {row["off"]:.2%} | {row["on_minus_off_pp"]:+.3f} |')
     text += ['', '开启高于关闭：该checkpoint的融合分支在这次验证中有正收益；低于关闭：推理时绕过融合反而更好。',
-        '关闭融合仍使用经过KNN联合训练的主干，不等于独立训练的单帧模型，也不能单靠这个消融判断几何方向对错。',
+        '关闭融合仍使用经过时序联合训练的主干，不等于独立训练的单帧模型，也不能单靠这个消融判断几何方向对错。',
+        'T14关闭融合仍保留当前帧近场power屏蔽；所有方案均保留已加载的全部参数。',
         '本轮仅接受修正后重新训练的checkpoint；不得把旧主干权重的迁移结果混入此对比。']
     (output/'REPORT.md').write_text('\n'.join(text)+'\n')
-    print('Paired evaluation complete:', output/'REPORT.md')
 
 
 def document(output):
@@ -360,6 +508,7 @@ def document(output):
     (output/'experiments.json').write_text(json.dumps(list(registry.values()), ensure_ascii=False, indent=2)+'\n')
     text = [f'# RadarOcc主干投影修正后：从头训练安排表（{SERIES}）', '',
         '本表在原V/P/T安排表上更新，保留V00～V11、P01～P07、T00～T14编号；新增V12/V13/V14检查和T15无对齐memory对照。', '',
+        '已完成的power区域离线诊断见[实验记录：Seed参数敏感性与最终Z尺寸筛除对照](POWER_REGION_EXPERIMENT_RECORD.md)，含控制变量、数据、六组Seed与18组Z对照、结果解释和复现命令；不改动本表训练参数。', '',
         '**本轮所有occupancy模型从头训练，T00单帧也必须重跑。** 沿用之前20%连续窗口、seed42、15 epochs协议；“从头”指不加载旧模型，不代表把数据改成全量训练集。', '',
         f'共同主干版本：`{PROJECTION_VERSION}`；训练目录：`{WORK}/<method>/`。',
         f'新检查/单批次记录/融合消融：`{RUN_OUT}/`；旧日志、checkpoint和离线报告保留。', '',
@@ -453,6 +602,16 @@ def document(output):
         f'  --checkpoint {WORK}/knn/best_SSC_mean_epoch_N.pth', '```', '',
         f'结果写入`{RUN_OUT}/knn_fusion_ablation_<checkpoint名>/REPORT.md`。用同一新权重和val20先on再off；off仍是联合训练过的主干，不能替代独立T00。',
         '该命令不训练参数；旧投影checkpoint不允许混入本轮正式对比。', '',
+        '## 所有方案：同一最佳权重开启/旁路融合', '',
+        '所有方案训练结束后，一次性串行运行T01～T15（含CenterFormer、RODNet TDC）；T00独立单帧额外验证一次作为参照。', '',
+        '```bash', 'bash tools/temporal/run_all_fusion_ablation.sh --dry-run  # 只检查权重和验证协议',
+        'bash tools/temporal/run_all_fusion_ablation.sh',
+        'bash tools/temporal/run_all_fusion_ablation.sh --ids T00 T01 T03 T10 T11  # 可选：只跑部分方案', '```', '',
+        '默认选择各目录唯一的best_SSC_mean*.pth；缺少best则明确跳过，不使用latest。有多个best时用--checkpoint T10=/绝对路径/权重.pth指定。',
+        f'汇总在`{RUN_OUT}/fusion_on_off/REPORT.md`和`summary.csv`；每项保存protocol.json、on_metrics.json、off_metrics.json和comparison.csv。',
+        '两臂严格加载同一份全部权重，使用checkpoint保存的配置和相同val20；off保留T14近场power屏蔽，只旁路融合。不开启训练，不更新checkpoint。',
+        '再次执行会复用已完成且权重/标注/源码指纹一致的两臂；中断项继续。变化后请用--output-dir另建输出目录。失败和缺权重不会填入伪造的指标。',
+        'summary.csv还记录历史实际使用次数；融合开关差值不能代替与独立T00的比较。可加--require-all要求所有指定方案均有合格权重才开始。', '',
         '## 每项做什么、为什么做、看什么及完整命令', '']
     for row in rows:
         text += [f'### {row["id"]} {row["experiment"]}', '',

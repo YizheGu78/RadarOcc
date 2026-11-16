@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Validate frozen scene-3 gates on other scenes without another parameter search."""
+"""Validate frozen reference-scene gates without another parameter search."""
 import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import hashlib
 import json
 from pathlib import Path
+import shlex
 import sys
 
 import numpy as np
@@ -70,20 +71,53 @@ def validate_scene(task):
 def render(output, report):
     rows = report['per_scene']
     percent = lambda x: f'{100*x:.2f}%' if x is not None else 'N/A'
-    lines = ['# 跨场景验证：固定 scene 3 门限', '',
+    reference_scenes = ', '.join(report['config'].get('scenes') or ['未指定'])
+    config = report['config']
+    lines = [f'# 跨场景验证：固定参考场景 {reference_scenes} 的门限', '',
+        f'坐标约定：`{config.get("coordinate_convention", "legacy_positive")}`。', '',
         '固定纯距离匹配权重 1/0；不在其他场景重新选择参数。', '',
         f'原门限：Y={report["gates"]["baseline"][0]} m，'
         f'XY 中心距离={report["gates"]["baseline"][1]} m。',
         f'推荐门限：Y={report["gates"]["recommended"][0]} m，'
         f'XY 中心距离={report["gates"]["recommended"][1]} m。', '',
-        '各场景均使用 order 80–200、stride 5；所有区域提取和 GT 归属条件保持参考报告设置。', '',
-        '本报告的 recommended 是进入验证前固定的 scene 3 方案，不表示验证后仍应无条件采用。', '',
+        f'各场景均使用 order {config["start_order"]}–{config["end_order"]}、'
+        f'stride {config["stride"]}；所有区域提取和 GT 归属条件保持参考报告设置。', '',
+        '本报告的 recommended 是进入验证前固定的待验证方案，不表示验证后仍应无条件采用。', '',
         '## 本次结果的含义', '',
         '本报告只展示预先冻结配置在下表场景上的实际指标；不预设放宽门限是否有收益。'
         '如果据此再次选参，这些场景就不能继续充当该选择的未见测试集。', '',
         '保守 P = correct / predicted；未知历史身份预测也计入分母，'
         '不表示它们已被证实为错误。保守 F1 = 2*correct/(predicted+has_true_history)。', '',
-        '## 各场景结果（合并 t-1/t-2/t-3）', '',
+        '## A/B/C 门限对照', '',
+        '数值按 t-1 / t-2 / t-3 排列，单位 m。', '',
+        '| 方案 | Y 门限 | XY 中心距离门限 |',
+        '|---|---|---|']
+    abc = [('A：原门限', 'baseline'), ('B：只调整 Y', 'y_only'),
+           ('C：同时调整 Y 和中心距离', 'recommended')]
+    for label, name in abc:
+        ys, ds = report['gates'][name]
+        lines.append(f'| {label} | {" / ".join(f"{v:g}" for v in ys)} | '
+                     f'{" / ".join(f"{v:g}" for v in ds)} |')
+    lines += ['', '## A/B/C 跨场景结果（合并 t-1/t-2/t-3）', '',
+        '| 场景 | 来源 | 方案 | 正确匹配 / 存在正确历史 | Recall | Precision | 保守 Precision | 保守 F1 |',
+        '|---|---|---|---:|---:|---:|---:|---:|']
+    for split, scene in report['scenes']:
+        for label, name in abc:
+            r = next(r for r in rows if r['split'] == split and r['scene'] == scene
+                     and r['configuration'] == name and r['slot'] == 'all')
+            lines.append(f'| {scene} | {split} | {label[0]} | {r["correct"]} / {r["has_true_history"]} | '
+                f'{percent(r["recall"])} | {percent(r["precision"])} | '
+                f'{percent(r["precision_lower_bound"])} | {percent(r["f1_lower_bound"])} |')
+    for scope in ['all_external']+sorted({s for s, _ in report['scenes']}):
+        scope_name = '全部外部场景汇总' if scope == 'all_external' else f'{scope} 来源场景汇总'
+        for label, name in abc:
+            r = next(r for r in report['aggregates'] if r['scope'] == scope
+                     and r['configuration'] == name and r['slot'] == 'all')
+            lines.append(f'| {scope_name} | {scope} | {label[0]} | {r["correct"]} / {r["has_true_history"]} | '
+                f'{percent(r["recall"])} | {percent(r["precision"])} | '
+                f'{percent(r["precision_lower_bound"])} | {percent(r["f1_lower_bound"])} |')
+    lines += ['', '汇总先累加计数再计算比例，不对各场景百分比取算术平均。', '',
+        '## 原门限与待验证组合', '',
         '| split | scene | 存在正确历史查询数 | 原正确数 | 新正确数 | 原 Recall | 新 Recall | 原保守 P | 新保守 P | 新明确错误 | 新未知历史身份 |',
         '|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|']
     for split, scene in report['scenes']:
@@ -115,15 +149,9 @@ def render(output, report):
             f'{percent(r["recall"])} | {percent(r["precision"])} | '
             f'{percent(r["precision_lower_bound"])} | {percent(r["f1_lower_bound"])} |')
     lines += ['', '## 解释与限制', ''] + [f'- {note}' for note in report['notes']]
-    lines += ['', '## 复现', '', '```bash',
-        'source use_radarocc5060.sh',
-        'python tools/temporal_vis/validate_region_matching_gates.py \\',
-        '  --workers 2 \\',
-        '  --output-dir outputs/region_matching_benchmark/cross_scene_validation_new', '```']
+    lines += ['', '## 复现', '', '输出目录必须尚不存在；重复运行时请指定新的目录。', '', '```bash',
+        'source use_radarocc5060.sh', report['command'], '```']
     (output/'summary.md').write_text('\n'.join(lines)+'\n')
-    if report['config'].get('coordinate_convention') == 'kradar_physical_v2':
-        path = output/'summary.md'
-        path.write_text(path.read_text().replace('scene 3', '参考训练场景').replace('六个外部场景', '本次验证场景'))
     try:
         import matplotlib
         matplotlib.use('Agg')
@@ -199,14 +227,22 @@ def main():
                 selected = [r for r in rows if r['configuration'] == name and r['slot'] == slot
                             and (scope == 'all_external' or r['split'] == scope)]
                 aggregates.append(dict(scope=scope, configuration=name, slot=slot, **aggregate(selected)))
+    sources = [Path(__file__), args.reference_report]+args.ann_files+[
+        ROOT/'tools/temporal_vis'/name for name in (
+            'sweep_region_matching_gates.py', 'benchmark_region_matching.py',
+            'p1_reflection_regions.py', 'vis_alignment.py', 'audit_dynamic_objects.py')]
+    sources += [ROOT/'temporal/core/ego_alignment.py', Path(base['bins'])]
+    if base.get('extrinsic'):
+        sources.append(Path(base['extrinsic']))
     report = dict(reference_report=str(args.reference_report), config=base, gates=gates,
+        command=shlex.join(['python', *sys.argv]),
         scenes=scene_list, excluded_scenes=args.exclude_scenes, fixed_weights=[1., 0.],
-        baseline_source='scene3 reference report; only ann_file and scene replaced',
+        baseline_source=f'reference scenes {base.get("scenes")}; only ann_file and scene replaced',
         source_sha256={str(path): hashlib.sha256(path.read_bytes()).hexdigest()
-                       for path in [Path(__file__), args.reference_report]+args.ann_files},
+                       for path in sources},
         per_scene=rows, aggregates=aggregates,
         notes=['Parameters remain frozen; no gate/weight search on these scenes.',
-            'All other extraction, XY merge, GT labeling and frame selection settings match the scene3 reference.',
+            'All other extraction, XY merge, GT labeling and frame selection settings match the reference report.',
             'The val/test labels denote source annotation splits, not new training or a leaderboard submission.',
             'Loose XY GT labels (purity=0, minimum=1) evaluate projected region association, not point purity or occupancy.',
             'Conditional precision ignores historical predictions with unknown GT ID.',
