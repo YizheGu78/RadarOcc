@@ -117,7 +117,9 @@ class PhysicalCoordinateTests(unittest.TestCase):
             self.assertIsNone(cfg.resume_from)
             self.assertEqual(cfg.runner.max_epochs, 15)
             self.assertEqual(cfg.work_dir, row['work_dir'])
-            self.assertEqual(cfg.work_dir, WORK+'/'+row['method'])
+            from temporal.experiments_v2.registry import BOX_RUN_SUFFIX
+            suffix = BOX_RUN_SUFFIX if row['method'].startswith('box_z') else ''
+            self.assertEqual(cfg.work_dir, WORK+'/'+row['method']+suffix)
             self.assertEqual(cfg.projection_version, PROJECTION_VERSION)
             self.assertEqual(cfg.experiment_series, SERIES)
             self.assertEqual(cfg.checkpoint_config.meta.projection_version, PROJECTION_VERSION)
@@ -157,6 +159,53 @@ class PhysicalCoordinateTests(unittest.TestCase):
                 self.assertEqual(spec['smoke_command'][-1], identifier)
                 self.assertNotEqual(spec['work_dir'], 'work_dirs/geometry_v2/'+spec['method'])
         self.assertIn(WORK+'/ranker', registry['P03']['command'])
+
+    def test_c_gates_are_explicit_in_cache_and_model_configs(self):
+        from mmcv import Config
+        from temporal.experiments_v2.registry import experiments, BOX_CACHE
+        registry = experiments()
+        for identifier in ('P05', 'P06'):
+            command = registry[identifier]['command']
+            self.assertEqual(command[command.index('--y-gates')+1:command.index('--y-gates')+4], ['2', '2', '1.5'])
+            self.assertEqual(command[command.index('--center-gates')+1:command.index('--center-gates')+4], ['8', '10', '12'])
+        for identifier in ('T06', 'T07', 'T08', 'T09'):
+            cfg = Config.fromfile(str(ROOT/registry[identifier]['config']))
+            for split, cache_split in [('train', 'train20'), ('val', 'val20'), ('test', 'val20')]:
+                self.assertEqual(cfg.data[split].expected_y_gates, [2, 2, 1.5])
+                self.assertEqual(cfg.data[split].expected_center_gates, [8, 10, 12])
+                self.assertEqual(cfg.data[split].box_cache, BOX_CACHE+'/'+cache_split)
+            self.assertFalse(cfg.model.box_z_cfg.freeze_original)
+            self.assertTrue(cfg.work_dir.endswith('_c_20261116'))
+
+    def test_c_dataset_rejects_old_pair_cache(self):
+        import hashlib
+        from unittest.mock import patch
+        from temporal.experiments_v2.plugin import BoxZTemporalDatasetV2
+        from projects.occ_plugin.datasets.temporal_kradar_dataset import TemporalKRadarDataset
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            ann = path/'ann'; ann.write_text('fixture')
+            bins = path/'bins'; bins.write_text('fixture bins')
+            manifest = dict(complete=True, frames=1, policy=dict(
+                coordinate_convention=KRADAR_COORDINATES, gt_used=False,
+                format='box_z_pairs_v1', weights=[1, 0], y_gates=[2, 2, 1.5],
+                center_gates=[8, 10, 12], ann_sha256=hashlib.sha256(ann.read_bytes()).hexdigest(),
+                bins_sha256=hashlib.sha256(bins.read_bytes()).hexdigest()))
+            def initialize(instance, **kwargs):
+                instance.ann_file = str(ann)
+                instance.data_infos = [{}]
+                instance.frame_nums = 4
+                instance.current_only = False
+            with patch.object(TemporalKRadarDataset, '__init__', initialize):
+                (path/'manifest.json').write_text(json.dumps(manifest))
+                BoxZTemporalDatasetV2(path, box_bins_path=bins,
+                    expected_y_gates=[2, 2, 1.5], expected_center_gates=[8, 10, 12])
+                manifest['policy']['y_gates'] = [4, 5, 3]
+                manifest['policy']['center_gates'] = [4, 6, 8]
+                (path/'manifest.json').write_text(json.dumps(manifest))
+                with self.assertRaisesRegex(ValueError, 'matching gates'):
+                    BoxZTemporalDatasetV2(path, box_bins_path=bins,
+                        expected_y_gates=[2, 2, 1.5], expected_center_gates=[8, 10, 12])
 
     def test_old_projection_checkpoints_rejected_including_single_frame(self):
         from tools.temporal.run_geometry_v2 import check_checkpoint

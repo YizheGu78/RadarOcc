@@ -15,6 +15,11 @@ TEST = 'data/annotations/kradar_dict_test_official_temporal_doppler8.pkl'
 RANKER = WORK + '/ranker/best.pth'
 OUT = 'outputs/geometry_v2'
 COORD = ['--coordinate-convention', CONVENTION]
+# Frozen by the user after the cross-scene check; never inferred from val metrics.
+BOX_CACHE = 'data/geometry_v2/' + SERIES + '/box_pairs_c_20261116'
+BOX_Y_GATES = [2, 2, 1.5]
+BOX_CENTER_GATES = [8, 10, 12]
+BOX_RUN_SUFFIX = '_c_20261116'
 
 
 def python(script, *args):
@@ -82,8 +87,8 @@ def experiments():
         note='Q32指每range最多32个时序查询，原单帧250个token仍保留'))
     rows.append(entry('V09', '冻结区域门限的跨验证场景检查',
         python('tools/temporal_vis/validate_region_matching_gates.py', '--reference-report', OUT+'/regions_train/report.json',
-            '--ann-files', VAL, '--exclude-scenes', '11', '--y-gates', '4', '5', '3',
-            '--center-gates', '4', '6', '8', '--output-dir', OUT+'/gates_cross_val'),
+            '--ann-files', VAL, '--exclude-scenes', '11', '--y-gates', *BOX_Y_GATES,
+            '--center-gates', *BOX_CENTER_GATES, '--output-dir', OUT+'/gates_cross_val_c_20261116'),
         ['V03'], [OUT+'/regions_train/report.json'], note='继承v2训练场景报告；固定B门限，禁止用旧报告替代'))
     for split, ann in [('train', TRAIN), ('val', VAL)]:
         path = 'data/geometry_v2/ranker/'+split
@@ -105,11 +110,12 @@ def experiments():
             '--checkpoint', RANKER, '--output', RUN_OUT+'/ranker_val.csv'), ['P03'],
         [RANKER, 'data/geometry_v2/ranker/val/manifest.json']))
     for identifier, split, ann in [('P05', 'train20', TRAIN20), ('P06', 'val20', VAL20)]:
-        target = 'data/geometry_v2/box_pairs/'+split
-        command = python('tools/temporal/cache_box_z_pairs.py', '--ann-file', ann, '--output-dir', target, *COORD)
-        smoke = command.copy(); smoke[smoke.index(target)] = 'data/geometry_v2/smoke/box_pairs/'+split; smoke += ['--max-frames', '2']
+        target = BOX_CACHE+'/'+split
+        command = python('tools/temporal/cache_box_z_pairs.py', '--ann-file', ann, '--output-dir', target,
+            '--y-gates', *BOX_Y_GATES, '--center-gates', *BOX_CENTER_GATES, *COORD)
+        smoke = command.copy(); smoke[smoke.index(target)] = BOX_CACHE+'_smoke/'+split; smoke += ['--max-frames', '2']
         rows.append(entry(identifier, '重建power框历史配对 '+split, command, ['V05'],
-            note='无GT输入；默认固定B门限，尚不宣称新最优', smoke=smoke))
+            note='无GT输入；固定C：Y=2/2/1.5，中心距离=8/10/12；新缓存', smoke=smoke))
     rows.append(entry('P07', '选点缓存预热（可选）',
         python('tools/temporal/cache_top8_selection.py', 'temporal/experiments_v2/configs/learned_knn.py',
             '--checkpoint', RANKER, '--cache-dir', 'data/geometry_v2/'+SERIES+'/top8_selection'), ['P03'], [RANKER],
@@ -127,8 +133,8 @@ def experiments():
         ('T04', 'learned_q32', 'LearnedKNN，32查询/range', ['P04', 'V06'], [RANKER]),
         ('T05', 'learned_q64', 'LearnedKNN，64查询/range预算对照', ['P04', 'V06'], [RANKER])]
     for i in range(4):
-        train.append((f'T{6+i:02d}', f'box_z{i}', f'power框选区域，Z{i}'+('主方案' if i==1 else '映射消融'), ['P05', 'P06'],
-            ['data/geometry_v2/box_pairs/train20/manifest.json', 'data/geometry_v2/box_pairs/val20/manifest.json']))
+        train.append((f'T{6+i:02d}', f'box_z{i}', f'power框选区域（C门限），Z{i}'+('主方案' if i==1 else '映射消融'), ['P05', 'P06'],
+            [BOX_CACHE+'/train20/manifest.json', BOX_CACHE+'/val20/manifest.json']))
     train += [('T10', 'centerformer', 'CenterFormer移植', ['V07'], []),
               ('T11', 'rodnet_tdc', 'RODNet TDC移植', ['V08'], []),
               ('T12', 'ra_adta', 'RA-ADTA各向异性KNN（原配置）', ['V00'], []),
@@ -141,7 +147,7 @@ def experiments():
             config=config, command=['bash', 'tools/dist_train.sh', config, '1', '--seed', '42'],
             depends=list(dict.fromkeys(['V13', *dependencies])), required=required,
             note='修正主干；20%窗口；15 epochs；seed42；scratch；新目录',
-            work_dir=WORK+'/'+name,
+            work_dir=WORK+'/'+name+(BOX_RUN_SUFFIX if name.startswith('box_z') else ''),
             smoke_command=python('tools/temporal/run_geometry_v2.py', 'model-smoke', identifier)))
     for row in rows:
         row.update(EXPERIMENT_DETAILS[row['id']])
@@ -162,6 +168,10 @@ def experiments():
         # the executable config rather than the preceding training series.
         if row['id'].startswith('T'):
             row['readout'] = row['readout'].replace('work_dirs/geometry_v2/', WORK+'/')
+            if row['method'].startswith('box_z'):
+                row['readout'] = row['readout'].replace(WORK+'/'+row['method']+'/', row['work_dir']+'/')
+                row['procedure'] = '固定C门限，使用新P05/P06。'+row['procedure']
+                row['note'] += '；C门限；与旧B结果分目录'
         if row['id'] == 'P03':
             row['readout'] = row['readout'].replace('work_dirs/geometry_v2/ranker', WORK+'/ranker')
         if row['id'] == 'P04':
@@ -240,7 +250,7 @@ EXPERIMENT_DETAILS = {
         '验证宽松XY投影下的高Recall是否掩盖了混入其他目标或背景的问题，并比较区域门限A/B/C。',
         '在验证集对比A原门限、B只放宽Y、C放宽Y和中心距离；同时用更严格XYZ归属检查区域支持点、区域框及配对纯度。这里的A/B/C是区域匹配门限，不是V01的三种方向框。',
         'outputs/geometry_v2/region_abc_val/summary.md、report.json及低纯度样例；看宽松/严格Recall、目标覆盖、support/box purity、保守Precision。宽松与严格Recall分母不同，不能直接作增减比较。',
-        '解释power框匹配是否可信，是 P05/P06 的前置审计。默认仍固定B门限，不会根据本次验证集结果自动挑最优参数。',
+        '解释power框匹配是否可信；其历史A/B/C命名不等同本次新门限。缓存采用用户指定C，不由审计自动挑选。',
         'power框路线前置', 'GT 只负责归属、纯度与评分，不用于提框、配对或训练缓存生成。'),
     'V06': details(
         '确认每range只选32/64个时序查询时，预算确实生效，以及省下计算时是否丢掉太多目标回波。',
@@ -262,9 +272,9 @@ EXPERIMENT_DETAILS = {
         'RODNet路线前置', '不加载occupancy GT；不使用bbox监督。'),
     'V09': details(
         '检查固定的区域门限在其他验证场景是否仍然有效，避免只在训练场景11上看起来合理。',
-        '继承V03的区域配置，在验证场景比较原门限、只放宽Y、只改中心门限及固定B组合。B的t-1/t-2/t-3门限为Y=[4,5,3]m、XY中心距离=[4,6,8]m。',
-        'outputs/geometry_v2/gates_cross_val/summary.md；看分场景和汇总Recall、保守Precision/F1、明确错配和未知身份数，留意是否只有个别场景受益。',
-        '给P05/P06默认固定B门限提供跨场景检查；不会读取V04推荐值，也不会自动把验证集最优组合写回训练。',
+        '继承V03的区域配置，在验证场景比较原门限、只调Y、只调中心及固定C组合。C为Y=[2,2,1.5]m、XY中心距离=[8,10,12]m。六场景检查已完成，通常无需重复。',
+        'outputs/geometry_v2/gates_cross_val_c_20261116/summary.md；看分场景和汇总Recall、保守Precision/F1、明确错配和未知身份数。',
+        '给P05/P06固定C门限提供跨场景检查；不会自动选择参数或改写训练配置。',
         '建议：power框跨场景复核', 'GT 只用于评分；区域提取和匹配不读 GT。'),
     'P01': details(
         '用正确的雷达XYZ和GT归属，重新生成LearnedKNN选点器的训练样本，替换受旧坐标影响的监督。',
@@ -292,14 +302,14 @@ EXPERIMENT_DETAILS = {
         'LearnedKNN路线必做', 'GT 只用于评价已冻结ranker；推理输入没有GT标签。'),
     'P05': details(
         '为power框融合模型准备修正坐标后的训练帧区域与历史配对，避免训练时重复做区域提取。',
-        '对20%训练连续窗口提取power区域、对齐历史并用固定B门限配对，保存current/history框、配对标记和逆变换；不训练参数，不读取GT。',
-        'data/geometry_v2/box_pairs/train20/manifest.json及分片；检查complete、坐标版本、门限、帧数和GT未使用标记。',
-        '供T06～T09共同读取；四个高度方案共享这份缓存。若改变匹配门限，需生成另一路径的缓存并同步配置。',
+        '对20%训练连续窗口提取power区域、对齐历史并用C门限配对：Y=2/2/1.5m、中心距离=8/10/12m。保存current/history框、配对标记和逆变换；不训练参数，不读取GT。',
+        BOX_CACHE+'/train20/manifest.json及分片；检查complete、坐标版本、门限、帧数和GT未使用标记。',
+        '供Z1/Z2/Z3共同读取，Z0可选。旧B缓存不能改名复用，需重新生成。',
         'power框路线必做', '不读取bbox或occupancy GT，不在这里产生GT监督标签。'),
     'P06': details(
         '为power框融合模型准备与训练相同规则的验证配对，确保验证时没有换策略或使用GT框。',
-        '对20%验证连续窗口执行与P05一致的无GT区域提取、历史对齐和固定B配对，不训练参数。',
-        'data/geometry_v2/box_pairs/val20/manifest.json及分片；核对策略与train20一致、数据划分正确且缓存完整。',
+        '对20%验证连续窗口执行与P05一致的无GT区域提取、历史对齐和固定C配对，不训练参数。',
+        BOX_CACHE+'/val20/manifest.json及分片；核对策略与train20一致、数据划分正确且缓存完整。',
         '与P05一起供T06～T09训练过程中的验证使用；不是使用验证GT修正搜索区域。',
         'power框路线必做', '配对生成不读GT；后续occupancy验证另用该划分的occupancy标签评分。'),
     'P07': details(

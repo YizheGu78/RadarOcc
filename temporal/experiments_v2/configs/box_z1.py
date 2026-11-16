@@ -1,4 +1,4 @@
-"""Scratch run on the corrected Small projection; previous artifacts retained."""
+"""C gates, corrected Small, scratch; Z1 shares the same pairs as Z1-Z3."""
 _base_ = ['../base.py']
 model = {'type': 'RadarOccBoxZ',
  'temporal_cfg': None,
@@ -14,15 +14,22 @@ model = {'type': 'RadarOccBoxZ',
                'lambda_scale': 0.001,
                'lambda_shift': 0.001,
                'min_interp_weight': 0.0001,
-               'diagnostic_path': 'work_dirs/geometry_v2/projection_fixed_20261112/box_z1/eval_diagnostics.jsonl'}}
+               'diagnostic_path': 'work_dirs/geometry_v2/projection_fixed_20261112/box_z1_c_20261116/eval_diagnostics.jsonl'}}
 data = {'train': {'type': 'BoxZTemporalDatasetV2',
            'current_only': False,
-           'box_cache': 'data/geometry_v2/box_pairs/train20'},
+           'box_cache': 'data/geometry_v2/projection_fixed_20261112/box_pairs_c_20261116/train20',
+           'expected_y_gates': [2, 2, 1.5],
+           'expected_center_gates': [8, 10, 12]},
  'val': {'type': 'BoxZTemporalDatasetV2',
          'current_only': False,
-         'box_cache': 'data/geometry_v2/box_pairs/val20'},
+         'box_cache': 'data/geometry_v2/projection_fixed_20261112/box_pairs_c_20261116/val20',
+         'expected_y_gates': [2, 2, 1.5],
+         'expected_center_gates': [8, 10, 12]},
  'test': {'type': 'BoxZTemporalDatasetV2',
           'current_only': False,
-          'box_cache': 'data/geometry_v2/box_pairs/val20'}}
+          'box_cache': 'data/geometry_v2/projection_fixed_20261112/box_pairs_c_20261116/val20',
+          'expected_y_gates': [2, 2, 1.5],
+          'expected_center_gates': [8, 10, 12]}}
 custom_hooks = [{'type': 'BoxZEpochHook'}]
-work_dir = 'work_dirs/geometry_v2/projection_fixed_20261112/box_z1'
+# Previous B-gate outputs remain in box_z1; do not mix the two runs.
+work_dir = 'work_dirs/geometry_v2/projection_fixed_20261112/box_z1_c_20261116'

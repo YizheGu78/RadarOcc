@@ -275,7 +275,7 @@
     "purpose": "验证宽松XY投影下的高Recall是否掩盖了混入其他目标或背景的问题，并比较区域门限A/B/C。",
     "procedure": "在验证集对比A原门限、B只放宽Y、C放宽Y和中心距离；同时用更严格XYZ归属检查区域支持点、区域框及配对纯度。这里的A/B/C是区域匹配门限，不是V01的三种方向框。",
     "readout": "outputs/geometry_v2/region_abc_val/summary.md、report.json及低纯度样例；看宽松/严格Recall、目标覆盖、support/box purity、保守Precision。宽松与严格Recall分母不同，不能直接作增减比较。",
-    "next_step": "解释power框匹配是否可信，是 P05/P06 的前置审计。默认仍固定B门限，不会根据本次验证集结果自动挑最优参数。",
+    "next_step": "解释power框匹配是否可信；其历史A/B/C命名不等同本次新门限。缓存采用用户指定C，不由审计自动挑选。",
     "priority": "power框路线前置",
     "gt_usage": "GT 只负责归属、纯度与评分，不用于提框、配对或训练缓存生成。",
     "series": "projection_fixed_20261112",
@@ -410,15 +410,15 @@
       "--exclude-scenes",
       "11",
       "--y-gates",
-      "4",
-      "5",
-      "3",
+      "2",
+      "2",
+      "1.5",
       "--center-gates",
-      "4",
-      "6",
       "8",
+      "10",
+      "12",
       "--output-dir",
-      "outputs/geometry_v2/gates_cross_val"
+      "outputs/geometry_v2/gates_cross_val_c_20261116"
     ],
     "depends": [
       "V03"
@@ -429,9 +429,9 @@
     "note": "继承v2训练场景报告；固定B门限，禁止用旧报告替代",
     "smoke_command": null,
     "purpose": "检查固定的区域门限在其他验证场景是否仍然有效，避免只在训练场景11上看起来合理。",
-    "procedure": "继承V03的区域配置，在验证场景比较原门限、只放宽Y、只改中心门限及固定B组合。B的t-1/t-2/t-3门限为Y=[4,5,3]m、XY中心距离=[4,6,8]m。",
-    "readout": "outputs/geometry_v2/gates_cross_val/summary.md；看分场景和汇总Recall、保守Precision/F1、明确错配和未知身份数，留意是否只有个别场景受益。",
-    "next_step": "给P05/P06默认固定B门限提供跨场景检查；不会读取V04推荐值，也不会自动把验证集最优组合写回训练。",
+    "procedure": "继承V03的区域配置，在验证场景比较原门限、只调Y、只调中心及固定C组合。C为Y=[2,2,1.5]m、XY中心距离=[8,10,12]m。六场景检查已完成，通常无需重复。",
+    "readout": "outputs/geometry_v2/gates_cross_val_c_20261116/summary.md；看分场景和汇总Recall、保守Precision/F1、明确错配和未知身份数。",
+    "next_step": "给P05/P06固定C门限提供跨场景检查；不会自动选择参数或改写训练配置。",
     "priority": "建议：power框跨场景复核",
     "gt_usage": "GT 只用于评分；区域提取和匹配不读 GT。",
     "series": "projection_fixed_20261112",
@@ -811,7 +811,15 @@
       "--ann-file",
       "data/annotations/kradar_dict_train_official_temporal_doppler8_20pct.pkl",
       "--output-dir",
-      "data/geometry_v2/box_pairs/train20",
+      "data/geometry_v2/projection_fixed_20261112/box_pairs_c_20261116/train20",
+      "--y-gates",
+      "2",
+      "2",
+      "1.5",
+      "--center-gates",
+      "8",
+      "10",
+      "12",
       "--coordinate-convention",
       "kradar_physical_v2"
     ],
@@ -819,23 +827,31 @@
       "V05"
     ],
     "required": [],
-    "note": "无GT输入；默认固定B门限，尚不宣称新最优",
+    "note": "无GT输入；固定C：Y=2/2/1.5，中心距离=8/10/12；新缓存",
     "smoke_command": [
       "python",
       "tools/temporal/cache_box_z_pairs.py",
       "--ann-file",
       "data/annotations/kradar_dict_train_official_temporal_doppler8_20pct.pkl",
       "--output-dir",
-      "data/geometry_v2/smoke/box_pairs/train20",
+      "data/geometry_v2/projection_fixed_20261112/box_pairs_c_20261116_smoke/train20",
+      "--y-gates",
+      "2",
+      "2",
+      "1.5",
+      "--center-gates",
+      "8",
+      "10",
+      "12",
       "--coordinate-convention",
       "kradar_physical_v2",
       "--max-frames",
       "2"
     ],
     "purpose": "为power框融合模型准备修正坐标后的训练帧区域与历史配对，避免训练时重复做区域提取。",
-    "procedure": "对20%训练连续窗口提取power区域、对齐历史并用固定B门限配对，保存current/history框、配对标记和逆变换；不训练参数，不读取GT。",
-    "readout": "data/geometry_v2/box_pairs/train20/manifest.json及分片；检查complete、坐标版本、门限、帧数和GT未使用标记。",
-    "next_step": "供T06～T09共同读取；四个高度方案共享这份缓存。若改变匹配门限，需生成另一路径的缓存并同步配置。",
+    "procedure": "对20%训练连续窗口提取power区域、对齐历史并用C门限配对：Y=2/2/1.5m、中心距离=8/10/12m。保存current/history框、配对标记和逆变换；不训练参数，不读取GT。",
+    "readout": "data/geometry_v2/projection_fixed_20261112/box_pairs_c_20261116/train20/manifest.json及分片；检查complete、坐标版本、门限、帧数和GT未使用标记。",
+    "next_step": "供Z1/Z2/Z3共同读取，Z0可选。旧B缓存不能改名复用，需重新生成。",
     "priority": "power框路线必做",
     "gt_usage": "不读取bbox或occupancy GT，不在这里产生GT监督标签。",
     "series": "projection_fixed_20261112",
@@ -853,7 +869,15 @@
       "--ann-file",
       "data/annotations/kradar_dict_val_official_temporal_doppler8_20pct.pkl",
       "--output-dir",
-      "data/geometry_v2/box_pairs/val20",
+      "data/geometry_v2/projection_fixed_20261112/box_pairs_c_20261116/val20",
+      "--y-gates",
+      "2",
+      "2",
+      "1.5",
+      "--center-gates",
+      "8",
+      "10",
+      "12",
       "--coordinate-convention",
       "kradar_physical_v2"
     ],
@@ -861,22 +885,30 @@
       "V05"
     ],
     "required": [],
-    "note": "无GT输入；默认固定B门限，尚不宣称新最优",
+    "note": "无GT输入；固定C：Y=2/2/1.5，中心距离=8/10/12；新缓存",
     "smoke_command": [
       "python",
       "tools/temporal/cache_box_z_pairs.py",
       "--ann-file",
       "data/annotations/kradar_dict_val_official_temporal_doppler8_20pct.pkl",
       "--output-dir",
-      "data/geometry_v2/smoke/box_pairs/val20",
+      "data/geometry_v2/projection_fixed_20261112/box_pairs_c_20261116_smoke/val20",
+      "--y-gates",
+      "2",
+      "2",
+      "1.5",
+      "--center-gates",
+      "8",
+      "10",
+      "12",
       "--coordinate-convention",
       "kradar_physical_v2",
       "--max-frames",
       "2"
     ],
     "purpose": "为power框融合模型准备与训练相同规则的验证配对，确保验证时没有换策略或使用GT框。",
-    "procedure": "对20%验证连续窗口执行与P05一致的无GT区域提取、历史对齐和固定B配对，不训练参数。",
-    "readout": "data/geometry_v2/box_pairs/val20/manifest.json及分片；核对策略与train20一致、数据划分正确且缓存完整。",
+    "procedure": "对20%验证连续窗口执行与P05一致的无GT区域提取、历史对齐和固定C配对，不训练参数。",
+    "readout": "data/geometry_v2/projection_fixed_20261112/box_pairs_c_20261116/val20/manifest.json及分片；核对策略与train20一致、数据划分正确且缓存完整。",
     "next_step": "与P05一起供T06～T09训练过程中的验证使用；不是使用验证GT修正搜索区域。",
     "priority": "power框路线必做",
     "gt_usage": "配对生成不读GT；后续occupancy验证另用该划分的occupancy标签评分。",
@@ -1154,7 +1186,7 @@
   },
   {
     "id": "T06",
-    "title": "power框选区域，Z0映射消融",
+    "title": "power框选区域（C门限），Z0映射消融",
     "kind": "occupancy-training",
     "method": "box_z0",
     "config": "temporal/experiments_v2/configs/box_z0.py",
@@ -1172,11 +1204,11 @@
       "P06"
     ],
     "required": [
-      "data/geometry_v2/box_pairs/train20/manifest.json",
-      "data/geometry_v2/box_pairs/val20/manifest.json"
+      "data/geometry_v2/projection_fixed_20261112/box_pairs_c_20261116/train20/manifest.json",
+      "data/geometry_v2/projection_fixed_20261112/box_pairs_c_20261116/val20/manifest.json"
     ],
-    "note": "修正主干；20%窗口；15 epochs；seed42；scratch；新目录",
-    "work_dir": "work_dirs/geometry_v2/projection_fixed_20261112/box_z0",
+    "note": "修正主干；20%窗口；15 epochs；seed42；scratch；新目录；C门限；与旧B结果分目录",
+    "work_dir": "work_dirs/geometry_v2/projection_fixed_20261112/box_z0_c_20261116",
     "smoke_command": [
       "python",
       "tools/temporal/run_geometry_v2.py",
@@ -1184,8 +1216,8 @@
       "T06"
     ],
     "purpose": "检查在高度不确定时，沿历史区域的整个高度多取样，是否比指定单一对应高度更有效。",
-    "procedure": "power框配对后，XY按当前/历史框的中心与尺寸映射；Z0在历史框内均匀取8个高度，有效样本聚合成该历史帧特征，再训练融合与occupancy。",
-    "readout": "work_dirs/geometry_v2/projection_fixed_20261112/box_z0/；与T07～T09比较SSC和Foreground，并看z_valid_sampling_rate、有效融合查询数，区分采不到回波与融合无收益。",
+    "procedure": "固定C门限，使用新P05/P06。power框配对后，XY按当前/历史框的中心与尺寸映射；Z0在历史框内均匀取8个高度，有效样本聚合成该历史帧特征，再训练融合与occupancy。",
+    "readout": "work_dirs/geometry_v2/projection_fixed_20261112/box_z0_c_20261116/；与T07～T09比较SSC和Foreground，并看z_valid_sampling_rate、有效融合查询数，区分采不到回波与融合无收益。",
     "next_step": "高度映射消融；与其他Z方案共享P05/P06，框和配对不变，只改变高度取样方式。",
     "priority": "可选：power框Z0消融",
     "gt_usage": "提框和配对无GT；网络使用occupancy标签训练。",
@@ -1196,7 +1228,7 @@
   },
   {
     "id": "T07",
-    "title": "power框选区域，Z1主方案",
+    "title": "power框选区域（C门限），Z1主方案",
     "kind": "occupancy-training",
     "method": "box_z1",
     "config": "temporal/experiments_v2/configs/box_z1.py",
@@ -1214,11 +1246,11 @@
       "P06"
     ],
     "required": [
-      "data/geometry_v2/box_pairs/train20/manifest.json",
-      "data/geometry_v2/box_pairs/val20/manifest.json"
+      "data/geometry_v2/projection_fixed_20261112/box_pairs_c_20261116/train20/manifest.json",
+      "data/geometry_v2/projection_fixed_20261112/box_pairs_c_20261116/val20/manifest.json"
     ],
-    "note": "修正主干；20%窗口；15 epochs；seed42；scratch；新目录",
-    "work_dir": "work_dirs/geometry_v2/projection_fixed_20261112/box_z1",
+    "note": "修正主干；20%窗口；15 epochs；seed42；scratch；新目录；C门限；与旧B结果分目录",
+    "work_dir": "work_dirs/geometry_v2/projection_fixed_20261112/box_z1_c_20261116",
     "smoke_command": [
       "python",
       "tools/temporal/run_geometry_v2.py",
@@ -1226,8 +1258,8 @@
       "T07"
     ],
     "purpose": "检验power框先定位并配对区域，再保持物理高度采历史回波的主要方案。",
-    "procedure": "使用P05/P06；XY按两框映射，Z1直接保留当前查询的物理Z，不按框的高度比例缩放。通过逆自车变换回到历史雷达网格采样，再训练融合与occupancy。",
-    "readout": "work_dirs/geometry_v2/projection_fixed_20261112/box_z1/；与T00/T01/T03比较总体收益，与T06/T08/T09比较高度处理；关注采样有效率和GT-free区域匹配审计。",
+    "procedure": "固定C门限，使用新P05/P06。使用P05/P06；XY按两框映射，Z1直接保留当前查询的物理Z，不按框的高度比例缩放。通过逆自车变换回到历史雷达网格采样，再训练融合与occupancy。",
+    "readout": "work_dirs/geometry_v2/projection_fixed_20261112/box_z1_c_20261116/；与T00/T01/T03比较总体收益，与T06/T08/T09比较高度处理；关注采样有效率和GT-free区域匹配审计。",
     "next_step": "这是你列出的“按回波power框选目标”的主要重跑项。power区域是雷达回波区域，不能直接当成GT车辆长方体。",
     "priority": "主训练：power框Z1",
     "gt_usage": "提框和配对不使用GT；occupancy损失使用训练标签。",
@@ -1238,7 +1270,7 @@
   },
   {
     "id": "T08",
-    "title": "power框选区域，Z2映射消融",
+    "title": "power框选区域（C门限），Z2映射消融",
     "kind": "occupancy-training",
     "method": "box_z2",
     "config": "temporal/experiments_v2/configs/box_z2.py",
@@ -1256,11 +1288,11 @@
       "P06"
     ],
     "required": [
-      "data/geometry_v2/box_pairs/train20/manifest.json",
-      "data/geometry_v2/box_pairs/val20/manifest.json"
+      "data/geometry_v2/projection_fixed_20261112/box_pairs_c_20261116/train20/manifest.json",
+      "data/geometry_v2/projection_fixed_20261112/box_pairs_c_20261116/val20/manifest.json"
     ],
-    "note": "修正主干；20%窗口；15 epochs；seed42；scratch；新目录",
-    "work_dir": "work_dirs/geometry_v2/projection_fixed_20261112/box_z2",
+    "note": "修正主干；20%窗口；15 epochs；seed42；scratch；新目录；C门限；与旧B结果分目录",
+    "work_dir": "work_dirs/geometry_v2/projection_fixed_20261112/box_z2_c_20261116",
     "smoke_command": [
       "python",
       "tools/temporal/run_geometry_v2.py",
@@ -1268,8 +1300,8 @@
       "T08"
     ],
     "purpose": "验证按当前框与历史框的相对高度比例建立对应，是否优于Z1保持绝对高度。",
-    "procedure": "与T07共享框、配对和XY映射；Z2把查询在当前框内的相对高度，按历史框中心和高度尺寸映射过去，不额外学习高度变换参数。",
-    "readout": "work_dirs/geometry_v2/projection_fixed_20261112/box_z2/；重点对比T07的SSC、Foreground和有效采样率，判断回波区域高度变化是否值得做比例映射。",
+    "procedure": "固定C门限，使用新P05/P06。与T07共享框、配对和XY映射；Z2把查询在当前框内的相对高度，按历史框中心和高度尺寸映射过去，不额外学习高度变换参数。",
+    "readout": "work_dirs/geometry_v2/projection_fixed_20261112/box_z2_c_20261116/；重点对比T07的SSC、Foreground和有效采样率，判断回波区域高度变化是否值得做比例映射。",
     "next_step": "用于区分固定物理Z与框归一化Z两种假设；如果只跑主power方案，可后补。",
     "priority": "可选：power框Z2消融",
     "gt_usage": "框和对应不读GT；使用occupancy标签训练。",
@@ -1280,7 +1312,7 @@
   },
   {
     "id": "T09",
-    "title": "power框选区域，Z3映射消融",
+    "title": "power框选区域（C门限），Z3映射消融",
     "kind": "occupancy-training",
     "method": "box_z3",
     "config": "temporal/experiments_v2/configs/box_z3.py",
@@ -1298,11 +1330,11 @@
       "P06"
     ],
     "required": [
-      "data/geometry_v2/box_pairs/train20/manifest.json",
-      "data/geometry_v2/box_pairs/val20/manifest.json"
+      "data/geometry_v2/projection_fixed_20261112/box_pairs_c_20261116/train20/manifest.json",
+      "data/geometry_v2/projection_fixed_20261112/box_pairs_c_20261116/val20/manifest.json"
     ],
-    "note": "修正主干；20%窗口；15 epochs；seed42；scratch；新目录",
-    "work_dir": "work_dirs/geometry_v2/projection_fixed_20261112/box_z3",
+    "note": "修正主干；20%窗口；15 epochs；seed42；scratch；新目录；C门限；与旧B结果分目录",
+    "work_dir": "work_dirs/geometry_v2/projection_fixed_20261112/box_z3_c_20261116",
     "smoke_command": [
       "python",
       "tools/temporal/run_geometry_v2.py",
@@ -1310,8 +1342,8 @@
       "T09"
     ],
     "purpose": "检查固定框高度映射不够准确时，学习额外高度缩放与平移能否带来收益。",
-    "procedure": "在Z2框比例映射上增加可学习高度缩放exp(alpha)和偏移beta，并对二者加正则；共享P05/P06，从头训练融合与occupancy。",
-    "readout": "work_dirs/geometry_v2/projection_fixed_20261112/box_z3/；看SSC/Foreground、有效采样率、z_alpha_mean、z_shift_mean、z_scale_mean及相应正则损失。参数有变化本身不等于效果变好。",
+    "procedure": "固定C门限，使用新P05/P06。在Z2框比例映射上增加可学习高度缩放exp(alpha)和偏移beta，并对二者加正则；共享P05/P06，从头训练融合与occupancy。",
+    "readout": "work_dirs/geometry_v2/projection_fixed_20261112/box_z3_c_20261116/；看SSC/Foreground、有效采样率、z_alpha_mean、z_shift_mean、z_scale_mean及相应正则损失。参数有变化本身不等于效果变好。",
     "next_step": "和T08对比学习高度修正的增益；和T07比较最终是否值得增加这份复杂度。",
     "priority": "可选：power框Z3消融",
     "gt_usage": "occupancy标签训练映射参数；无GT框指导采样位置，另有参数正则。",

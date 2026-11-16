@@ -94,11 +94,31 @@ occupancy训练为20%。请报告这个额外标签预算，不能把整个方�
 
 ## power区域与其他时序主方法
 
-- power：核对V03/V05，按需要V04/V09；准备P05/P06，再训练T07（Z1）。T06/T08/T09比较Z0/Z2/Z3。
+- power：2026-11-16采用C门限，Y=2/2/1.5m、XY中心距离=8/10/12m。重建P05/P06，再分别训练T07/T08/T09（Z1/Z2/Z3）；T06的Z0是可选对照。
 - CenterFormer：V07模块检查 → T10；RODNet TDC：V08模块检查 → T11。
 - RA-ADTA：T12；T13替换搜索方式。
 - T14在T01上增加近场power屏蔽。
 - T15补回无显式自车对齐的历史memory方案，与T00比较历史特征收益；它与KNN的结构也不同。
+
+Z1保留对齐坐标系中的当前高度，Z2按两框高度比例映射，Z3在Z2基础上学习缩放/偏移。
+三者使用同一份C缓存、相同20%数据和随机种子，从头训练整个模型。
+沿用当前XY提框，不额外施加“最终框高度超过4/6米就整框删除”的规则。
+
+```bash
+python tools/temporal/run_geometry_v2.py run P05
+python tools/temporal/run_geometry_v2.py run P06
+python tools/temporal/run_geometry_v2.py run T07 --smoke
+python tools/temporal/run_geometry_v2.py run T08 --smoke
+python tools/temporal/run_geometry_v2.py run T09 --smoke
+# 每条命令独立执行；检查通过后再正式训练
+python tools/temporal/run_geometry_v2.py run T07
+python tools/temporal/run_geometry_v2.py run T08
+python tools/temporal/run_geometry_v2.py run T09
+```
+
+C缓存位于`data/geometry_v2/projection_fixed_20261112/box_pairs_c_20261116/`。
+结果位于`work_dirs/geometry_v2/projection_fixed_20261112/box_z1_c_20261116/`及z2/z3对应目录。
+仅更新配置与入口，不代表已完成长训练。旧结果保留。
 
 第一轮建议9项主训练：T00/T01/T02/T03/T04/T07/T10/T11/T12。
 其余7项按研究问题补做，不要求把所有消融放进第一轮。
@@ -112,7 +132,7 @@ P01/P02监督和P05/P06区域配对发生在主干前，已经是完整`kradar_p
 
 V01～V11离线报告在相同v2协议下可复用，改变原始选点、K/半径、提框/匹配参数才需重算。
 V01/V10和此前scene3报告是test场景的历史诊断，不能用于选择新参数。
-power配对默认固定B门限（Y=4/5/3m，中心距离=4/6/8m），并不宣称它最优；
+power配对采用用户固定的C门限；旧B缓存不能用于本次实验；
 若修改门限，应同步新缓存和配置，V04不会自动修改训练设置。
 
 ## 验证、恢复与记录

@@ -74,7 +74,7 @@ python tools/temporal/run_geometry_v2.py run T00
 
 V01/V10及此前scene3方向框/候选64报告属于test场景历史诊断，不是必须重复的训练步骤，也不能再用该场景选择新参数。
 P01/P02沿用完整train/val的旧ranker协议，额外使用完整训练集bbox监督；occupancy训练本身为20%。这不是整个方法总共只用20%标签的协议。
-power配对仍使用预设B门限（Y=4/5/3m，中心距离=4/6/8m）；V04只在train内选参。若改门限，须同步缓存和配置，不自动采用扫描最优值。
+power配对自2026-11-16使用用户固定的C门限（Y=2/2/1.5m，中心距离=8/10/12m）。P05/P06须重建；Z1/Z2/Z3共享新缓存，Z0可选。没有自动采用扫描结果。
 
 ## 模型之间具体比什么
 
@@ -123,10 +123,10 @@ power配对仍使用预设B门限（Y=4/5/3m，中心距离=4/6/8m）；V04只�
 | T03 | LearnedKNN，全部时序查询 | 重算完整LearnedKNN方案在正确GT监督和几何坐标下的最终效果。 | 本轮从头重训；不得resume旧投影checkpoint | V13, P04 | `python tools/temporal/run_geometry_v2.py run T03` |
 | T04 | LearnedKNN，32查询/range | 验证每range只让32个当前查询参与LearnedKNN融合，是否能在减少时序计算时保留最终精度。 | 本轮从头重训；不得resume旧投影checkpoint | V13, P04, V06 | `python tools/temporal/run_geometry_v2.py run T04` |
 | T05 | LearnedKNN，64查询/range预算对照 | 提供Q32与全查询之间的中间预算，判断32是否过少以及增至64能否恢复精度。 | 本轮从头重训；不得resume旧投影checkpoint | V13, P04, V06 | `python tools/temporal/run_geometry_v2.py run T05` |
-| T06 | power框选区域，Z0映射消融 | 检查在高度不确定时，沿历史区域的整个高度多取样，是否比指定单一对应高度更有效。 | 本轮从头重训；不得resume旧投影checkpoint | V13, P05, P06 | `python tools/temporal/run_geometry_v2.py run T06` |
-| T07 | power框选区域，Z1主方案 | 检验power框先定位并配对区域，再保持物理高度采历史回波的主要方案。 | 本轮从头重训；不得resume旧投影checkpoint | V13, P05, P06 | `python tools/temporal/run_geometry_v2.py run T07` |
-| T08 | power框选区域，Z2映射消融 | 验证按当前框与历史框的相对高度比例建立对应，是否优于Z1保持绝对高度。 | 本轮从头重训；不得resume旧投影checkpoint | V13, P05, P06 | `python tools/temporal/run_geometry_v2.py run T08` |
-| T09 | power框选区域，Z3映射消融 | 检查固定框高度映射不够准确时，学习额外高度缩放与平移能否带来收益。 | 本轮从头重训；不得resume旧投影checkpoint | V13, P05, P06 | `python tools/temporal/run_geometry_v2.py run T09` |
+| T06 | power框选区域（C门限），Z0映射消融 | 检查在高度不确定时，沿历史区域的整个高度多取样，是否比指定单一对应高度更有效。 | 本轮从头重训；不得resume旧投影checkpoint | V13, P05, P06 | `python tools/temporal/run_geometry_v2.py run T06` |
+| T07 | power框选区域（C门限），Z1主方案 | 检验power框先定位并配对区域，再保持物理高度采历史回波的主要方案。 | 本轮从头重训；不得resume旧投影checkpoint | V13, P05, P06 | `python tools/temporal/run_geometry_v2.py run T07` |
+| T08 | power框选区域（C门限），Z2映射消融 | 验证按当前框与历史框的相对高度比例建立对应，是否优于Z1保持绝对高度。 | 本轮从头重训；不得resume旧投影checkpoint | V13, P05, P06 | `python tools/temporal/run_geometry_v2.py run T08` |
+| T09 | power框选区域（C门限），Z3映射消融 | 检查固定框高度映射不够准确时，学习额外高度缩放与平移能否带来收益。 | 本轮从头重训；不得resume旧投影checkpoint | V13, P05, P06 | `python tools/temporal/run_geometry_v2.py run T09` |
 | T10 | CenterFormer移植 | 评估移植的CenterFormer时序注意力，相比KNN或power框融合是否更有效。 | 本轮从头重训；不得resume旧投影checkpoint | V13, V07 | `python tools/temporal/run_geometry_v2.py run T10` |
 | T11 | RODNet TDC移植 | 评估RODNet的TDC时序可变形卷积，在当前雷达输入上是否比逐点KNN attention更合适。 | 本轮从头重训；不得resume旧投影checkpoint | V13, V08 | `python tools/temporal/run_geometry_v2.py run T11` |
 | T12 | RA-ADTA各向异性KNN（原配置） | 重新评估之前RA-ADTA方案：按雷达方向分辨率组织各向异性邻域、学习采样位置是否改善occupancy。 | 本轮从头重训；不得resume旧投影checkpoint | V13, V00 | `python tools/temporal/run_geometry_v2.py run T12` |
@@ -291,7 +291,7 @@ python tools/temporal_vis/audit_neighborhood_motion.py --ann-file data/annotatio
 
 **运行定位：** power框路线前置。直接前置：V00。
 
-**本轮处理：** 同协议、完整kradar_physical_v2产物可复用；旧正号或设置变化时重做。当前记录：本轮待运行。
+**本轮处理：** 同协议、完整kradar_physical_v2产物可复用；旧正号或设置变化时重做。当前记录：本轮命令已完成；训练结果查看日志。
 
 **目的：** 检查从高power回波提取出的区域是否有目标意义，以及这些区域在历史帧之间能否配上。
 
@@ -323,7 +323,7 @@ python tools/temporal_vis/benchmark_region_matching.py --ann-file data/annotatio
 
 **运行定位：** 可选：需要重新选择门限时做。直接前置：V03。
 
-**本轮处理：** 同协议、完整kradar_physical_v2产物可复用；旧正号或设置变化时重做。当前记录：本轮待运行。
+**本轮处理：** 同协议、完整kradar_physical_v2产物可复用；旧正号或设置变化时重做。当前记录：本轮命令已完成；训练结果查看日志。
 
 **目的：** 检查历史区域匹配门限是否过紧或过宽，找到召回与错配之间的合理取舍。
 
@@ -365,7 +365,7 @@ python tools/temporal_vis/sweep_region_matching_gates.py --reference-report outp
 
 **对比谁：** 前置检查或数据准备，不直接比较occupancy IoU
 
-**和后续实验的关系：** 解释power框匹配是否可信，是 P05/P06 的前置审计。默认仍固定B门限，不会根据本次验证集结果自动挑最优参数。
+**和后续实验的关系：** 解释power框匹配是否可信；其历史A/B/C命名不等同本次新门限。缓存采用用户指定C，不由审计自动挑选。
 
 **GT怎么用：** GT 只负责归属、纯度与评分，不用于提框、配对或训练缓存生成。
 
@@ -483,13 +483,13 @@ python -m temporal.check_p0 --method rodnet --device cpu --config temporal/exper
 
 **目的：** 检查固定的区域门限在其他验证场景是否仍然有效，避免只在训练场景11上看起来合理。
 
-**具体做什么：** 继承V03的区域配置，在验证场景比较原门限、只放宽Y、只改中心门限及固定B组合。B的t-1/t-2/t-3门限为Y=[4,5,3]m、XY中心距离=[4,6,8]m。
+**具体做什么：** 继承V03的区域配置，在验证场景比较原门限、只调Y、只调中心及固定C组合。C为Y=[2,2,1.5]m、XY中心距离=[8,10,12]m。六场景检查已完成，通常无需重复。
 
-**产物与怎么看：** outputs/geometry_v2/gates_cross_val/summary.md；看分场景和汇总Recall、保守Precision/F1、明确错配和未知身份数，留意是否只有个别场景受益。
+**产物与怎么看：** outputs/geometry_v2/gates_cross_val_c_20261116/summary.md；看分场景和汇总Recall、保守Precision/F1、明确错配和未知身份数。
 
 **对比谁：** 前置检查或数据准备，不直接比较occupancy IoU
 
-**和后续实验的关系：** 给P05/P06默认固定B门限提供跨场景检查；不会读取V04推荐值，也不会自动把验证集最优组合写回训练。
+**和后续实验的关系：** 给P05/P06固定C门限提供跨场景检查；不会自动选择参数或改写训练配置。
 
 **GT怎么用：** GT 只用于评分；区域提取和匹配不读 GT。
 
@@ -504,7 +504,7 @@ python tools/temporal/run_geometry_v2.py run V09
 **展开后的实际命令：**
 
 ```bash
-python tools/temporal_vis/validate_region_matching_gates.py --reference-report outputs/geometry_v2/regions_train/report.json --ann-files data/annotations/kradar_dict_val_official_temporal_doppler8.pkl --exclude-scenes 11 --y-gates 4 5 3 --center-gates 4 6 8 --output-dir outputs/geometry_v2/gates_cross_val
+python tools/temporal_vis/validate_region_matching_gates.py --reference-report outputs/geometry_v2/regions_train/report.json --ann-files data/annotations/kradar_dict_val_official_temporal_doppler8.pkl --exclude-scenes 11 --y-gates 2 2 1.5 --center-gates 8 10 12 --output-dir outputs/geometry_v2/gates_cross_val_c_20261116
 ```
 
 **2026-11-16 已完成：新门限的六场景 A/B/C 对照。** 用户固定新门限为 Y=[2,2,1.5]m、XY中心距离=[8,10,12]m，顺序对应 t-1/t-2/t-3。本次参考训练场景11的 V03 配置，采用修正坐标 `kradar_physical_v2`、P97/MAD 3.0、XY合并、中心/尺寸权重1/0。各场景取 order 80～200、stride=5，共25个当前帧；六场景共150帧、450个当前帧/历史间隔对。
@@ -537,7 +537,7 @@ python tools/temporal_vis/validate_region_matching_gates.py \
 
 C在本轮六场景汇总的Recall和保守F1最高；B的保守Precision更高，场景15、55的保守F1也更偏向B。val来源两场景中，C/B保守F1为85.01%/83.07%；test来源四场景中为79.87%/77.90%。全部汇总均先累加计数，再计算比例。
 
-本次GT口径为宽松XY归属（purity=0、min_gt_points=1）；Precision排除历史身份未知的预测，保守Precision将其计入分母。结果评价区域关联，不代表occupancy精度。这些场景此前已参与诊断，不能称为完全未接触的最终测试集。训练配置、P05/P06配对缓存尚未因本次结果而改写。
+本次GT口径为宽松XY归属（purity=0、min_gt_points=1）；Precision排除历史身份未知的预测，保守Precision将其计入分母。结果评价区域关联，不代表occupancy精度。这些场景此前已参与诊断，不能称为完全未接触的最终测试集。离线验证完成时尚未改写训练配置；随后按用户决定采用C，P05/P06入口与Z配置已更新，完整缓存仍需重新生成。
 
 完整截图格式表格及选参场景参考行：[abc_results.md](../../outputs/geometry_v2/projection_fixed_20261112/gates_cross_scene_y2_2_1p5_d8_10_12_20261116/abc_results.md)；详细分历史间隔结果、原始计数与完整命令：[summary.md](../../outputs/geometry_v2/projection_fixed_20261112/gates_cross_scene_y2_2_1p5_d8_10_12_20261116/summary.md)。六场景帧数、配置、分母、计数守恒与源码hash检查全部通过，18项区域匹配回归测试通过，见同目录 `verification.json`。
 
@@ -703,7 +703,7 @@ python tools/temporal/audit_model_integrity.py --require-pass --output-dir outpu
 
 **运行定位：** LearnedKNN路线必做。直接前置：V00。
 
-**本轮处理：** 同协议、完整kradar_physical_v2产物可复用；旧正号或设置变化时重做。当前记录：本轮待运行。
+**本轮处理：** 同协议、完整kradar_physical_v2产物可复用；旧正号或设置变化时重做。当前记录：本轮命令已完成；训练结果查看日志。
 
 **目的：** 用正确的雷达XYZ和GT归属，重新生成LearnedKNN选点器的训练样本，替换受旧坐标影响的监督。
 
@@ -735,7 +735,7 @@ python tools/temporal/train_top8_ranker.py prepare --ann-file data/annotations/k
 
 **运行定位：** LearnedKNN路线必做。直接前置：V00。
 
-**本轮处理：** 同协议、完整kradar_physical_v2产物可复用；旧正号或设置变化时重做。当前记录：本轮待运行。
+**本轮处理：** 同协议、完整kradar_physical_v2产物可复用；旧正号或设置变化时重做。当前记录：本轮命令已完成；训练结果查看日志。
 
 **目的：** 重新生成正确坐标下的选点器验证样本，使新选点器能够在一致的验证集合上选best和比较。
 
@@ -767,7 +767,7 @@ python tools/temporal/train_top8_ranker.py prepare --ann-file data/annotations/k
 
 **运行定位：** LearnedKNN路线必做；仅训练选点器。直接前置：P01, P02。
 
-**本轮处理：** 本轮默认新目录重训ranker；合格v2权重不因主干投影自动失效。当前记录：本轮待运行。
+**本轮处理：** 本轮默认新目录重训ranker；合格v2权重不因主干投影自动失效。当前记录：本轮命令已完成；训练结果查看日志。
 
 **目的：** 重新训练一个能从64个候选中挑选8个历史点的打分器，修复旧坐标导致的错误监督。
 
@@ -797,7 +797,7 @@ python tools/temporal/train_top8_ranker.py train --train-cache data/geometry_v2/
 
 **运行定位：** LearnedKNN路线必做。直接前置：P03。
 
-**本轮处理：** 本轮必须重做。当前记录：本轮待运行。
+**本轮处理：** 本轮必须重做。当前记录：本轮命令已完成；训练结果查看日志。
 
 **目的：** 确认新ranker相对于纯距离排序到底改善了多少选点质量，区分候选池不足和排序失败。
 
@@ -831,17 +831,17 @@ python tools/temporal/train_top8_ranker.py evaluate --cache data/geometry_v2/ran
 
 **目的：** 为power框融合模型准备修正坐标后的训练帧区域与历史配对，避免训练时重复做区域提取。
 
-**具体做什么：** 对20%训练连续窗口提取power区域、对齐历史并用固定B门限配对，保存current/history框、配对标记和逆变换；不训练参数，不读取GT。
+**具体做什么：** 对20%训练连续窗口提取power区域、对齐历史并用C门限配对：Y=2/2/1.5m、中心距离=8/10/12m。保存current/history框、配对标记和逆变换；不训练参数，不读取GT。
 
-**产物与怎么看：** data/geometry_v2/box_pairs/train20/manifest.json及分片；检查complete、坐标版本、门限、帧数和GT未使用标记。
+**产物与怎么看：** data/geometry_v2/projection_fixed_20261112/box_pairs_c_20261116/train20/manifest.json及分片；检查complete、坐标版本、门限、帧数和GT未使用标记。
 
 **对比谁：** 前置检查或数据准备，不直接比较occupancy IoU
 
-**和后续实验的关系：** 供T06～T09共同读取；四个高度方案共享这份缓存。若改变匹配门限，需生成另一路径的缓存并同步配置。
+**和后续实验的关系：** 供Z1/Z2/Z3共同读取，Z0可选。旧B缓存不能改名复用，需重新生成。
 
 **GT怎么用：** 不读取bbox或occupancy GT，不在这里产生GT监督标签。
 
-**配置备注：** 无GT输入；默认固定B门限，尚不宣称新最优。
+**配置备注：** 无GT输入；固定C：Y=2/2/1.5，中心距离=8/10/12；新缓存。
 
 **运行命令：**
 
@@ -852,7 +852,7 @@ python tools/temporal/run_geometry_v2.py run P05
 **展开后的实际命令：**
 
 ```bash
-python tools/temporal/cache_box_z_pairs.py --ann-file data/annotations/kradar_dict_train_official_temporal_doppler8_20pct.pkl --output-dir data/geometry_v2/box_pairs/train20 --coordinate-convention kradar_physical_v2
+python tools/temporal/cache_box_z_pairs.py --ann-file data/annotations/kradar_dict_train_official_temporal_doppler8_20pct.pkl --output-dir data/geometry_v2/projection_fixed_20261112/box_pairs_c_20261116/train20 --y-gates 2 2 1.5 --center-gates 8 10 12 --coordinate-convention kradar_physical_v2
 ```
 
 ### P06 重建power框历史配对 val20
@@ -863,9 +863,9 @@ python tools/temporal/cache_box_z_pairs.py --ann-file data/annotations/kradar_di
 
 **目的：** 为power框融合模型准备与训练相同规则的验证配对，确保验证时没有换策略或使用GT框。
 
-**具体做什么：** 对20%验证连续窗口执行与P05一致的无GT区域提取、历史对齐和固定B配对，不训练参数。
+**具体做什么：** 对20%验证连续窗口执行与P05一致的无GT区域提取、历史对齐和固定C配对，不训练参数。
 
-**产物与怎么看：** data/geometry_v2/box_pairs/val20/manifest.json及分片；核对策略与train20一致、数据划分正确且缓存完整。
+**产物与怎么看：** data/geometry_v2/projection_fixed_20261112/box_pairs_c_20261116/val20/manifest.json及分片；核对策略与train20一致、数据划分正确且缓存完整。
 
 **对比谁：** 前置检查或数据准备，不直接比较occupancy IoU
 
@@ -873,7 +873,7 @@ python tools/temporal/cache_box_z_pairs.py --ann-file data/annotations/kradar_di
 
 **GT怎么用：** 配对生成不读GT；后续occupancy验证另用该划分的occupancy标签评分。
 
-**配置备注：** 无GT输入；默认固定B门限，尚不宣称新最优。
+**配置备注：** 无GT输入；固定C：Y=2/2/1.5，中心距离=8/10/12；新缓存。
 
 **运行命令：**
 
@@ -884,14 +884,14 @@ python tools/temporal/run_geometry_v2.py run P06
 **展开后的实际命令：**
 
 ```bash
-python tools/temporal/cache_box_z_pairs.py --ann-file data/annotations/kradar_dict_val_official_temporal_doppler8_20pct.pkl --output-dir data/geometry_v2/box_pairs/val20 --coordinate-convention kradar_physical_v2
+python tools/temporal/cache_box_z_pairs.py --ann-file data/annotations/kradar_dict_val_official_temporal_doppler8_20pct.pkl --output-dir data/geometry_v2/projection_fixed_20261112/box_pairs_c_20261116/val20 --y-gates 2 2 1.5 --center-gates 8 10 12 --coordinate-convention kradar_physical_v2
 ```
 
 ### P07 选点缓存预热（可选）
 
 **运行定位：** 可选：工程加速。直接前置：P03。
 
-**本轮处理：** 可选；新ranker权重需要新的选点缓存。当前记录：本轮待运行。
+**本轮处理：** 可选；新ranker权重需要新的选点缓存。当前记录：本轮命令已完成；训练结果查看日志。
 
 **目的：** 提前缓存冻结ranker的选点结果，减少后续反复在线打分的开销；不研究新算法。
 
@@ -958,7 +958,7 @@ python tools/temporal/run_geometry_v2.py resume T00 --checkpoint work_dirs/geome
 
 **运行定位：** 主训练：普通KNN。直接前置：V13, V11。
 
-**本轮处理：** 本轮从头重训；不得resume旧投影checkpoint。当前记录：本轮待运行。
+**本轮处理：** 本轮从头重训；不得resume旧投影checkpoint。当前记录：本轮命令已完成；训练结果查看日志。
 
 **目的：** 重算最基础几何时序融合在正确坐标下能带来多少occupancy收益。
 
@@ -1129,7 +1129,7 @@ python tools/temporal/run_geometry_v2.py val T05 --checkpoint work_dirs/geometry
 python tools/temporal/run_geometry_v2.py resume T05 --checkpoint work_dirs/geometry_v2/projection_fixed_20261112/learned_q64/latest.pth
 ```
 
-### T06 power框选区域，Z0映射消融
+### T06 power框选区域（C门限），Z0映射消融
 
 **运行定位：** 可选：power框Z0消融。直接前置：V13, P05, P06。
 
@@ -1137,9 +1137,9 @@ python tools/temporal/run_geometry_v2.py resume T05 --checkpoint work_dirs/geome
 
 **目的：** 检查在高度不确定时，沿历史区域的整个高度多取样，是否比指定单一对应高度更有效。
 
-**具体做什么：** power框配对后，XY按当前/历史框的中心与尺寸映射；Z0在历史框内均匀取8个高度，有效样本聚合成该历史帧特征，再训练融合与occupancy。
+**具体做什么：** 固定C门限，使用新P05/P06。power框配对后，XY按当前/历史框的中心与尺寸映射；Z0在历史框内均匀取8个高度，有效样本聚合成该历史帧特征，再训练融合与occupancy。
 
-**产物与怎么看：** work_dirs/geometry_v2/projection_fixed_20261112/box_z0/；与T07～T09比较SSC和Foreground，并看z_valid_sampling_rate、有效融合查询数，区分采不到回波与融合无收益。
+**产物与怎么看：** work_dirs/geometry_v2/projection_fixed_20261112/box_z0_c_20261116/；与T07～T09比较SSC和Foreground，并看z_valid_sampling_rate、有效融合查询数，区分采不到回波与融合无收益。
 
 **对比谁：** T06/T07/T08/T09：同区域/配对缓存，仅比较Z映射方案
 
@@ -1147,7 +1147,7 @@ python tools/temporal/run_geometry_v2.py resume T05 --checkpoint work_dirs/geome
 
 **GT怎么用：** 提框和配对无GT；网络使用occupancy标签训练。
 
-**配置备注：** 修正主干；20%窗口；15 epochs；seed42；scratch；新目录。
+**配置备注：** 修正主干；20%窗口；15 epochs；seed42；scratch；新目录；C门限；与旧B结果分目录。
 
 **运行命令：**
 
@@ -1160,11 +1160,11 @@ python tools/temporal/run_geometry_v2.py run T06
 ```bash
 bash tools/dist_train.sh temporal/experiments_v2/configs/box_z0.py 1 --seed 42
 python tools/temporal/run_geometry_v2.py run T06 --smoke
-python tools/temporal/run_geometry_v2.py val T06 --checkpoint work_dirs/geometry_v2/projection_fixed_20261112/box_z0/best_SSC_mean_epoch_N.pth
-python tools/temporal/run_geometry_v2.py resume T06 --checkpoint work_dirs/geometry_v2/projection_fixed_20261112/box_z0/latest.pth
+python tools/temporal/run_geometry_v2.py val T06 --checkpoint work_dirs/geometry_v2/projection_fixed_20261112/box_z0_c_20261116/best_SSC_mean_epoch_N.pth
+python tools/temporal/run_geometry_v2.py resume T06 --checkpoint work_dirs/geometry_v2/projection_fixed_20261112/box_z0_c_20261116/latest.pth
 ```
 
-### T07 power框选区域，Z1主方案
+### T07 power框选区域（C门限），Z1主方案
 
 **运行定位：** 主训练：power框Z1。直接前置：V13, P05, P06。
 
@@ -1172,9 +1172,9 @@ python tools/temporal/run_geometry_v2.py resume T06 --checkpoint work_dirs/geome
 
 **目的：** 检验power框先定位并配对区域，再保持物理高度采历史回波的主要方案。
 
-**具体做什么：** 使用P05/P06；XY按两框映射，Z1直接保留当前查询的物理Z，不按框的高度比例缩放。通过逆自车变换回到历史雷达网格采样，再训练融合与occupancy。
+**具体做什么：** 固定C门限，使用新P05/P06。使用P05/P06；XY按两框映射，Z1直接保留当前查询的物理Z，不按框的高度比例缩放。通过逆自车变换回到历史雷达网格采样，再训练融合与occupancy。
 
-**产物与怎么看：** work_dirs/geometry_v2/projection_fixed_20261112/box_z1/；与T00/T01/T03比较总体收益，与T06/T08/T09比较高度处理；关注采样有效率和GT-free区域匹配审计。
+**产物与怎么看：** work_dirs/geometry_v2/projection_fixed_20261112/box_z1_c_20261116/；与T00/T01/T03比较总体收益，与T06/T08/T09比较高度处理；关注采样有效率和GT-free区域匹配审计。
 
 **对比谁：** T07 vs T00/T01/T03：power区域融合；另和Z0/Z2/Z3对照
 
@@ -1182,7 +1182,7 @@ python tools/temporal/run_geometry_v2.py resume T06 --checkpoint work_dirs/geome
 
 **GT怎么用：** 提框和配对不使用GT；occupancy损失使用训练标签。
 
-**配置备注：** 修正主干；20%窗口；15 epochs；seed42；scratch；新目录。
+**配置备注：** 修正主干；20%窗口；15 epochs；seed42；scratch；新目录；C门限；与旧B结果分目录。
 
 **运行命令：**
 
@@ -1195,11 +1195,11 @@ python tools/temporal/run_geometry_v2.py run T07
 ```bash
 bash tools/dist_train.sh temporal/experiments_v2/configs/box_z1.py 1 --seed 42
 python tools/temporal/run_geometry_v2.py run T07 --smoke
-python tools/temporal/run_geometry_v2.py val T07 --checkpoint work_dirs/geometry_v2/projection_fixed_20261112/box_z1/best_SSC_mean_epoch_N.pth
-python tools/temporal/run_geometry_v2.py resume T07 --checkpoint work_dirs/geometry_v2/projection_fixed_20261112/box_z1/latest.pth
+python tools/temporal/run_geometry_v2.py val T07 --checkpoint work_dirs/geometry_v2/projection_fixed_20261112/box_z1_c_20261116/best_SSC_mean_epoch_N.pth
+python tools/temporal/run_geometry_v2.py resume T07 --checkpoint work_dirs/geometry_v2/projection_fixed_20261112/box_z1_c_20261116/latest.pth
 ```
 
-### T08 power框选区域，Z2映射消融
+### T08 power框选区域（C门限），Z2映射消融
 
 **运行定位：** 可选：power框Z2消融。直接前置：V13, P05, P06。
 
@@ -1207,9 +1207,9 @@ python tools/temporal/run_geometry_v2.py resume T07 --checkpoint work_dirs/geome
 
 **目的：** 验证按当前框与历史框的相对高度比例建立对应，是否优于Z1保持绝对高度。
 
-**具体做什么：** 与T07共享框、配对和XY映射；Z2把查询在当前框内的相对高度，按历史框中心和高度尺寸映射过去，不额外学习高度变换参数。
+**具体做什么：** 固定C门限，使用新P05/P06。与T07共享框、配对和XY映射；Z2把查询在当前框内的相对高度，按历史框中心和高度尺寸映射过去，不额外学习高度变换参数。
 
-**产物与怎么看：** work_dirs/geometry_v2/projection_fixed_20261112/box_z2/；重点对比T07的SSC、Foreground和有效采样率，判断回波区域高度变化是否值得做比例映射。
+**产物与怎么看：** work_dirs/geometry_v2/projection_fixed_20261112/box_z2_c_20261116/；重点对比T07的SSC、Foreground和有效采样率，判断回波区域高度变化是否值得做比例映射。
 
 **对比谁：** T08 vs T07：相对高度映射 vs 保持物理高度
 
@@ -1217,7 +1217,7 @@ python tools/temporal/run_geometry_v2.py resume T07 --checkpoint work_dirs/geome
 
 **GT怎么用：** 框和对应不读GT；使用occupancy标签训练。
 
-**配置备注：** 修正主干；20%窗口；15 epochs；seed42；scratch；新目录。
+**配置备注：** 修正主干；20%窗口；15 epochs；seed42；scratch；新目录；C门限；与旧B结果分目录。
 
 **运行命令：**
 
@@ -1230,11 +1230,11 @@ python tools/temporal/run_geometry_v2.py run T08
 ```bash
 bash tools/dist_train.sh temporal/experiments_v2/configs/box_z2.py 1 --seed 42
 python tools/temporal/run_geometry_v2.py run T08 --smoke
-python tools/temporal/run_geometry_v2.py val T08 --checkpoint work_dirs/geometry_v2/projection_fixed_20261112/box_z2/best_SSC_mean_epoch_N.pth
-python tools/temporal/run_geometry_v2.py resume T08 --checkpoint work_dirs/geometry_v2/projection_fixed_20261112/box_z2/latest.pth
+python tools/temporal/run_geometry_v2.py val T08 --checkpoint work_dirs/geometry_v2/projection_fixed_20261112/box_z2_c_20261116/best_SSC_mean_epoch_N.pth
+python tools/temporal/run_geometry_v2.py resume T08 --checkpoint work_dirs/geometry_v2/projection_fixed_20261112/box_z2_c_20261116/latest.pth
 ```
 
-### T09 power框选区域，Z3映射消融
+### T09 power框选区域（C门限），Z3映射消融
 
 **运行定位：** 可选：power框Z3消融。直接前置：V13, P05, P06。
 
@@ -1242,9 +1242,9 @@ python tools/temporal/run_geometry_v2.py resume T08 --checkpoint work_dirs/geome
 
 **目的：** 检查固定框高度映射不够准确时，学习额外高度缩放与平移能否带来收益。
 
-**具体做什么：** 在Z2框比例映射上增加可学习高度缩放exp(alpha)和偏移beta，并对二者加正则；共享P05/P06，从头训练融合与occupancy。
+**具体做什么：** 固定C门限，使用新P05/P06。在Z2框比例映射上增加可学习高度缩放exp(alpha)和偏移beta，并对二者加正则；共享P05/P06，从头训练融合与occupancy。
 
-**产物与怎么看：** work_dirs/geometry_v2/projection_fixed_20261112/box_z3/；看SSC/Foreground、有效采样率、z_alpha_mean、z_shift_mean、z_scale_mean及相应正则损失。参数有变化本身不等于效果变好。
+**产物与怎么看：** work_dirs/geometry_v2/projection_fixed_20261112/box_z3_c_20261116/；看SSC/Foreground、有效采样率、z_alpha_mean、z_shift_mean、z_scale_mean及相应正则损失。参数有变化本身不等于效果变好。
 
 **对比谁：** T09 vs T08：学习高度缩放/平移的增益
 
@@ -1252,7 +1252,7 @@ python tools/temporal/run_geometry_v2.py resume T08 --checkpoint work_dirs/geome
 
 **GT怎么用：** occupancy标签训练映射参数；无GT框指导采样位置，另有参数正则。
 
-**配置备注：** 修正主干；20%窗口；15 epochs；seed42；scratch；新目录。
+**配置备注：** 修正主干；20%窗口；15 epochs；seed42；scratch；新目录；C门限；与旧B结果分目录。
 
 **运行命令：**
 
@@ -1265,15 +1265,15 @@ python tools/temporal/run_geometry_v2.py run T09
 ```bash
 bash tools/dist_train.sh temporal/experiments_v2/configs/box_z3.py 1 --seed 42
 python tools/temporal/run_geometry_v2.py run T09 --smoke
-python tools/temporal/run_geometry_v2.py val T09 --checkpoint work_dirs/geometry_v2/projection_fixed_20261112/box_z3/best_SSC_mean_epoch_N.pth
-python tools/temporal/run_geometry_v2.py resume T09 --checkpoint work_dirs/geometry_v2/projection_fixed_20261112/box_z3/latest.pth
+python tools/temporal/run_geometry_v2.py val T09 --checkpoint work_dirs/geometry_v2/projection_fixed_20261112/box_z3_c_20261116/best_SSC_mean_epoch_N.pth
+python tools/temporal/run_geometry_v2.py resume T09 --checkpoint work_dirs/geometry_v2/projection_fixed_20261112/box_z3_c_20261116/latest.pth
 ```
 
 ### T10 CenterFormer移植
 
 **运行定位：** 补充主训练：移植CenterFormer。直接前置：V13, V07。
 
-**本轮处理：** 本轮从头重训；不得resume旧投影checkpoint。当前记录：本轮待运行。
+**本轮处理：** 本轮从头重训；不得resume旧投影checkpoint。当前记录：本轮命令已完成；训练结果查看日志。
 
 **目的：** 评估移植的CenterFormer时序注意力，相比KNN或power框融合是否更有效。
 
@@ -1343,7 +1343,7 @@ python tools/temporal/run_geometry_v2.py resume T11 --checkpoint work_dirs/geome
 
 **运行定位：** 补充主训练：RA-ADTA。直接前置：V13, V00。
 
-**本轮处理：** 本轮从头重训；不得resume旧投影checkpoint。当前记录：本轮待运行。
+**本轮处理：** 本轮从头重训；不得resume旧投影checkpoint。当前记录：本轮整网单批次通过；正式训练待运行。
 
 **目的：** 重新评估之前RA-ADTA方案：按雷达方向分辨率组织各向异性邻域、学习采样位置是否改善occupancy。
 
@@ -1448,7 +1448,7 @@ python tools/temporal/run_geometry_v2.py resume T14 --checkpoint work_dirs/geome
 
 **运行定位：** 可选：补回已有无对齐方案。直接前置：V13, V00。
 
-**本轮处理：** 本轮从头重训；不得resume旧投影checkpoint。当前记录：本轮待运行。
+**本轮处理：** 本轮从头重训；不得resume旧投影checkpoint。当前记录：本轮命令已完成；训练结果查看日志。
 
 **目的：** 补回之前无显式自车对齐的历史memory方案，检验历史描述符本身是否能提供收益。
 

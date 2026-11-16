@@ -504,7 +504,7 @@ def document(output):
                 row['status'] = '本轮时序几何回归通过'
         rows.append(row)
     with (output/'experiments.csv').open('w', newline='') as stream:
-        writer = csv.DictWriter(stream, fieldnames=list(rows[0])); writer.writeheader(); writer.writerows(rows)
+        writer = csv.DictWriter(stream, fieldnames=list(rows[0]), lineterminator='\n'); writer.writeheader(); writer.writerows(rows)
     (output/'experiments.json').write_text(json.dumps(list(registry.values()), ensure_ascii=False, indent=2)+'\n')
     text = [f'# RadarOcc主干投影修正后：从头训练安排表（{SERIES}）', '',
         '本表在原V/P/T安排表上更新，保留V00～V11、P01～P07、T00～T14编号；新增V12/V13/V14检查和T15无对齐memory对照。', '',
@@ -561,7 +561,7 @@ def document(output):
         '| 原始雷达NPZ、LiDAR occupancy GT、位姿、数据划分 | 保留 | 本轮不重新生成GT，不反号GT；仅新模型投影与物理坐标统一 |', '',
         'V01/V10及此前scene3方向框/候选64报告属于test场景历史诊断，不是必须重复的训练步骤，也不能再用该场景选择新参数。',
         'P01/P02沿用完整train/val的旧ranker协议，额外使用完整训练集bbox监督；occupancy训练本身为20%。这不是整个方法总共只用20%标签的协议。',
-        'power配对仍使用预设B门限（Y=4/5/3m，中心距离=4/6/8m）；V04只在train内选参。若改门限，须同步缓存和配置，不自动采用扫描最优值。', '',
+        'power配对自2026-11-16使用用户固定的C门限（Y=2/2/1.5m，中心距离=8/10/12m）。P05/P06须重建；Z1/Z2/Z3共享新缓存，Z0可选。没有自动采用扫描结果。', '',
         '## 模型之间具体比什么', '',
         '| 对照 | 回答的问题 |', '| --- | --- |',
         '| T00 ↔ T01 | 最基础的历史KNN融合能否超过修正后的单帧？ |',
