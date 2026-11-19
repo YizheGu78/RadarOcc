@@ -14,6 +14,9 @@ model = {'type': 'RadarOccP0Temporal',
                      'height_cell_size': 1.0,
                      'checkpoint_chunks': True,
                      'max_log_correction': 0.5,
+                     # multiplicative (baseline), additive, or hybrid.
+                     'correction_mode': 'multiplicative',
+                     'max_additive_correction': 0.5,
                      'kernel_size': 3}}
 data = {'train': {'current_only': False}, 'val': {'current_only': False}, 'test': {'current_only': False}}
 work_dir = 'work_dirs/geometry_v2/projection_fixed_20261112/rodnet_tdc'

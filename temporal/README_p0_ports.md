@@ -32,7 +32,7 @@ Z 为当前雷达坐标系中的 [-4,8)m、1m 一层，共12层；高度界限�
 真实观测的零值仍占观测权重，缺失 voxel 不参与均值。
 CenterFormer 的 softmax 还排除无效空间候选；多尺度池化也只平均有观测的 voxel。
 
-两种模块最终都在当前点位置采样潜在特征，然后用共有的零初始化输出层
+默认模式下，两种模块最终都在当前点位置采样潜在特征，然后用共有的零初始化输出层
 产生五通道有界相对校正：
 
 ```
@@ -105,6 +105,51 @@ TDC 把输入当固定间隔时间槽；无速度输入和额外时间编码。
 回退 mask 使用与 TDC 完全相同的历史采样偏移。
 
 ## 运行
+
+### RODNet TDC 特征更新消融（2026-11-16）
+
+使用当前修正配置 `temporal/experiments_v2/configs/rodnet_tdc.py`，通过
+`model.p0_temporal_cfg.correction_mode` 选择，无需另建配置文件：
+
+| 值 | 更新方式 |
+| --- | --- |
+| `multiplicative` | 默认值，保留原有计算；旧checkpoint结构兼容 |
+| `additive` | 在当前连续描述符的log1p空间加上带gate的历史修正 |
+| `hybrid` | 先执行原有乘法，再在log1p空间加上独立的带gate修正 |
+
+令L(x)=log1p(x)，s=0.5*tanh(scale_head(H))，a=b*tanh(add_head(H))，
+g=sigmoid(gate([L(x)/80,H]))，b=`max_additive_correction`（默认0.5）：
+
+- Additive：L(out)=L(x)+g*a。
+- Hybrid：先得到m=x*exp(s)，再令L(out)=L(m)+g*a。
+
+在现有归一化空间中，上式加性幅度为g*a/80；b不是归一化空间中的0.5。
+逆变换前限制指数范围并保证原正功率保持正值。以增量计算逆变换，确保零初始化时
+精确等于原输入，避免往返转换引入误差。零通道可得到正修正；负功率不接受。
+这是log1p域的加性消融，不能等同于原始功率尺度上无约束的加法；对大正功率，
+log1p加法与幅度缩放接近。它仍不增加空间Token，不保证一定提高occupancy精度。
+
+Additive复用原输出头；Hybrid增加独立输出头。新gate与修正头零初始化，初始gate为0.5，
+三种模式都以精确恒等输出开始。新gate/输出头不改变TDC及原有层的随机初始化。
+只更新五个连续通道，Doppler ID、坐标、点数保留。有效历史Mask与原TDC一致，
+无历史支持时精确回退。默认模式不增加参数，可继续加载原权重。
+新两组从头训练，不用乘法checkpoint初始化；Hybrid参数量略有增加，比较时应注明。
+
+```bash
+source use_radarocc5060.sh
+# 已训练的默认乘法组作为基线；以下两组分别从头训练。
+bash tools/dist_train.sh temporal/experiments_v2/configs/rodnet_tdc.py 1 --seed 42 \
+  --work-dir work_dirs/geometry_v2/projection_fixed_20261112/rodnet_tdc_additive \
+  --cfg-options model.p0_temporal_cfg.correction_mode=additive
+
+bash tools/dist_train.sh temporal/experiments_v2/configs/rodnet_tdc.py 1 --seed 42 \
+  --work-dir work_dirs/geometry_v2/projection_fixed_20261112/rodnet_tdc_hybrid \
+  --cfg-options model.p0_temporal_cfg.correction_mode=hybrid
+```
+
+保持20%数据、15轮、seed42、优化器、TDC和对齐不变。
+结果看各自目录的`*.log.json`、`best_SSC_mean*.pth`。验证时同样指定correction_mode，
+模型结构必须与checkpoint一致。未改变CenterFormer、KNN或其他时序方法的更新方式。
 
 从仓库根目录执行，两种方案输出到不同目录；不会启动或恢复旧 Z 实验。
 

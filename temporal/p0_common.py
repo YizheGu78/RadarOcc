@@ -111,6 +111,11 @@ class P0TemporalBase(nn.Module):
     def fuse(self, maps, masks, query, positions, times, valid):
         raise NotImplementedError
 
+    def correct_continuous(self, raw, mixed, support):
+        """Default adapter, unchanged for CenterFormer and legacy RODNet."""
+        correction = self.bound * self.output(mixed).tanh() * support[..., None]
+        return raw + raw * torch.expm1(correction)
+
     def forward(self, features, coords, poses=None, frame_offsets=None,
                 doppler=None, valid_mask=None, timestamps=None):
         if features.ndim != 4 or features.shape[-1] != 8 or coords.shape != features.shape[:-1]+(3,):
@@ -155,8 +160,7 @@ class P0TemporalBase(nn.Module):
             mixed, support, info = self.fuse(maps, masks, descriptors[:, -1], positions, times, vt)
             inside = ((positions >= 0) & (positions < 1)).all(-1)
             support = support & inside & vt[:, :-1].any(-1, keepdim=True)
-            correction = self.bound * self.output(mixed).tanh() * support[..., None]
-            continuous = raw[:, -1] + raw[:, -1] * torch.expm1(correction)
+            continuous = self.correct_continuous(raw[:, -1], mixed, support)
             result = torch.cat((continuous[..., :3], features[:, -1, :, 3:6].float(), continuous[..., 3:]), -1)
             self.diagnostics = dict(used_history=bool(support.any()),
                                     queries_with_history=int(support.sum()),

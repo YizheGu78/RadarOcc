@@ -267,6 +267,61 @@ class P0BoundaryTest(unittest.TestCase):
             evaluate, _ = self.run_model(model)
             torch.testing.assert_close(train, evaluate)
 
+    def test_rodnet_correction_modes_start_as_identity_and_keep_ids(self):
+        for mode in ('multiplicative', 'additive', 'hybrid'):
+            model = RODNetP0(bins_path=self.bins, channels=8, chunk_size=3,
+                            bev_bounds=(-2., -4., 10., 4.), cell_size=1., correction_mode=mode)
+            out, _ = self.run_model(model)
+            self.assertTrue(torch.equal(out, self.features[:, -1]))
+            out.sum().backward()
+            self.assertGreater(model.output.weight.grad.abs().sum(), 0)
+            if mode == 'hybrid':
+                self.assertGreater(model.add_output.weight.grad.abs().sum(), 0)
+
+    def test_rodnet_additive_can_fill_zero_and_masks_disable_it(self):
+        for mode in ('additive', 'hybrid'):
+            model = RODNetP0(bins_path=self.bins, channels=8, correction_mode=mode)
+            raw = torch.zeros(1, 2, 5)
+            head = model.add_output if mode == 'hybrid' else model.output
+            with torch.no_grad():
+                head.bias.fill_(1.)
+            result = model.correct_continuous(raw, torch.ones(1, 2, 8), torch.tensor([[True, False]]))
+            self.assertTrue((result[0, 0] > 0).all())
+            self.assertTrue(torch.equal(result[0, 1], raw[0, 1]))
+            result.sum().backward()
+            self.assertGreater(head.bias.grad.abs().sum(), 0)
+
+    def test_rodnet_new_modes_are_finite_and_receive_history_gradients(self):
+        for mode in ('additive', 'hybrid'):
+            model = RODNetP0(bins_path=self.bins, channels=8, chunk_size=3,
+                            bev_bounds=(-2., -4., 10., 4.), cell_size=1., correction_mode=mode)
+            with torch.no_grad():
+                model.output.weight.fill_(.1)
+                if mode == 'hybrid':
+                    model.add_output.weight.fill_(.1)
+            features = self.features.clone(); features[..., 7] = 1e34
+            out, _ = self.run_model(model, features)
+            self.assertTrue(torch.isfinite(out).all())
+            self.assertTrue((out[..., [0, 1, 2, 6, 7]] > 0).all())
+            self.assertTrue(torch.equal(out[..., 3:6], features[:, -1, :, 3:6]))
+            torch.log1p(out[..., [0, 1, 2, 6, 7]]).mean().backward()
+            self.assertGreater(model.tdc.conv_offset.weight.grad.abs().sum(), 0)
+            self.assertGreater(model.add_gate.weight.grad.abs().sum(), 0)
+            if mode == 'hybrid':
+                self.assertGreater(model.add_output.weight.grad.abs().sum(), 0)
+            self.assertTrue(all(p.grad is None or torch.isfinite(p.grad).all() for p in model.parameters()))
+            mask = self.mask.clone(); mask[:, :-1] = False
+            fallback, _ = self.run_model(model, features, mask=mask)
+            self.assertTrue(torch.equal(fallback, features[:, -1]))
+
+    def test_default_rodnet_has_no_new_parameters(self):
+        baseline = self.model(RODNetP0)
+        self.assertEqual(baseline.correction_mode, 'multiplicative')
+        self.assertFalse(hasattr(baseline, 'add_output'))
+        self.assertFalse(hasattr(baseline, 'add_gate'))
+        with self.assertRaises(ValueError):
+            RODNetP0(bins_path=self.bins, correction_mode='typo')
+
 
 if __name__ == '__main__':
     unittest.main()
