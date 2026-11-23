@@ -120,6 +120,69 @@ C缓存位于`data/geometry_v2/projection_fixed_20261112/box_pairs_c_20261116/`�
 结果位于`work_dirs/geometry_v2/projection_fixed_20261112/box_z1_c_20261116/`及z2/z3对应目录。
 仅更新配置与入口，不代表已完成长训练。旧结果保留。
 
+### Z3全量在线配对（不生成配对缓存）
+
+现有`BoxZTemporalDatasetV2`支持`box_pair_mode=online`。读取一个当前帧时，
+用已加载的当前帧和有效历史帧即时提取P97/MAD3.0的power区域，做自车对齐与
+C门限匹配（Y=2/2/1.5m，XY中心距离=8/10/12m），将配对直接送入Z3。
+历史GT不参与配对；occupancy训练仍使用当前帧GT。场景开头缺少的历史槽忽略。
+每次读取样本都重新计算，不读写manifest/配对NPZ，也不保留跨样本的配对缓存。
+训练与验证采用相同在线策略。原`cache`模式仍为默认值，旧命令可继续运行。
+
+```bash
+source use_radarocc5060.sh
+bash tools/dist_train.sh temporal/experiments_v2/configs/box_z3.py 1 \
+  --seed 42 \
+  --work-dir work_dirs/geometry_v2/projection_fixed_20261112/box_z3_c_full_online \
+  --cfg-options \
+  data.train.ann_file=data/annotations/kradar_dict_train_official_temporal_doppler8.pkl \
+  data.val.ann_file=data/annotations/kradar_dict_val_official_temporal_doppler8.pkl \
+  data.test.ann_file=data/annotations/kradar_dict_val_official_temporal_doppler8.pkl \
+  data.train.box_pair_mode=online \
+  data.val.box_pair_mode=online \
+  data.test.box_pair_mode=online \
+  model.box_z_cfg.diagnostic_path=work_dirs/geometry_v2/projection_fixed_20261112/box_z3_c_full_online/eval_diagnostics.jsonl
+```
+
+这条命令直接启动单卡、15轮、seed42的从头训练，无需P05/P06。
+配置中的旧`box_cache`路径在online模式被忽略，无需删除已有缓存。
+使用`dist_train.sh`覆盖在线参数；`run T09`的默认入口仍按缓存方案检查前置产物。
+在线提框增加CPU数据加载开销，实际速度取决于运行环境；本轮不据此承诺训练吞吐。
+
+### Z3全量按需缓存：首次生成，后续epoch复用
+
+设置`box_pair_mode=readwrite`后，读取当前帧时先检查它的配对文件：不存在则按上述
+online规则生成并原子写入，存在则直接读取。无需预先导出完整数据集，也无需在第二个
+epoch手动切换模式；中断后重新启动仍能复用已生成的条目，未完成的条目继续生成。
+第一轮验证同样按需生成独立的验证缓存。缓存只保存框、配对mask和逆变换；Z3可学习的
+高度缩放/偏移、特征采样和融合每次前向都重新计算，不会冻结为第一轮输出。
+
+```bash
+source use_radarocc5060.sh
+bash tools/dist_train.sh temporal/experiments_v2/configs/box_z3.py 1 \
+  --seed 42 \
+  --work-dir work_dirs/geometry_v2/projection_fixed_20261112/box_z3_c_full_readwrite \
+  --cfg-options \
+  data.train.ann_file=data/annotations/kradar_dict_train_official_temporal_doppler8.pkl \
+  data.val.ann_file=data/annotations/kradar_dict_val_official_temporal_doppler8.pkl \
+  data.test.ann_file=data/annotations/kradar_dict_val_official_temporal_doppler8.pkl \
+  data.train.box_pair_mode=readwrite \
+  data.val.box_pair_mode=readwrite \
+  data.test.box_pair_mode=readwrite \
+  data.train.box_cache=data/geometry_v2/projection_fixed_20261112/box_pairs_c_readwrite/train_full \
+  data.val.box_cache=data/geometry_v2/projection_fixed_20261112/box_pairs_c_readwrite/val_full \
+  data.test.box_cache=data/geometry_v2/projection_fixed_20261112/box_pairs_c_readwrite/val_full \
+  model.box_z_cfg.diagnostic_path=work_dirs/geometry_v2/projection_fixed_20261112/box_z3_c_full_readwrite/eval_diagnostics.jsonl
+```
+
+固定C门限：Y=2/2/1.5m，XY中心距离=8/10/12m；Z3、单卡、15轮、seed42、从头训练。
+不需要P05/P06。两种缓存格式必须使用不同目录，不能把旧离线manifest缓存放到此路径。
+`policy.json`锁定标注、角度表、提框/匹配代码、区域参数和门限；每帧NPZ另核对四帧源文件
+路径、大小、修改时间及有效历史mask。协议或输入变化时报错，应使用新缓存目录重新生成。
+源雷达NPZ应保持只读；这里的逐帧检查是文件元数据检查，不是每次读取都重算内容SHA256。
+多个worker/rank可同时使用同一目录，单条缓存原子替换，未写完的临时文件不会被当成有效结果。
+后续epoch仍需读取雷达数据并训练模型，跳过的只是提框和配对计算，不能承诺具体加速比例。
+
 第一轮建议9项主训练：T00/T01/T02/T03/T04/T07/T10/T11/T12。
 其余7项按研究问题补做，不要求把所有消融放进第一轮。
 

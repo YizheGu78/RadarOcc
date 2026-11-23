@@ -207,6 +207,127 @@ class PhysicalCoordinateTests(unittest.TestCase):
                     BoxZTemporalDatasetV2(path, box_bins_path=bins,
                         expected_y_gates=[2, 2, 1.5], expected_center_gates=[8, 10, 12])
 
+    def test_online_box_pairs_use_loaded_radar_and_ignore_missing_history(self):
+        from unittest.mock import patch
+        from temporal.experiments_v2.plugin import BoxZTemporalDatasetV2
+        from projects.occ_plugin.datasets.temporal_kradar_dataset import TemporalKRadarDataset
+        with tempfile.TemporaryDirectory() as directory:
+            bins = Path(directory)/'bins.npz'
+            np.savez(bins, range_m=np.arange(1., 176.), azimuth_rad=[-.1, 0., .1],
+                     elevation_rad=[-.1, .1])
+            infos = []
+            for order in range(4):
+                pose = np.eye(4); pose[0, 3] = .2*order
+                infos.append(dict(scene_id='11', order_in_scene=order,
+                                  ego_pose=pose, ego_pose_valid=True))
+            radar = dict(power_val=np.ones((8, 175*250)),
+                         azimuth_ind=np.zeros(175*250, int),
+                         elevation_ind=np.zeros(175*250, int))
+            payload = dict(temporal_sparse_radar=[radar]*4,
+                           temporal_valid_mask=np.ones(4, bool))
+            region = dict(id=0, accepted=True, center=np.array([10., 0., 0.]),
+                          box_size=np.array([6., 3., 3.]))
+            def initialize(instance, **kwargs):
+                instance.frame_nums = 4
+                instance.current_only = False
+                instance.data_infos = infos
+                instance.sequence_indices = [list(range(4))]
+            with patch.object(TemporalKRadarDataset, '__init__', initialize), \
+                 patch.object(TemporalKRadarDataset, '_attach_temporal_payload',
+                              lambda *args: dict(payload)):
+                data = BoxZTemporalDatasetV2(box_bins_path=bins, box_pair_mode='online',
+                    box_cache=Path(directory)/'nonexistent',
+                    expected_y_gates=[2, 2, 1.5], expected_center_gates=[8, 10, 12])
+                with patch('numpy.load', side_effect=AssertionError('Online pairing must not load cache or GT')), \
+                     patch('tools.temporal_vis.p1_reflection_regions.extract_regions',
+                           return_value={'regions': [region]}) as extract:
+                    result = data._attach_temporal_payload({}, 0)['box_pairs']
+                    self.assertEqual(extract.call_count, 4)
+                    self.assertTrue(result['matched'].all())
+                    np.testing.assert_allclose(result['history'][0, :, 0], [9.8, 9.6, 9.4])
+                    np.testing.assert_allclose(result['inverse'][:, 0, 3], [.2, .4, .6])
+                    data.sequence_indices = [[0, 0, 0, 0]]
+                    payload['temporal_valid_mask'] = np.array([False, False, False, True])
+                    extract.reset_mock()
+                    result = data._attach_temporal_payload({}, 0)['box_pairs']
+                    self.assertEqual(extract.call_count, 1)
+                    self.assertFalse(result['matched'].any())
+                    np.testing.assert_array_equal(result['inverse'], np.repeat(np.eye(4)[None], 3, 0))
+                self.assertIsNone(data.box_manifest)
+                self.assertEqual(list(Path(directory).iterdir()), [bins])
+
+    def test_readwrite_pairs_reuse_across_restarts_and_reject_stale_inputs(self):
+        from unittest.mock import patch
+        from temporal.experiments_v2.plugin import BoxZTemporalDatasetV2
+        from projects.occ_plugin.datasets.temporal_kradar_dataset import TemporalKRadarDataset
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            bins, ann, radar = directory/'bins.npz', directory/'ann.pkl', directory/'radar.npz'
+            np.savez(bins, range_m=np.arange(1., 176.), azimuth_rad=[-.1, .1],
+                     elevation_rad=[-.1, .1])
+            ann.write_bytes(b'annotation')
+            radar.write_bytes(b'radar')
+            infos = [dict(scene_id='11', order_in_scene=i, sparse_radar_path=str(radar))
+                     for i in range(5)]
+            def initialize(instance, **kwargs):
+                instance.frame_nums, instance.current_only = 4, False
+                instance.ann_file = str(ann)
+                instance.data_infos = infos
+                instance.sequence_indices = [list(range(4)), list(range(1, 5))]
+            payload = dict(temporal_valid_mask=np.ones(4, bool))
+            pairs = dict(current=np.ones((1, 6), np.float32),
+                         history=np.ones((1, 3, 6), np.float32),
+                         matched=np.ones((1, 3), bool), inverse=np.repeat(np.eye(4)[None], 3, 0))
+            options = dict(box_bins_path=bins, box_pair_mode='readwrite',
+                           box_cache=directory/'cache', expected_y_gates=[2, 2, 1.5],
+                           expected_center_gates=[8, 10, 12])
+            with patch.object(TemporalKRadarDataset, '__init__', initialize), \
+                 patch.object(TemporalKRadarDataset, '_attach_temporal_payload',
+                              lambda *args: dict(payload)):
+                data = BoxZTemporalDatasetV2(**options)
+                with patch.object(data, '_online_box_pairs', return_value=pairs) as compute:
+                    data._attach_temporal_payload({}, 0)
+                    data._attach_temporal_payload({}, 0)
+                    self.assertEqual(compute.call_count, 1)
+                restarted = BoxZTemporalDatasetV2(**options)
+                with patch.object(restarted, '_online_box_pairs', side_effect=AssertionError('cache miss')):
+                    actual = restarted._attach_temporal_payload({}, 0)['box_pairs']
+                    for name in pairs:
+                        np.testing.assert_array_equal(actual[name], pairs[name])
+                # A partially populated cache remains usable; a new frame is computed lazily.
+                empty = dict(current=np.empty((0, 6), np.float32),
+                             history=np.empty((0, 3, 6), np.float32),
+                             matched=np.empty((0, 3), bool), inverse=pairs['inverse'])
+                with patch.object(restarted, '_online_box_pairs', return_value=empty) as compute:
+                    restarted._attach_temporal_payload({}, 1)
+                    result = restarted._attach_temporal_payload({}, 1)['box_pairs']
+                    self.assertEqual(compute.call_count, 1)
+                    self.assertEqual(result['current'].shape, (0, 6))
+                with self.assertRaisesRegex(ValueError, 'policy mismatch'):
+                    BoxZTemporalDatasetV2(**dict(options, expected_center_gates=[4, 6, 8]))
+                radar.write_bytes(b'changed radar')
+                with self.assertRaisesRegex(ValueError, 'input/history changed'):
+                    restarted._attach_temporal_payload({}, 0)
+                ann.write_bytes(b'new annotation')
+                with self.assertRaisesRegex(ValueError, 'policy mismatch'):
+                    BoxZTemporalDatasetV2(**options)
+                self.assertFalse(list((directory/'cache').glob('.pending-*')))
+
+    def test_online_box_pairs_reject_invalid_protocol(self):
+        from unittest.mock import patch
+        from temporal.experiments_v2.plugin import BoxZTemporalDatasetV2
+        from projects.occ_plugin.datasets.temporal_kradar_dataset import TemporalKRadarDataset
+        def initialize(instance, **kwargs):
+            instance.frame_nums = 4
+            instance.current_only = False
+        with self.assertRaisesRegex(ValueError, 'box_pair_mode'):
+            BoxZTemporalDatasetV2(box_pair_mode='typo')
+        with patch.object(TemporalKRadarDataset, '__init__', initialize):
+            with self.assertRaisesRegex(ValueError, 'positive gates'):
+                BoxZTemporalDatasetV2(box_pair_mode='online', expected_y_gates=[2, -2, 1.5])
+            with self.assertRaisesRegex(ValueError, 'box_cache'):
+                BoxZTemporalDatasetV2(box_pair_mode='cache')
+
     def test_old_projection_checkpoints_rejected_including_single_frame(self):
         from tools.temporal.run_geometry_v2 import check_checkpoint
         from temporal.experiments_v2.registry import PROJECTION_VERSION
